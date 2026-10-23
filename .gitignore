@@ -11,6 +11,7 @@ vendor/
 uploads/lost/*
 !uploads/lost/.htaccess
 private_uploads/found/*
+!private_uploads/found/.gitkeep
 
 # Logs and generated test output
 *.log
