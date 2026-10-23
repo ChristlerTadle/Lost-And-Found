@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><%= title %> - BukSU Lost &amp; Found</title>
+<link rel="stylesheet" href="/assets/app.css?v=<%= assetVersion %>">
+</head>
+<body>
+<div class="app">
+	<aside class="sidebar" id="sidebar">
+		<a class="sidebar-brand" href="/index.php?page=dashboard"><span class="brand-mark"><%- icon('shield', 22) %></span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a>
+		<nav class="sidebar-nav"><p class="sidebar-label">Navigation</p>
+			<% const visibleNavKeys = user.role_name === 'admin'
+				? ['admin-dashboard', 'admin-settings', 'items', 'notifications', 'profile']
+				: user.role_name === 'staff'
+					? ['staff-dashboard', 'staff-records', 'staff-lost-reports', 'staff-found-items', 'staff-stored-items', 'staff-returned-items', 'staff-claims', 'notifications', 'profile']
+					: ['dashboard', 'report', 'report-found', 'items', 'reports', 'claims', 'notifications', 'profile'];
+			nav.filter((item) => visibleNavKeys.includes(item.key)).forEach((item) => { %><a class="sidebar-link<%= active === item.key ? ' active' : '' %>" href="<%= item.href %>"><%- icon(item.icon) %><%= item.label %><% if (item.key === 'notifications' && unreadNotifications) { %><span class="notification-count"><%= unreadNotifications > 99 ? '99+' : unreadNotifications %></span><% } %></a><% }); %>
+		</nav>
+		<div class="sidebar-user"><div class="avatar-sm"><%= (user.full_name || '?').charAt(0).toUpperCase() %></div><div><p class="sidebar-user-name"><%= user.full_name %></p><p class="sidebar-user-role"><%= roleLabel(user.role_name) %></p></div></div>
+	</aside>
+	<div class="overlay" id="overlay"></div>
+	<div class="main-col">
+		<header class="app-topbar"><button class="menu-btn" id="menu-btn" type="button" aria-label="Open menu"><%- icon('menu', 20) %></button><p class="topbar-title">Bukidnon State University — Supreme Student Council</p><a class="topbar-user" href="/index.php?page=profile"><span class="avatar-sm"><%= (user.full_name || '?').charAt(0).toUpperCase() %></span><span class="meta"><span class="name" style="display:block"><%= user.full_name %></span><span class="role"><%= roleLabel(user.role_name) %></span></span></a><a class="signout" href="/index.php?logout=1">Sign Out</a></header>
+		<main class="content"><%- body %></main>
+	</div>
+</div>
+<script src="/assets/app.js?v=<%= assetVersion %>" defer></script>
+</body>
+</html>

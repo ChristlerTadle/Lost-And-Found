@@ -1,0 +1,30 @@
+<main class="container staff-workspace">
+	<header class="page-header">
+		<div>
+			<h1><%= itemType === 'lost' ? 'Lost Item Reports' : itemType === 'stored' ? 'Stored Items' : 'Found Items' %></h1>
+			<p><%= itemType === 'lost' ? 'Review lost item reports and their private identifying information.' : itemType === 'stored' ? 'Track found items that are currently in staff custody.' : 'Check found-item reports against the physical items submitted.' %></p>
+		</div>
+		<a class="button button-secondary" href="/index.php?page=staff-dashboard">Staff dashboard</a>
+	</header>
+	<section class="card staff-record-list">
+		<% if (!items.length) { %>
+			<p class="empty"><%= itemType === 'stored' ? 'There are no items currently in staff custody.' : `There are no active ${itemType} reports to review.` %></p>
+		<% } %>
+		<% items.forEach((item) => { %>
+			<article class="report staff-record">
+				<% if (item.image_path) { %><img class="item-image" src="<%= item.item_type === 'found' ? `/index.php?page=staff-found-image&id=${encodeURIComponent(item.id)}` : `/${item.image_path}` %>" alt="<%= item.item_name %> image"><% } %>
+				<div class="staff-record-info">
+					<h2><%= item.item_name %></h2>
+					<p><%= item.category %> · <%= item.location %> · <%= formatDate(item.date_lost, 'M j, Y') %></p>
+					<p>Reported by <%= item.reported_by %></p>
+					<% if (itemType === 'stored') { %>
+						<span class="badge badge-active">Stored in staff custody</span>
+					<% } else if (itemType === 'found') { %>
+						<span class="badge badge-<%= item.physical_verification_status === 'verified' ? 'active' : 'pending' %>"><%= item.physical_verification_status === 'verified' ? 'Physically verified' : 'Needs physical verification' %></span>
+					<% } %>
+				</div>
+				<a class="button button-outline" href="/index.php?page=staff-item&amp;id=<%= encodeURIComponent(item.id) %>">Review report</a>
+			</article>
+		<% }); %>
+	</section>
+</main>

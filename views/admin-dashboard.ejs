@@ -1,0 +1,38 @@
+<main class="container admin-dashboard">
+	<header class="page-header">
+		<div><h1>Admin Dashboard</h1><p>Manage staff access for active user accounts.</p></div>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<section class="card admin-access-notice">
+		<h2>Assign staff access</h2>
+		<p>Only existing active user accounts can be assigned staff access. The account holder must sign out and back in before staff access takes effect. Admin roles cannot be assigned here.</p>
+	</section>
+	<section class="card admin-accounts">
+		<div class="admin-accounts-heading"><h2>Active accounts</h2><span><%= accounts.length %> accounts</span></div>
+		<% if (!accounts.length) { %><p class="empty">There are no active user or staff accounts to manage.</p><% } else { %>
+			<div class="table-wrap">
+				<table>
+					<thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col" class="right">Access</th></tr></thead>
+					<tbody>
+						<% accounts.forEach((account) => { %>
+							<tr>
+								<td class="item-name"><%= account.full_name %></td>
+								<td><%= account.email %></td>
+								<td><span class="badge badge-<%= account.role_name === 'staff' ? 'active' : 'pending' %>"><%= account.role_name === 'staff' ? 'Staff' : 'User' %></span></td>
+								<td class="right">
+									<% if (account.role_name === 'user') { %>
+										<form method="post" action="/index.php?page=admin-dashboard">
+											<input type="hidden" name="action" value="assign_staff">
+											<input type="hidden" name="user_id" value="<%= account.id %>">
+											<button class="button button-outline" type="submit">Assign staff</button>
+										</form>
+									<% } else { %><span class="admin-assigned-label">Staff access assigned</span><% } %>
+								</td>
+							</tr>
+						<% }); %>
+					</tbody>
+				</table>
+			</div>
+		<% } %>
+	</section>
+</main>

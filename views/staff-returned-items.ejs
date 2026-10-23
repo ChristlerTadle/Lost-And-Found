@@ -1,0 +1,53 @@
+<main class="container staff-workspace">
+	<header class="page-header browse-header">
+		<div><h1>Returned Items</h1><p><%= items.length %> items found</p></div>
+		<a class="button button-secondary" href="/index.php?page=staff-dashboard">Staff dashboard</a>
+	</header>
+	<form method="get" action="/index.php" class="browse-filter-form">
+		<input type="hidden" name="page" value="staff-returned-items">
+		<div class="card browse-toolbar">
+			<label class="browse-search" for="returned-search">
+				<svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"></circle><path d="m13 13 4 4"></path></svg>
+				<input id="returned-search" name="query" value="<%= filters.query %>" placeholder="Search items, claimant, or location..." aria-label="Search returned items">
+			</label>
+			<select class="select" id="returned-category" name="category" aria-label="Filter by category">
+				<option value="">All Categories</option>
+				<% categories.forEach((category) => { %><option value="<%= category %>" <%= filters.category === category ? 'selected' : '' %>><%= category %></option><% }); %>
+			</select>
+			<button class="button button-primary browse-search-submit" type="submit">Search</button>
+		</div>
+		<nav class="browse-tabs" aria-label="Returned item records">
+			<span class="browse-tab active">All Returned <span>(<%= items.length %>)</span></span>
+		</nav>
+		<details class="browse-more-filters" <%= filters.date_from || filters.date_to ? 'open' : '' %>>
+			<summary>More filters</summary>
+			<div class="browse-more-grid">
+				<div class="form-field"><label for="returned-from">Returned from</label><input class="input" id="returned-from" name="date_from" type="date" value="<%= filters.date_from %>"></div>
+				<div class="form-field"><label for="returned-to">Returned through</label><input class="input" id="returned-to" name="date_to" type="date" value="<%= filters.date_to %>"></div>
+				<div class="browse-more-actions">
+					<a class="button button-secondary" href="/index.php?page=staff-returned-items">Clear filters</a>
+					<button class="button button-primary" type="submit">Apply filters</button>
+				</div>
+			</div>
+		</details>
+	</form>
+	<section class="card staff-record-list">
+		<div class="staff-list-heading"><h2>Return history</h2><span><%= items.length %> records</span></div>
+		<% if (!items.length) { %><p class="empty">No returned items match these filters.</p><% } %>
+		<% items.forEach((item) => { %>
+			<article class="report staff-record">
+				<div class="staff-record-info">
+					<h2><%= item.item_name %></h2>
+					<p><%= item.category %> · <%= item.location %></p>
+					<p>Returned to <strong><%= item.claimant ? item.claimant.full_name : 'Account unavailable' %></strong><% if (item.claimant && item.claimant.email) { %> · <%= item.claimant.email %><% } %></p>
+					<p>Reported by <%= item.reported_by %> · Returned <%= formatDate(item.returned_at || item.updated_at, 'M j, Y') %></p>
+				</div>
+				<span class="badge badge-active">Returned to owner</span>
+				<div class="staff-claim-actions">
+					<a class="button button-outline" href="/index.php?page=staff-item&amp;id=<%= encodeURIComponent(item.id) %>">View item</a>
+					<% if (item.claimed_claim_id) { %><a class="button button-outline" href="/index.php?page=staff-claim&amp;id=<%= encodeURIComponent(item.claimed_claim_id) %>">View claim</a><% } %>
+				</div>
+			</article>
+		<% }); %>
+	</section>
+</main>

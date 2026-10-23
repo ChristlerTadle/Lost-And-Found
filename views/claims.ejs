@@ -1,0 +1,38 @@
+<main class="container">
+    <% const notificationHighlightTarget = typeof highlightTarget === 'string' ? highlightTarget : ''; %>
+    <header class="page-header">
+        <div>
+            <h1>My Claims</h1>
+            <p>Follow the status of your item return requests.</p>
+        </div>
+    </header>
+    <% if (error) { %>
+        <div class="alert alert-error">
+            <%= error %>
+        </div>
+    <% } %>
+    <section class="card">
+        <div class="report-list">
+            <% if (!claims.length) { %>
+                <p class="empty">You have not submitted any claims.</p>
+            <% } %>
+            <% claims.forEach((claim) => { %>
+                <article class="report<%= notificationHighlightTarget === `claim-${claim.id}` ? ' notification-highlight' : '' %>" id="claim-<%= claim.id %>">
+                    <div>
+                        <h3><%= claim.item_name %></h3>
+                        <p><%= claim.category %> · <%= claim.location %></p>
+                        <p><%= claim.claim_details %></p>
+                        <% if (claim.status === 'approved' && claim.item_status === 'claimed') { %>
+                            <p class="claim-outcome">Your claim was approved. Please collect your item from Lost and Found staff. Staff will mark it as returned after you receive it.</p>
+                        <% } else if (claim.status === 'approved' && claim.item_status === 'returned') { %>
+                            <p class="claim-outcome">Returned to you by staff.</p>
+                        <% } %>
+                    </div>
+                    <span class="badge badge-<%= claim.status %>">
+                        <%= claim.status[0].toUpperCase() + claim.status.slice(1) %>
+                    </span>
+                </article>
+            <% }); %>
+        </div>
+    </section>
+</main>

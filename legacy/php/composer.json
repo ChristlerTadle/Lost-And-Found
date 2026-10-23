@@ -1,0 +1,8 @@
+{
+  "require": {
+    "mongodb/mongodb": "^1.21.4"
+  },
+  "config": {
+    "sort-packages": true
+  }
+}

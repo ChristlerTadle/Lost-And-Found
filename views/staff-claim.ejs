@@ -1,0 +1,70 @@
+<main class="container staff-workspace">
+	<% const notificationHighlightTarget = typeof highlightTarget === 'string' ? highlightTarget : ''; %>
+	<header class="page-header">
+		<div><h1>Verify Item Ownership</h1><p>Compare the claimant&apos;s information with the private details on the item report.</p></div>
+		<a class="button button-secondary" href="/index.php?page=staff-claims">Back to claims</a>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<section class="card staff-review-card<%= notificationHighlightTarget === `claim-${claim.id}` ? ' notification-highlight' : '' %>" id="claim-<%= claim.id %>">
+		<div class="staff-review-heading">
+			<div><span class="type-banner found">Found item claim</span><h2><%= claim.item_name %></h2></div>
+			<span class="badge badge-<%= claim.status %>"><%= claim.status[0].toUpperCase() + claim.status.slice(1) %></span>
+		</div>
+		<% if (claim.item.status === 'returned') { %><div class="alert alert-success">This item was marked as returned<% if (claim.item.returned_at) { %> on <%= formatDate(claim.item.returned_at, 'M j, Y') %><% } %>.</div><% } %>
+		<div class="staff-claim-comparison">
+			<section class="staff-private-details">
+				<h3>Claimant account information</h3>
+				<% if (claim.claimant) { %>
+					<dl class="staff-item-facts">
+						<div><dt>Name</dt><dd><%= claim.claimant.full_name %></dd></div>
+						<div><dt>Email</dt><dd><%= claim.claimant.email %></dd></div>
+						<div><dt>Student ID</dt><dd><%= claim.claimant.student_id || 'Not provided' %></dd></div>
+						<div><dt>Phone</dt><dd><%= claim.claimant.phone || 'Not provided' %></dd></div>
+					</dl>
+				<% } else { %><p>The claimant account is unavailable.</p><% } %>
+				<h3>Claimant&apos;s ownership details</h3>
+				<p><%= claim.claim_details %></p>
+			</section>
+			<section class="staff-private-details">
+				<h3>Item report information</h3>
+				<dl class="staff-item-facts">
+					<div><dt>Category</dt><dd><%= claim.item.category %></dd></div>
+					<div><dt>Location</dt><dd><%= claim.item.location %></dd></div>
+					<div><dt>Date</dt><dd><%= formatDate(claim.item.date_lost, 'F j, Y') %></dd></div>
+					<div><dt>Reported by</dt><dd><%= claim.item.reported_by || 'Unknown' %></dd></div>
+				</dl>
+				<% if (claim.item.image_path) { %><img class="staff-review-image" src="/index.php?page=staff-found-image&amp;id=<%= encodeURIComponent(claim.item.id) %>" alt="<%= claim.item_name %> image"><% } %>
+				<h3>Private identifying details from report</h3>
+				<p><%= claim.item.identifying_details %></p>
+			</section>
+		</div>
+		<% if (claim.status === 'pending') { %>
+			<div class="staff-verification">
+				<p>Compare the claimant&apos;s statements with the private report details and the physical item before deciding.</p>
+				<div class="staff-decision-actions">
+					<form method="post" action="/index.php?page=staff-claim">
+						<input type="hidden" name="action" value="review_claim">
+						<input type="hidden" name="claim_id" value="<%= claim.id %>">
+						<input type="hidden" name="decision" value="approved">
+						<button class="button button-primary" type="submit">Approve ownership</button>
+					</form>
+					<form method="post" action="/index.php?page=staff-claim">
+						<input type="hidden" name="action" value="review_claim">
+						<input type="hidden" name="claim_id" value="<%= claim.id %>">
+						<input type="hidden" name="decision" value="rejected">
+						<button class="button button-danger" type="submit">Reject claim</button>
+					</form>
+				</div>
+			</div>
+		<% } else if (claim.status === 'approved' && claim.item.status === 'claimed') { %>
+			<div class="staff-verification">
+				<p>Confirm that the verified owner has received the item before recording its return.</p>
+				<form method="post" action="/index.php?page=staff-claim">
+					<input type="hidden" name="action" value="mark_item_returned">
+					<input type="hidden" name="claim_id" value="<%= claim.id %>">
+					<button class="button button-primary" type="submit">Mark item as returned</button>
+				</form>
+			</div>
+		<% } %>
+	</section>
+</main>

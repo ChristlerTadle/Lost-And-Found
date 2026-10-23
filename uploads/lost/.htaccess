@@ -1,0 +1,2 @@
+Options -ExecCGI
+AddType text/plain .php .phtml .phar

@@ -1,0 +1,64 @@
+<main class="container staff-workspace">
+	<header class="page-header">
+		<div>
+			<h1>Review <%= item.item_type %> report</h1>
+			<p>Compare the submitted information with the report and, for found items, the physical item.</p>
+		</div>
+		<a class="button button-secondary" href="/index.php?page=staff-<%= item.item_type === 'lost' ? 'lost-reports' : 'found-items' %>">Back to reports</a>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<section class="card staff-review-card">
+		<div class="staff-review-heading">
+			<div><span class="type-banner <%= item.item_type %>"><%= item.item_type === 'lost' ? 'Lost item report' : 'Found item report' %></span><h2><%= item.item_name %></h2></div>
+			<span class="badge badge-<%= item.status === 'stored' || item.status === 'returned' ? 'active' : item.status === 'claimed' ? 'claimed' : 'pending' %>"><%= item.status === 'returned' ? 'Returned to owner' : item.status[0].toUpperCase() + item.status.slice(1) %></span>
+		</div>
+		<% if (item.image_path) { %><img class="staff-review-image" src="<%= item.item_type === 'found' ? `/index.php?page=staff-found-image&id=${encodeURIComponent(item.id)}` : `/${item.image_path}` %>" alt="<%= item.item_name %> image"><% } %>
+		<dl class="staff-item-facts">
+			<div><dt>Category</dt><dd><%= item.category %></dd></div>
+			<div><dt>Location</dt><dd><%= item.location %></dd></div>
+			<div><dt>Date</dt><dd><%= formatDate(item.date_lost, 'F j, Y') %></dd></div>
+			<div><dt>Reported by</dt><dd><%= item.reported_by %></dd></div>
+			<div><dt>Reporter email</dt><dd><%= item.reporter_email || 'Not provided' %></dd></div>
+			<div><dt>Report ID</dt><dd><%= item.id %></dd></div>
+		</dl>
+		<div class="staff-private-details">
+			<section><h3>Description</h3><p><%= item.description %></p></section>
+			<section><h3>Private identifying details</h3><p><%= item.identifying_details %></p></section>
+		</div>
+		<% if (item.status === item.item_type || (item.item_type === 'found' && item.status === 'stored') || (item.item_type === 'lost' && item.status === 'found')) { %>
+			<div class="staff-verification staff-status-editor">
+				<div class="staff-status-copy">
+					<h3>Update item status</h3>
+					<p><%= item.item_type === 'found' ? 'Found items must be stored in staff custody before users can submit claims.' : 'Update the report when the item is found.' %></p>
+				</div>
+				<form method="post" action="/index.php?page=staff-item" class="staff-status-form">
+					<input type="hidden" name="action" value="update_item_status">
+					<input type="hidden" name="item_id" value="<%= item.id %>">
+					<div class="staff-status-field">
+						<label for="item-status">New status</label>
+						<select id="item-status" name="status" class="select" required>
+							<% const allowedStatuses = item.item_type === 'found' ? ['found', 'stored'] : ['lost', 'found']; %>
+							<% allowedStatuses.forEach((status) => { const statusLabel = status === 'stored' ? 'Stored in staff custody' : item.item_type === 'found' ? 'Found - not yet stored' : status === 'lost' ? 'Reported lost' : 'Found by staff'; %><option value="<%= status %>" <%= item.status === status ? 'selected' : '' %>><%= statusLabel %></option><% }); %>
+						</select>
+					</div>
+					<button class="button button-primary" type="submit">Save status</button>
+				</form>
+			</div>
+		<% } %>
+		<% if (item.item_type === 'found' && ['found', 'stored'].includes(item.status)) { %>
+			<div class="staff-verification">
+				<% if (item.physical_verification_status === 'verified') { %>
+					<p>This report was marked physically verified<% if (item.physical_verified_at) { %> on <%= formatDate(item.physical_verified_at, 'M j, Y') %><% } %>.</p>
+					<span class="staff-verification-complete"><%- icon('check', 17) %> Verification complete</span>
+				<% } else { %>
+					<p>After checking the submitted information against the physical item, mark this report verified.</p>
+					<form method="post" action="/index.php?page=staff-item">
+						<input type="hidden" name="action" value="verify_found_item">
+						<input type="hidden" name="item_id" value="<%= item.id %>">
+						<button class="button button-primary" type="submit">Mark physically verified</button>
+					</form>
+				<% } %>
+			</div>
+		<% } %>
+	</section>
+</main>

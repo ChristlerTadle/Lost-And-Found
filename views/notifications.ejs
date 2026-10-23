@@ -1,0 +1,33 @@
+<main class="container notifications-page">
+	<header class="page-header">
+		<div><h1>Notifications</h1><p>Updates about your reports, claims, and item status.</p></div>
+		<% if (unreadNotifications) { %>
+			<form method="post" action="/index.php?page=notifications">
+				<input type="hidden" name="action" value="mark_all_read">
+				<button class="button button-secondary" type="submit">Mark all as read</button>
+			</form>
+		<% } %>
+	</header>
+	<section class="card notification-list">
+		<% if (!notifications.length) { %>
+			<div class="empty">You&apos;re all caught up. New report and claim updates will appear here.</div>
+		<% } %>
+		<% notifications.forEach((notification) => { %>
+			<article class="notification<%= notification.read_at ? '' : ' unread' %>">
+				<span class="notification-icon <%= notification.type %>"><%- icon(notification.type === 'claim' ? 'clipboard' : notification.type === 'status' ? 'check' : 'file', 17) %></span>
+				<div class="notification-content">
+					<div class="notification-heading"><h2><%= notification.title %></h2><time datetime="<%= notification.created_at %>"><%= formatDate(notification.created_at, 'M j, Y') %></time></div>
+					<p><%= notification.message %></p>
+					<a class="link-sm" href="<%= notification.href %>">View update</a>
+				</div>
+				<% if (!notification.read_at) { %>
+					<form method="post" action="/index.php?page=notifications">
+						<input type="hidden" name="action" value="mark_read">
+						<input type="hidden" name="notification_id" value="<%= notification.id %>">
+						<button class="notification-read" type="submit">Mark read</button>
+					</form>
+				<% } %>
+			</article>
+		<% }); %>
+	</section>
+</main>

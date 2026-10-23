@@ -1,0 +1,82 @@
+<main class="container staff-workspace">
+	<header class="page-header browse-header">
+		<div><h1>View Records</h1><p><%= items.length + claims.length %> records found</p></div>
+		<a class="button button-secondary" href="/index.php?page=staff-dashboard">Staff dashboard</a>
+	</header>
+	<form method="get" action="/index.php" class="browse-filter-form">
+		<input type="hidden" name="page" value="staff-records">
+		<div class="card browse-toolbar">
+			<label class="browse-search" for="records-search">
+				<%- icon('search', 17) %>
+				<input id="records-search" name="query" value="<%= filters.query %>" placeholder="Search items, reports, claimants...">
+			</label>
+			<select class="select" id="record-item-type" name="item_type" aria-label="Filter by item type">
+				<option value="">All Types</option>
+				<option value="lost" <%= filters.item_type === 'lost' ? 'selected' : '' %>>Lost</option>
+				<option value="found" <%= filters.item_type === 'found' ? 'selected' : '' %>>Found</option>
+			</select>
+			<select class="select" id="record-category" name="category" aria-label="Filter by category">
+				<option value="">All Categories</option>
+				<% categories.forEach((category) => { %><option value="<%= category %>" <%= filters.category === category ? 'selected' : '' %>><%= category %></option><% }); %>
+			</select>
+			<select class="select" id="record-status" name="status" aria-label="Filter by status">
+				<option value="">All Statuses</option>
+				<% for (const status of ['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled', 'pending', 'approved', 'rejected']) { %><option value="<%= status %>" <%= filters.status === status ? 'selected' : '' %>><%= status === 'returned' ? 'Returned to owner' : status[0].toUpperCase() + status.slice(1) %></option><% } %>
+			</select>
+			<button class="button button-primary browse-search-submit" type="submit">Search</button>
+		</div>
+		<nav class="browse-tabs" aria-label="Filter records by record type">
+			<button class="browse-tab <%= filters.record_type === 'all' ? 'active' : '' %>" type="submit" name="record_type" value="all">All Records</button>
+			<button class="browse-tab <%= filters.record_type === 'items' ? 'active' : '' %>" type="submit" name="record_type" value="items">Item Reports</button>
+			<button class="browse-tab <%= filters.record_type === 'claims' ? 'active' : '' %>" type="submit" name="record_type" value="claims">Claims</button>
+		</nav>
+		<details class="browse-more-filters">
+			<summary>More filters</summary>
+			<div class="browse-more-grid">
+				<div class="form-field"><label for="records-date-from">From date</label><input class="input" id="records-date-from" name="date_from" type="date" value="<%= filters.date_from %>"></div>
+				<div class="form-field"><label for="records-date-to">To date</label><input class="input" id="records-date-to" name="date_to" type="date" value="<%= filters.date_to %>"></div>
+				<div class="browse-more-actions">
+					<button class="button button-primary" type="submit">Apply filters</button>
+					<a class="button button-secondary" href="/index.php?page=staff-records">Clear filters</a>
+				</div>
+			</div>
+		</details>
+	</form>
+	<% if (filters.record_type !== 'claims') { %>
+		<section class="card staff-record-list">
+			<div class="staff-list-heading"><h2>Item and report records</h2><span><%= items.length %> records</span></div>
+			<% if (!items.length) { %><p class="empty">No item records match these filters.</p><% } %>
+			<% items.forEach((item) => { %>
+				<article class="report staff-record">
+					<div class="staff-record-info">
+						<h2><%= item.item_name %></h2>
+						<p><%= item.item_type[0].toUpperCase() + item.item_type.slice(1) %> report · <%= item.category %> · <%= item.location %></p>
+						<p>Reported by <%= item.reported_by %> · <%= formatDate(item.created_at, 'M j, Y') %></p>
+					</div>
+					<span class="badge badge-<%= item.status === 'returned' || item.status === 'stored' ? 'active' : item.status === 'claimed' ? 'claimed' : item.status === 'cancelled' ? 'cancelled' : 'pending' %>"><%= item.status === 'returned' ? 'Returned to owner' : item.status[0].toUpperCase() + item.status.slice(1) %></span>
+					<a class="button button-outline" href="/index.php?page=staff-item&amp;id=<%= encodeURIComponent(item.id) %>">View item</a>
+				</article>
+			<% }); %>
+		</section>
+	<% } %>
+	<% if (filters.record_type !== 'items') { %>
+		<section class="card staff-record-list staff-claims-list">
+			<div class="staff-list-heading"><h2>Ownership claim records</h2><span><%= claims.length %> claims</span></div>
+			<% if (!claims.length) { %><p class="empty">No ownership claims match these filters.</p><% } %>
+			<% claims.forEach((claim) => { %>
+				<article class="staff-claim-row">
+					<span class="staff-claim-icon"><%- icon('clipboard', 19) %></span>
+					<div class="staff-record-info">
+						<h2><%= claim.item_name %></h2>
+						<p class="staff-claimant">Claimant <strong><%= claim.claimant ? claim.claimant.full_name : 'Account unavailable' %></strong></p>
+						<p class="staff-claim-date">Submitted <%= formatDate(claim.created_at, 'M j, Y') %></p>
+					</div>
+					<div class="staff-claim-actions">
+						<span class="badge badge-<%= claim.status %>"><%= claim.status[0].toUpperCase() + claim.status.slice(1) %></span>
+						<a class="button button-outline" href="/index.php?page=staff-claim&amp;id=<%= encodeURIComponent(claim.id) %>">View claim</a>
+					</div>
+				</article>
+			<% }); %>
+		</section>
+	<% } %>
+</main>

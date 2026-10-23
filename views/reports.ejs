@@ -1,0 +1,25 @@
+<main class="page">
+	<% const notificationHighlightTarget = typeof highlightTarget === 'string' ? highlightTarget : ''; %>
+	<div class="topbar">
+		<div><h1>My Reports</h1><p>Track, edit, or cancel your submitted reports.</p></div>
+		<div class="nav-actions"><a class="button button-primary" href="/index.php?page=report">Report lost item</a><a class="button button-outline" href="/index.php?page=report&amp;kind=found">Report found item</a></div>
+	</div>
+	<% if (foundReportSubmitted) { %>
+		<section class="alert alert-success found-report-next-step" role="status">
+			<h2>Next step: Bring the item to Lost and Found staff</h2>
+			<p>Please bring the physical item to staff so they can verify it and record it as stored. Users can submit ownership claims after staff has stored the item.</p>
+		</section>
+	<% } %>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<section class="card"><div class="report-list">
+		<% if (!items.length) { %><p class="muted">No reports submitted yet.</p><% } %>
+		<% items.forEach((item) => { %>
+			<article class="report<%= notificationHighlightTarget === `item-${item.id}` ? ' notification-highlight' : '' %>" id="item-<%= item.id %>">
+				<% if (item.item_type === 'lost' && item.image_path) { %><img class="item-image" src="/<%= item.image_path %>" alt="<%= item.item_name %> image"><% } %>
+				<div><h3><%= item.item_name %></h3><p><%= item.item_type[0].toUpperCase() + item.item_type.slice(1) %> · <%= item.category %> · <%= item.location %> · <%= item.date_lost %></p><div class="report-statuses"><span class="badge badge-<%= ['returned', 'stored'].includes(item.status) ? 'active' : item.status === 'cancelled' ? 'cancelled' : item.status === 'claimed' ? 'claimed' : item.item_type %>"><%= item.status === 'returned' ? 'Returned to owner' : item.status[0].toUpperCase() + item.status.slice(1) %></span><% if (item.item_type === 'found' && item.status !== 'cancelled') { %><span class="badge <%= item.physical_verification_status === 'verified' ? 'badge-verified' : 'badge-not-verified' %>"><%= item.physical_verification_status === 'verified' ? 'Verified by staff' : 'Not verified by staff' %></span><% } %></div></div>
+				<div class="nav-actions"><% if (item.status === item.item_type) { %><a class="button button-outline" href="/index.php?page=edit-report&amp;id=<%= item.id %>">Edit</a><form method="post" action="/index.php?page=reports"><input type="hidden" name="action" value="cancel_report"><input type="hidden" name="id" value="<%= item.id %>"><button class="button button-secondary" type="submit">Cancel report</button></form><% } %></div>
+			</article>
+		<% }); %>
+	</div></section>
+</main>

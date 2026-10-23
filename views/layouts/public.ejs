@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title><%= title %> - BukSU Lost &amp; Found</title><link rel="stylesheet" href="/assets/app.css?v=<%= assetVersion %>"></head>
+<body><% if (typeof hidePublicHeader === 'undefined' || !hidePublicHeader) { %><header class="site-header"><a class="brand" href="/"><span class="brand-mark"><%- icon('shield', 22) %></span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a><a class="btn btn-outline" href="/index.php?page=login">Sign In</a></header><% } %><%- body %><script src="/assets/app.js?v=<%= assetVersion %>" defer></script></body>
+</html>

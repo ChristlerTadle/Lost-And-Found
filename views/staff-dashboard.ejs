@@ -1,0 +1,39 @@
+<main class="container staff-dashboard">
+	<header class="page-header">
+		<div><h1>Staff Dashboard</h1><p>Welcome back, <%= user.full_name %>. Here's your overview.</p></div>
+	</header>
+	<div class="dashboard-stats">
+		<div class="card dashboard-stat"><span class="dashboard-stat-icon claim"><%- icon('file', 17) %></span><span><span class="stat-label">Active reports</span><strong><%= lostCount + foundCount %></strong><small><%= lostCount %> lost · <%= foundCount %> found</small></span></div>
+		<div class="card dashboard-stat"><span class="dashboard-stat-icon found"><%- icon('clipboard', 17) %></span><span><span class="stat-label">Pending claims</span><strong><%= pendingClaimCount %></strong><small>Awaiting ownership review</small></span></div>
+		<div class="card dashboard-stat"><span class="dashboard-stat-icon found"><%- icon('check', 17) %></span><span><span class="stat-label">Stored items</span><strong><%= storedCount %></strong><small>In staff custody</small></span></div>
+		<div class="card dashboard-stat"><span class="dashboard-stat-icon claim"><%- icon('check', 17) %></span><span><span class="stat-label">Returned items</span><strong><%= returnedCount %></strong><small>Received by owners</small></span></div>
+	</div>
+	<div class="dashboard-grid">
+		<section class="card dashboard-panel">
+			<div class="dashboard-panel-head"><h3>Recent activity</h3><a class="link-sm" href="/index.php?page=staff-records">View records</a></div>
+			<div class="dashboard-activity">
+				<% if (!activity.length) { %><p class="empty">No staff activity yet.</p><% } %>
+				<% activity.forEach((entry) => { %>
+					<div class="dashboard-activity-row">
+						<span class="dashboard-activity-icon <%= entry.type %>"><%- icon(entry.type === 'claim' ? 'clipboard' : (entry.type === 'found' ? 'check' : 'alert'), 15) %></span>
+						<div><strong><%= entry.label %></strong><span><%= entry.name %></span></div>
+						<time datetime="<%= entry.date %>"><%= formatDate(entry.date) %></time>
+					</div>
+				<% }); %>
+			</div>
+		</section>
+		<aside class="dashboard-side">
+			<section class="card dashboard-panel">
+				<div class="dashboard-panel-head"><h3>Quick actions</h3></div>
+				<div class="quick-actions">
+					<a class="quick" href="/index.php?page=staff-lost-reports"><%- icon('file', 16) %>Review lost reports</a>
+					<a class="quick" href="/index.php?page=staff-found-items"><%- icon('check', 16) %>Verify found items</a>
+					<a class="quick" href="/index.php?page=staff-stored-items"><%- icon('clipboard', 16) %>Manage stored items</a>
+					<a class="quick" href="/index.php?page=staff-returned-items"><%- icon('check', 16) %>View returned items</a>
+					<a class="quick" href="/index.php?page=staff-claims"><%- icon('clipboard', 16) %>Review ownership claims</a>
+					<a class="quick" href="/index.php?page=notifications"><%- icon('bell', 16) %>View notifications<% if (unreadNotifications) { %><span class="notification-count"><%= unreadNotifications > 99 ? '99+' : unreadNotifications %></span><% } %></a>
+				</div>
+			</section>
+		</aside>
+	</div>
+</main>

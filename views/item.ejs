@@ -1,0 +1,74 @@
+<main class="container item-page">
+    <a class="back-link" href="/index.php?page=items">&larr; Back to Browse</a>
+    <div class="item-page-grid">
+        <section class="card item-detail-card">
+            <div class="item-detail-top">
+                <span class="type-banner <%= isFound ? 'found' : 'lost' %>">
+                    <%= isFound ? 'Found item report' : 'Lost item report' %>
+                </span><% if (item.status === 'claimed') { %>
+                    <span class="badge badge-claimed">Claimed</span><% } %>
+                </div><h1><%= item.item_name %></h1>
+                <div class="item-detail-meta">
+                    <div>
+                        <small>Category</small>
+                        <span><%= item.category %>
+                        </span>
+                    </div>
+                    <div>
+                        <small>Location</small>
+                        <span><%= item.location %>
+                        </span>
+                    </div>
+                    <div>
+                        <small>Date</small>
+                        <span><%= formatDate(item.date_lost, 'F j, Y') %></span>
+                    </div>
+                </div><% if (isFound) { %><div class="public-verification-status">
+                    <div>
+                        <strong>Staff verification</strong>
+                        <p><%= item.physical_verification_status === 'verified' ? 'Staff has checked this found item against the physical item.' : 'This found item has not yet been verified by staff.' %>
+                        </p>
+                    </div>
+                    <span class="badge <%= item.physical_verification_status === 'verified' ? 'badge-verified' : 'badge-not-verified' %>"><%= item.physical_verification_status === 'verified' ? 'Verified' : 'Not verified' %>
+                    </span>
+                </div>
+                <% } %>
+                <div class="item-detail-description">
+                    <h2>Description</h2>
+                    <% if (item.item_type === 'lost' && item.image_path) { %><img class="item-detail-image" src="/<%= item.image_path %>" alt="<%= item.item_name %> image">
+                    <% } %>
+                    <p><%= item.description %></p>
+                </div><% if (item.user_claim_status === 'approved') { %>
+                    <div class="alert alert-success">Your claim was approved. Please collect your item from Lost and Found staff. Staff will mark it as returned after you receive it.</div>
+                    <% } else if (item.user_claim_status === 'rejected') { %>
+                        <div class="alert alert-error">Your claim was not approved. The item is no longer available for claims.</div><% } else if (item.status === 'claimed') { %><div class="item-detail-actions">
+                            <p class="claimed-notice">This item has been claimed by its owner and is no longer available.
+                            </p>
+                        </div><% } else if (canClaim) { %>
+                            <div class="item-detail-actions">
+                                <a class="button button-primary" href="/index.php?page=claim&amp;item=<%= item.id %>">Claim item</a>
+                            </div><% } else if (item.user_claim_status === 'pending') { %>
+                                <div class="alert alert-success">Claim submitted. Staff will review your ownership details.</div>
+                                <% } else if (item.user_id === user.id) { %>
+                                    <div class="alert alert-success">This is your report.</div>
+                                    <% } else if (isFound && item.status === 'found') { %>
+                                        <div class="item-detail-actions">
+                                            <p class="claimed-notice">Claims open after staff stores this item.</p>
+                                        </div>
+                                    <% } %></section><aside class="item-page-side">
+                                        <section class="card item-info-card">
+                                            <h2>Report Info</h2><dl><dt>Reported by</dt>
+                                                <dd><%= item.reported_by %></dd>
+                                                <dt>Report ID</dt>
+                                                <dd><%= item.id %></dd>
+                                                <dt>Total claims</dt>
+                                                <dd><%= item.total_claims %></dd>
+                                            </dl>
+                                        </section>
+                                        <section class="card item-notice">
+                                            <h2>Notice</h2>
+                                            <p>Only the written description is shown publicly. Identifying details are kept private so staff can verify ownership and reduce false claims.</p>
+                                        </section>
+                                    </aside>
+                                </div>
+                            </main>

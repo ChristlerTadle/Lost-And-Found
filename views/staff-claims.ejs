@@ -1,0 +1,28 @@
+<main class="container staff-workspace">
+	<% const notificationHighlightTarget = typeof highlightTarget === 'string' ? highlightTarget : ''; %>
+	<header class="page-header">
+		<div><h1>Ownership Claims</h1><p>Review claimants&apos; identifying details before deciding who owns a found item.</p></div>
+		<a class="button button-secondary" href="/index.php?page=staff-dashboard">Staff dashboard</a>
+	</header>
+	<section class="card staff-record-list staff-claims-list">
+		<div class="staff-list-heading">
+			<h2>Submitted claims</h2>
+			<span><%= claims.length %> <%= claims.length === 1 ? 'claim' : 'claims' %></span>
+		</div>
+		<% if (!claims.length) { %><div class="staff-claims-empty"><span class="staff-empty-icon"><%- icon('clipboard', 22) %></span><h3>No claims yet</h3><p>Ownership claims will appear here when someone requests a found item.</p></div><% } %>
+		<% claims.forEach((claim) => { %>
+			<article class="staff-claim-row<%= notificationHighlightTarget === `claim-${claim.id}` ? ' notification-highlight' : '' %>" id="claim-<%= claim.id %>">
+				<span class="staff-claim-icon"><%- icon('clipboard', 19) %></span>
+				<div class="staff-record-info">
+					<h2><%= claim.item_name %></h2>
+					<p class="staff-claimant">Claimant <strong><%= claim.claimant ? claim.claimant.full_name : 'Account unavailable' %></strong></p>
+					<p class="staff-claim-date">Submitted <%= formatDate(claim.created_at, 'M j, Y') %></p>
+				</div>
+				<div class="staff-claim-actions">
+					<span class="badge badge-<%= claim.status %>"><%= claim.status[0].toUpperCase() + claim.status.slice(1) %></span>
+					<a class="button button-outline" href="/index.php?page=staff-claim&amp;id=<%= encodeURIComponent(claim.id) %>"><%= claim.status === 'pending' ? 'Verify ownership' : 'View decision' %></a>
+				</div>
+			</article>
+		<% }); %>
+	</section>
+</main>

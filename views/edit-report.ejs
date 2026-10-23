@@ -1,0 +1,31 @@
+<main class="container edit-report-page">
+	<a class="back-link" href="/index.php?page=reports">&larr; Back to My Reports</a>
+	<header class="page-header">
+		<div><h1>Edit report</h1><p>Update the details for your <%= editItem.item_type %> item report.</p></div>
+		<span class="badge badge-<%= editItem.item_type %>"><%= editItem.item_type[0].toUpperCase() + editItem.item_type.slice(1) %></span>
+	</header>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<section class="card edit-report-card">
+		<form method="post" action="/index.php?page=edit-report&amp;id=<%= editItem.id %>" class="form-grid" enctype="multipart/form-data">
+			<div class="edit-report-fields">
+				<div class="form-field"><label for="edit-item-name">Item name</label><input class="input" id="edit-item-name" name="item_name" value="<%= editItem.item_name %>" required></div>
+				<div class="form-field"><label for="edit-category">Category</label><select class="select" id="edit-category" name="category" required><% if (!categories.includes(editItem.category)) { %><option value="<%= editItem.category %>" selected><%= editItem.category %></option><% } %><% categories.forEach((category) => { %><option value="<%= category %>" <%= editItem.category === category ? 'selected' : '' %>><%= category %></option><% }); %></select></div>
+				<div class="form-field"><label for="edit-location">Location</label><input class="input" id="edit-location" name="location" value="<%= editItem.location %>" required></div>
+				<div class="form-field"><label for="edit-date">Date</label><input class="input" id="edit-date" name="date_lost" type="date" max="<%= today %>" value="<%= editItem.date_lost %>" required></div>
+				<div class="form-field"><label for="edit-description">Description</label><textarea class="textarea" id="edit-description" name="description" required><%= editItem.description %></textarea></div>
+				<div class="form-field"><label for="edit-identifying-details">Identifying details</label><textarea class="textarea" id="edit-identifying-details" name="identifying_details" required><%= editItem.identifying_details %></textarea></div>
+				<% if (editItem.item_type === 'lost') { %>
+					<div class="field edit-report-image-field">
+						<label for="edit-image">Item image <span class="hint">Optional · JPG, PNG, or WEBP up to 5 MB</span></label>
+						<% if (editItem.image_path) { %><img class="item-image" src="/<%= editItem.image_path %>" alt="Current <%= editItem.item_name %> image"><% } %>
+						<input class="input" id="edit-image" name="image" type="file" accept="image/jpeg,image/png,image/webp">
+					</div>
+				<% } %>
+			</div>
+			<div class="form-actions">
+				<a class="button button-secondary" href="/index.php?page=reports">Cancel</a>
+				<button class="button button-primary" type="submit">Save changes</button>
+			</div>
+		</form>
+	</section>
+</main>

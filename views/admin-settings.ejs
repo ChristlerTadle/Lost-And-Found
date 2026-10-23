@@ -1,0 +1,19 @@
+<main class="container admin-settings">
+	<header class="page-header">
+		<div><h1>Settings</h1><p>Manage optional sign-in integrations for the system.</p></div>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<section class="card integration-setting">
+		<div class="integration-setting-copy">
+			<div class="integration-setting-heading"><h2>Google sign-in</h2><span class="badge <%= googleAuth.active ? 'badge-active' : 'badge-cancelled' %>"><%= googleAuth.active ? 'Enabled' : 'Disabled' %></span></div>
+			<p>Allow users to sign in or create an account using a verified Google account.</p>
+			<p class="integration-config-status"><%= googleAuth.configured ? 'Google OAuth credentials are configured on the server.' : 'Google OAuth credentials are not configured on the server.' %></p>
+		</div>
+		<form method="post" action="/index.php?page=admin-settings">
+			<input type="hidden" name="action" value="<%= googleAuth.enabled ? 'disable_google_auth' : 'enable_google_auth' %>">
+			<button class="button <%= googleAuth.enabled ? 'button-outline' : 'button-primary' %>" type="submit" <%= !googleAuth.configured && !googleAuth.enabled ? 'disabled' : '' %>><%= googleAuth.enabled ? 'Disable Google sign-in' : 'Enable Google sign-in' %></button>
+		</form>
+	</section>
+	<p class="integration-settings-note">OAuth client credentials are kept in the server environment and are not shown here. Configure <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> before enabling this integration.</p>
+</main>

@@ -1,0 +1,30 @@
+<main class="container container-md">
+    <header class="page-header">
+        <div>
+            <h1>Submit Item Claim</h1>
+            <p>Provide unique details so staff can verify your ownership.</p>
+        </div>
+    </header>
+    <% if (error) { %>
+        <div class="alert alert-error">
+            <%= error %>
+        </div>
+    <% } %>
+    <% if (item) { %>
+        <section class="card card-pad-lg">
+            <h3><%= item.item_name %></h3>
+            <p class="muted"><%= item.category %> · <%= item.location %> · <%= item.date_lost %></p>
+            <form method="post" action="/index.php?page=claim&amp;item=<%= item.id %>" class="form-grid" style="margin-top:20px">
+                <input type="hidden" name="item_id" value="<%= item.id %>">
+                <div class="field">
+                    <label for="claim_details">Ownership details</label>
+                    <textarea class="textarea" id="claim_details" name="claim_details" rows="7" required placeholder="Describe marks, contents, serial numbers, or other private details."></textarea>
+                </div>
+                <div class="form-actions end">
+                    <a class="button button-secondary" href="/index.php?page=items">Back</a>
+                    <button class="button button-primary" type="submit">Submit claim</button>
+                </div>
+            </form>
+        </section>
+    <% } %>
+</main>

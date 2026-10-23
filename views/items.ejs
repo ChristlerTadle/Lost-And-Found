@@ -1,0 +1,70 @@
+<main class="container browse-page">
+	<header class="page-header browse-header"><div><h1>Browse Lost &amp; Found Items</h1><p><%= counts.all %> items found</p></div><div class="head-actions"><a class="btn btn-primary" href="/index.php?page=report&amp;kind=found">Report found item</a></div></header>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<form method="get" action="/index.php" class="browse-filter-form">
+		<input type="hidden" name="page" value="items">
+		<div class="card browse-toolbar">
+			<label class="browse-search" for="query">
+				<svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"></circle><path d="m13 13 4 4"></path></svg>
+				<input id="query" name="query" value="<%= filters.query || '' %>" placeholder="Search items by name, description..." aria-label="Search items">
+			</label>
+			<select class="select" id="item_type" name="item_type" aria-label="Filter by type">
+				<option value="">All Types</option>
+				<option value="lost" <%= filters.item_type === 'lost' ? 'selected' : '' %>>Lost</option>
+				<option value="found" <%= filters.item_type === 'found' ? 'selected' : '' %>>Found</option>
+			</select>
+			<select class="select" id="category" name="category" aria-label="Filter by category">
+				<option value="">All Categories</option>
+				<% categories.forEach((category) => { %><option value="<%= category %>" <%= filters.category === category ? 'selected' : '' %>><%= category %></option><% }); %>
+			</select>
+			<button class="btn btn-primary browse-search-submit" type="submit">Search</button>
+		</div>
+		<nav class="browse-tabs" aria-label="Filter items by type or status">
+			<button class="browse-tab <%= !filters.item_type && !storedOnly ? 'active' : '' %>" type="submit" name="type_tab" value="">All Items <span>(<%= counts.all %>)</span></button>
+			<button class="browse-tab <%= filters.item_type === 'lost' && !storedOnly ? 'active' : '' %>" type="submit" name="type_tab" value="lost">Lost <span>(<%= counts.lost %>)</span></button>
+			<button class="browse-tab <%= filters.item_type === 'found' && !storedOnly ? 'active' : '' %>" type="submit" name="type_tab" value="found">Found <span>(<%= counts.found %>)</span></button>
+			<button class="browse-tab <%= storedOnly ? 'active' : '' %>" type="submit" name="status_tab" value="stored">Stored <span>(<%= counts.stored %>)</span></button>
+		</nav>
+		<details class="browse-more-filters" <%= filters.location || filters.date_from || filters.date_to ? 'open' : '' %>>
+			<summary>More filters</summary>
+			<div class="browse-more-grid">
+				<div class="field"><label for="location">Location</label><input class="input" id="location" name="location" value="<%= filters.location || '' %>"></div>
+				<div class="field"><label for="date_from">Date from</label><input class="input" id="date_from" name="date_from" type="date" value="<%= filters.date_from || '' %>"></div>
+				<div class="field"><label for="date_to">Date to</label><input class="input" id="date_to" name="date_to" type="date" value="<%= filters.date_to || '' %>"></div>
+				<div class="browse-more-actions"><a class="button button-secondary" href="/index.php?page=items">Clear all</a><button class="button button-primary" type="submit">Apply filters</button></div>
+			</div>
+		</details>
+	</form>
+	<section class="browse-grid">
+		<% if (!items.length) { %>
+			<div class="card empty browse-empty">No matching items found.</div>
+			<% } %><% items.forEach((item) => { const isFound = item.item_type === 'found'; %>
+			<article class="card browse-card">
+				<div class="browse-card-top">
+					<span class="browse-type <%= isFound ? 'found' : 'lost' %>">
+						<%= isFound ? 'Found' : 'Lost' %>
+					</span><% if (isFound) { %>
+						<% if (item.status === 'stored') { %><span class="badge badge-active">Stored</span><% } %>
+						<span class="badge <%= item.physical_verification_status === 'verified' ? 'badge-verified' : 'badge-not-verified' %>"><%= item.physical_verification_status === 'verified' ? 'Verified by staff' : 'Not verified by staff' %>
+						</span><% } %></div><% if (item.item_type === 'lost' && item.image_path) { %>
+							<img class="browse-card-image" src="/<%= item.image_path %>" alt="<%= item.item_name %> image">
+							<% } %><h2><%= item.item_name %>
+							</h2>
+							<p class="browse-description"><%= item.description %>
+							</p>
+							<div class="browse-meta">
+								<span><%= item.category %>
+								</span>
+								<span><%= item.location %>
+								</span>
+								<span><%= formatDate(item.date_lost, 'M j, Y') %>
+								</span>
+							</div>
+							<div class="browse-card-footer">
+								<span>By <%= item.reported_by %>
+								</span>
+								<a class="button button-outline" href="/index.php?page=item&amp;id=<%= item.id %>">View details</a>
+							</div>
+						</article><% }); %>
+					</section>
+</main>
