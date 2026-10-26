@@ -72,6 +72,185 @@ function createItemService(database, notificationService) {
       }));
     },
 
+    async findAdminItems(filters = {}) {
+      const documents = await items.find({}).sort({ created_at: -1 }).toArray();
+      const records = await Promise.all(documents.map(async (document) => {
+        const item = normalizeItem(document);
+        const reporter = await users.findOne({ _id: item.user_id }, {
+          projection: { full_name: 1 },
+        });
+        item.reported_by = reporter?.full_name || 'Unknown';
+        return item;
+      }));
+      const query = String(filters.query || '').trim().toLocaleLowerCase();
+      const itemType = ['lost', 'found'].includes(filters.item_type) ? filters.item_type : '';
+      const status = String(filters.status || '');
+      const category = String(filters.category || '');
+      const dateFrom = isDate(String(filters.date_from || '')) ? String(filters.date_from) : '';
+      const dateTo = isDate(String(filters.date_to || '')) ? String(filters.date_to) : '';
+      return records.filter((item) => {
+        const recordDate = String(item.created_at || '').slice(0, 10);
+        const matchesQuery = !query || [
+          item.item_name, item.description, item.category, item.location, item.reported_by,
+        ].some((value) => String(value || '').toLocaleLowerCase().includes(query));
+        return matchesQuery
+          && (!itemType || item.item_type === itemType)
+          && (!status || item.status === status)
+          && (!category || item.category === category)
+          && (!dateFrom || recordDate >= dateFrom)
+          && (!dateTo || recordDate <= dateTo);
+      });
+    },
+
+    async findInventoryReport() {
+      const documents = await items.find({ item_type: 'found', status: 'stored' })
+        .sort({ category: 1, item_name: 1 }).toArray();
+      return Promise.all(documents.map(async (document) => {
+        const item = normalizeItem(document);
+        const reporter = await users.findOne({ _id: item.user_id }, {
+          projection: { full_name: 1 },
+        });
+        item.reported_by = reporter?.full_name || 'Unknown';
+        return item;
+      }));
+    },
+
+    async findAdminClaims(filters = {}) {
+      const documents = await claims.find({}).sort({ created_at: -1 }).toArray();
+      const records = await this.enrichExistingStaffClaims(documents);
+      const query = String(filters.query || '').trim().toLocaleLowerCase();
+      const status = ['pending', 'approved', 'rejected'].includes(filters.status) ? filters.status : '';
+      return records.filter((claim) => (
+        (!status || claim.status === status)
+        && (!query || [
+          claim.item_name,
+          claim.claimant?.full_name,
+          claim.claimant?.email,
+          claim.claim_details,
+          claim.item.category,
+          claim.item.location,
+        ].some((value) => String(value || '').toLocaleLowerCase().includes(query)))
+      ));
+    },
+
+    async getAdminDashboardSummary() {
+      const [
+        totalItems,
+        lostItems,
+        foundItems,
+        pendingClaims,
+        totalClaims,
+        returnedItems,
+        storedItems,
+        lostActive,
+        foundUnverified,
+        foundVerified,
+        claimedItems,
+        categories,
+        recentItems,
+        recentClaims,
+      ] = await Promise.all([
+        items.countDocuments({}),
+        items.countDocuments({ item_type: 'lost' }),
+        items.countDocuments({ item_type: 'found' }),
+        claims.countDocuments({ status: 'pending' }),
+        claims.countDocuments({}),
+        items.countDocuments({ item_type: 'found', status: 'returned' }),
+        items.countDocuments({ item_type: 'found', status: 'stored' }),
+        items.countDocuments({ item_type: 'lost', status: { $in: ['lost', 'found'] } }),
+        items.countDocuments({
+          item_type: 'found',
+          status: { $in: ['found', 'stored'] },
+          physical_verification_status: { $ne: 'verified' },
+        }),
+        items.countDocuments({
+          item_type: 'found',
+          status: { $in: ['found', 'stored'] },
+          physical_verification_status: 'verified',
+        }),
+        items.countDocuments({ item_type: 'found', status: 'claimed' }),
+        items.aggregate([
+          { $group: { _id: '$category', count: { $sum: 1 } } },
+          { $sort: { count: -1, _id: 1 } },
+        ]).toArray(),
+        items.find({}, {
+          projection: {
+            item_type: 1, item_name: 1, status: 1, created_at: 1, updated_at: 1,
+            physical_verification_status: 1, physical_verified_at: 1,
+          },
+        }).sort({ updated_at: -1, created_at: -1 }).limit(8).toArray(),
+        claims.find({}, {
+          projection: { item_id: 1, user_id: 1, status: 1, created_at: 1, updated_at: 1, reviewed_at: 1 },
+        }).sort({ updated_at: -1, created_at: -1 }).limit(8).toArray(),
+      ]);
+
+      const activity = [];
+      for (const document of recentItems) {
+        const item = normalizeItem(document);
+        const createdAt = item.created_at;
+        activity.push({
+          type: item.item_type,
+          label: `${capitalize(item.item_type)} report submitted`,
+          name: item.item_name,
+          detail: 'Item report',
+          date: createdAt,
+        });
+        if (item.physical_verified_at) {
+          activity.push({
+            type: 'found',
+            label: 'Found item verified',
+            name: item.item_name,
+            detail: 'Physical verification',
+            date: item.physical_verified_at,
+          });
+        } else if (item.updated_at && item.updated_at !== createdAt && item.status !== item.item_type) {
+          activity.push({
+            type: item.item_type,
+            label: item.status === 'stored' ? 'Found item stored'
+              : item.status === 'claimed' ? 'Found item claimed'
+                : item.status === 'returned' ? 'Item returned'
+                  : `${capitalize(item.item_type)} item updated`,
+            name: item.item_name,
+            detail: 'Item status',
+            date: item.updated_at,
+          });
+        }
+      }
+      for (const claim of recentClaims) {
+        const item = await items.findOne({ _id: claim.item_id }, { projection: { item_name: 1 } });
+        activity.push({
+          type: 'claim',
+          label: claim.status === 'pending' ? 'Claim submitted' : `Claim ${claim.status}`,
+          name: item?.item_name || 'Item record unavailable',
+          detail: 'Ownership claim',
+          date: claim.reviewed_at || claim.created_at,
+        });
+      }
+
+      return {
+        totalItems,
+        lostItems,
+        foundItems,
+        pendingClaims,
+        totalClaims,
+        returnedItems,
+        storedItems,
+        statusCounts: {
+          lostActive,
+          foundUnverified,
+          foundVerified,
+          stored: storedItems,
+          claimed: claimedItems,
+          returned: returnedItems,
+        },
+        categoryCounts: categories.map(({ _id, count }) => ({ category: _id || 'Uncategorized', count })),
+        activity: activity
+          .filter((entry) => entry.date)
+          .sort((left, right) => String(right.date).localeCompare(String(left.date)))
+          .slice(0, 8),
+      };
+    },
+
     async findStaffRecords(filters = {}) {
       const [itemDocuments, claimDocuments] = await Promise.all([
         items.find({}).sort({ created_at: -1 }).toArray(),
@@ -85,7 +264,7 @@ function createItemService(database, notificationService) {
         item.reported_by = reporter?.full_name || 'Unknown';
         return item;
       }));
-      const claimRecords = await Promise.all(claimDocuments.map((document) => this.enrichStaffClaim(document)));
+      const claimRecords = await this.enrichExistingStaffClaims(claimDocuments);
       const query = String(filters.query || '').trim().toLocaleLowerCase();
       const recordType = ['items', 'claims'].includes(filters.record_type) ? filters.record_type : 'all';
       const itemType = ['lost', 'found'].includes(filters.item_type) ? filters.item_type : '';
@@ -165,6 +344,68 @@ function createItemService(database, notificationService) {
       return item;
     },
 
+    async findAdminItem(itemId) {
+      const document = await items.findOne({ _id: String(itemId) });
+      if (!document) {
+        const error = new Error('Item record was not found.');
+        error.status = 404;
+        throw error;
+      }
+      const item = normalizeItem(document);
+      const reporter = await users.findOne({ _id: item.user_id }, {
+        projection: { full_name: 1 },
+      });
+      item.reported_by = reporter?.full_name || 'Unknown';
+      return item;
+    },
+
+    async updateAdminItem(itemId, input) {
+      const existing = await items.findOne({ _id: String(itemId) });
+      if (!existing) {
+        const error = new Error('Item record was not found.');
+        error.status = 404;
+        throw error;
+      }
+
+      let data;
+      try {
+        data = validateReport({ ...input, item_type: existing.item_type });
+      } catch (error) {
+        error.status = 400;
+        throw error;
+      }
+      delete data.item_type;
+
+      const now = new Date().toISOString();
+      const update = {
+        $set: {
+          ...data,
+          updated_at: now,
+        },
+      };
+      if (existing.item_type === 'found' && existing.physical_verification_status === 'verified') {
+        update.$set.physical_verification_status = 'pending';
+        update.$unset = { physical_verified_by: '', physical_verified_at: '' };
+      }
+      const result = await items.updateOne(
+        { _id: String(itemId), updated_at: existing.updated_at },
+        update,
+      );
+      if (!result.matchedCount) {
+        const error = new Error('The item changed before your update. Reload the record and try again.');
+        error.status = 409;
+        throw error;
+      }
+
+      await notificationService.create(String(existing.user_id), {
+        type: 'report',
+        title: 'Item report updated by an administrator',
+        message: `An administrator corrected the details for "${data.item_name}".`,
+        href: `/index.php?page=reports&highlight=item-${encodeURIComponent(String(itemId))}`,
+      });
+      return this.findAdminItem(itemId);
+    },
+
     async updateItemStatus(itemId, staffId, status) {
       const document = await items.findOne({ _id: itemId });
       if (!document) throw new Error('Item record was not found.');
@@ -215,7 +456,7 @@ function createItemService(database, notificationService) {
 
     async findStaffClaims() {
       const documents = await claims.find({}).sort({ created_at: -1 }).toArray();
-      return Promise.all(documents.map((document) => this.enrichStaffClaim(document)));
+      return this.enrichExistingStaffClaims(documents);
     },
 
     async findStaffClaim(claimId) {
@@ -352,9 +593,9 @@ function createItemService(database, notificationService) {
       return this.findStaffClaim(claimId);
     },
 
-    async enrichStaffClaim(document) {
+    async enrichStaffClaim(document, knownItemDocument = null) {
       const [itemDocument, claimant] = await Promise.all([
-        items.findOne({ _id: document.item_id }),
+        knownItemDocument || items.findOne({ _id: document.item_id }),
         users.findOne({ _id: document.user_id }, {
           projection: { full_name: 1, email: 1, student_id: 1, phone: 1 },
         }),
@@ -374,6 +615,18 @@ function createItemService(database, notificationService) {
           ...documentToRecord(claimant),
         } : null,
       };
+    },
+
+    async enrichExistingStaffClaims(documents) {
+      const records = await Promise.all(documents.map(async (document) => {
+        const itemDocument = await items.findOne({ _id: document.item_id });
+        if (!itemDocument) {
+          console.warn(`Skipping claim ${document._id} because item ${document.item_id} was not found.`);
+          return null;
+        }
+        return this.enrichStaffClaim(document, itemDocument);
+      }));
+      return records.filter(Boolean);
     },
 
     async update(userId, itemId, input, imagePath = null) {
@@ -611,6 +864,10 @@ function escapeRegex(value) {
 
 function isDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function capitalize(value) {
+  return value ? value[0].toLocaleUpperCase() + value.slice(1) : value;
 }
 
 function localToday() {

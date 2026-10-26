@@ -260,6 +260,8 @@ async function testNotificationTargetHighlightStyle() {
   assert.equal(stylesheet.includes('.report:target, .report.notification-highlight {'), true);
   assert.equal(stylesheet.includes('border-radius: 8px;'), true);
   assert.equal(stylesheet.includes('@media (prefers-reduced-motion: reduce)'), true);
+  assert.equal(stylesheet.includes('box-shadow: 0 0 0 3px #1a5c2e55'), false);
+  assert.equal(stylesheet.includes('box-shadow: 0 0 0 3px #1a5c2e44'), false);
 }
 
 async function testNotificationLinks() {

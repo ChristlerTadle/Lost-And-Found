@@ -40,7 +40,7 @@ async function run() {
     });
 
     assert.equal(response.status, 302);
-    assert.equal(response.headers.get('location'), '/index.php?page=admin-dashboard&updated=1');
+    assert.equal(response.headers.get('location'), '/index.php?page=admin-users&updated=staff');
     assert.deepEqual(assignedUsers, ['user-1']);
     assert.equal(createdNotifications.length, 1);
     assert.equal(createdNotifications[0].userId, 'user-1');

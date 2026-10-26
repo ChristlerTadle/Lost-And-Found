@@ -1,0 +1,26 @@
+<main class="container edit-report-page admin-edit-item-page">
+	<a class="back-link" href="/index.php?page=admin-items">&larr; Back to All Items</a>
+	<header class="page-header">
+		<div><h1>Edit Item Record</h1><p>Correct item details reported by <%= editItem.reported_by || 'the account holder' %>.</p></div>
+		<span class="badge badge-<%= editItem.item_type %>"><%= editItem.item_type[0].toUpperCase() + editItem.item_type.slice(1) %></span>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<div class="tip admin-edit-item-notice">Editing the record does not change its owner, item type, or workflow status. If verified found-item details are changed, staff verification will need to be repeated.</div>
+	<section class="card edit-report-card">
+		<form method="post" action="/index.php?page=admin-edit-item&amp;id=<%= encodeURIComponent(editItem.id) %>" class="form-grid">
+			<div class="edit-report-fields">
+				<div class="form-field"><label for="admin-edit-item-name">Item name</label><input class="input" id="admin-edit-item-name" name="item_name" value="<%= formValues.item_name || '' %>" required></div>
+				<div class="form-field"><label for="admin-edit-item-category">Category</label><select class="select" id="admin-edit-item-category" name="category" required><% if (!formValues.category) { %><option value="" disabled selected>Select a category</option><% } else if (!categories.includes(formValues.category)) { %><option value="<%= formValues.category %>" selected><%= formValues.category %></option><% } %><% categories.forEach((category) => { %><option value="<%= category %>" <%= formValues.category === category ? 'selected' : '' %>><%= category %></option><% }); %></select></div>
+				<div class="form-field"><label for="admin-edit-item-location">Location</label><input class="input" id="admin-edit-item-location" name="location" value="<%= formValues.location || '' %>" required></div>
+				<div class="form-field"><label for="admin-edit-item-date">Date <%= editItem.item_type === 'found' ? 'found' : 'lost' %></label><input class="input" id="admin-edit-item-date" name="date_lost" type="date" max="<%= today %>" value="<%= formValues.date_lost || '' %>" required></div>
+				<div class="form-field"><label for="admin-edit-item-description">Description</label><textarea class="textarea" id="admin-edit-item-description" name="description" required><%= formValues.description || '' %></textarea></div>
+				<div class="form-field"><label for="admin-edit-item-identifying-details">Private identifying details</label><textarea class="textarea" id="admin-edit-item-identifying-details" name="identifying_details" required><%= formValues.identifying_details || '' %></textarea><span class="hint">Only authorized staff can use these details to verify ownership claims.</span></div>
+			</div>
+			<div class="form-actions">
+				<a class="button button-secondary" href="/index.php?page=admin-items">Cancel</a>
+				<button class="button button-primary" type="submit">Save changes</button>
+			</div>
+		</form>
+	</section>
+</main>

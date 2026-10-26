@@ -222,6 +222,29 @@ async function run() {
   assert.equal(claimDocuments.length, 2);
   await assert.rejects(service.findAvailable(item.id, 'claimant-2'), /already been claimed/);
   await assert.rejects(service.reviewClaim(claims[0].id, 'staff-1', 'rejected'), /Only pending claims/);
+
+  claimDocuments.push({
+    _id: 'orphan-claim',
+    item_id: 'deleted-item',
+    user_id: 'claimant-1',
+    status: 'pending',
+    claim_details: 'Claim linked to an item that no longer exists.',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (warning) => warnings.push(warning);
+  try {
+    const recordsWithOrphan = await service.findStaffRecords();
+    const claimsWithOrphan = await service.findStaffClaims();
+    assert.equal(recordsWithOrphan.claims.some((claim) => claim.id === 'orphan-claim'), false);
+    assert.equal(claimsWithOrphan.some((claim) => claim.id === 'orphan-claim'), false);
+    assert.equal(warnings.some((warning) => warning.includes('orphan-claim')
+      && warning.includes('deleted-item')), true);
+  } finally {
+    console.warn = originalWarn;
+  }
   console.log('Staff item verification and claim-review service checks passed.');
 }
 

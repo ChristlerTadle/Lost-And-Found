@@ -13,34 +13,11 @@ function createAuthService(database) {
 
   return {
     async register(input) {
-      const email = String(input.email || '').trim().toLowerCase();
-      const password = String(input.password || '');
-      const fullName = String(input.full_name || '').trim();
-      if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 8 || !fullName) {
-        throw new Error('Enter a valid name, email, and password of at least 8 characters.');
-      }
+      return createPasswordAccount(users, input);
+    },
 
-      const now = new Date().toISOString();
-      const user = {
-        _id: randomUUID(),
-        email,
-        password_hash: await bcrypt.hash(password, 12),
-        full_name: fullName,
-        student_id: nullable(input.student_id),
-        employee_id: null,
-        phone: nullable(input.phone),
-        role_name: 'user',
-        status: 'active',
-        created_at: now,
-        updated_at: now,
-      };
-      try {
-        await users.insertOne(user);
-      } catch (error) {
-        if (error.code === 11000) throw new Error('An account with that email or student ID already exists.');
-        throw error;
-      }
-      return toUser(user);
+    async createAdminUser(input) {
+      return createPasswordAccount(users, input);
     },
 
     async login(emailInput, password) {
@@ -51,6 +28,19 @@ function createAuthService(database) {
         throw new Error('Invalid credentials.');
       }
       return toUser(user);
+    },
+
+    async findActiveSessionUser(userId) {
+      const user = await users.findOne({ _id: String(userId), status: 'active' });
+      return toUser(user);
+    },
+
+    async getAdminUserSummary() {
+      const [totalUsers, activeUsers] = await Promise.all([
+        users.countDocuments({}),
+        users.countDocuments({ status: 'active' }),
+      ]);
+      return { totalUsers, activeUsers };
     },
 
     async authenticateGoogle(profile) {
@@ -114,10 +104,61 @@ function createAuthService(database) {
 
     async findAccountsForStaffAssignment() {
       const accounts = await users.find(
-        { role_name: { $in: ['user', 'staff'] }, status: 'active' },
-        { projection: { full_name: 1, email: 1, role_name: 1, employee_id: 1, student_id: 1 } },
+        { role_name: { $in: ['user', 'staff'] } },
+        { projection: { full_name: 1, email: 1, role_name: 1, status: 1, employee_id: 1, student_id: 1 } },
       ).sort({ full_name: 1 }).toArray();
       return accounts.map(({ _id, ...account }) => ({ ...account, id: String(_id) }));
+    },
+
+    async findAdminEditableUser(userId) {
+      const user = await users.findOne({
+        _id: String(userId),
+        role_name: { $in: ['user', 'staff'] },
+        status: 'active',
+      }, {
+        projection: { full_name: 1, email: 1, student_id: 1, employee_id: 1, phone: 1, role_name: 1 },
+      });
+      if (!user) {
+        const error = new Error('Active user account was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return toUser(user);
+    },
+
+    async updateUserByAdmin(userId, input) {
+      const email = String(input.email || '').trim().toLowerCase();
+      const fullName = String(input.full_name || '').trim();
+      if (!/^\S+@\S+\.\S+$/.test(email) || !fullName) {
+        const error = new Error('Enter a valid name and email address.');
+        error.status = 400;
+        throw error;
+      }
+
+      try {
+        const result = await users.updateOne(
+          { _id: String(userId), role_name: { $in: ['user', 'staff'] }, status: 'active' },
+          { $set: {
+            full_name: fullName,
+            email,
+            student_id: nullable(input.student_id),
+            phone: nullable(input.phone),
+            updated_at: new Date().toISOString(),
+          } },
+        );
+        if (!result.matchedCount) {
+          const error = new Error('Active user account was not found.');
+          error.status = 404;
+          throw error;
+        }
+      } catch (error) {
+        if (error.code === 11000) {
+          const duplicateError = new Error('An account with that email or student ID already exists.');
+          duplicateError.status = 400;
+          throw duplicateError;
+        }
+        throw error;
+      }
     },
 
     async assignStaffRole(userId) {
@@ -127,6 +168,36 @@ function createAuthService(database) {
       );
       if (!result.matchedCount) {
         const error = new Error('Only active user accounts can be assigned staff access.');
+        error.status = 404;
+        throw error;
+      }
+    },
+
+    async revertStaffRole(userId) {
+      const result = await users.updateOne(
+        { _id: String(userId), role_name: 'staff', status: 'active' },
+        { $set: { role_name: 'user', updated_at: new Date().toISOString() } },
+      );
+      if (!result.matchedCount) {
+        const error = new Error('Only active staff accounts can be changed back to user access.');
+        error.status = 404;
+        throw error;
+      }
+    },
+
+    async setUserAccountStatus(userId, status) {
+      if (!['active', 'disabled'].includes(status)) throw new Error('Choose a valid account status.');
+      const filter = {
+        _id: String(userId),
+        role_name: { $in: ['user', 'staff'] },
+        status: status === 'disabled' ? 'active' : 'disabled',
+      };
+      const result = await users.updateOne(
+        filter,
+        { $set: { status, updated_at: new Date().toISOString() } },
+      );
+      if (!result.matchedCount) {
+        const error = new Error('The account status could not be changed. Refresh the account list and try again.');
         error.status = 404;
         throw error;
       }
@@ -219,6 +290,43 @@ function hashToken(token) {
 function nullable(value) {
   const text = String(value || '').trim();
   return text || null;
+}
+
+async function createPasswordAccount(users, input) {
+  const email = String(input.email || '').trim().toLowerCase();
+  const password = String(input.password || '');
+  const fullName = String(input.full_name || '').trim();
+  if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 8 || !fullName) {
+    const error = new Error('Enter a valid name, email, and password of at least 8 characters.');
+    error.status = 400;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const user = {
+    _id: randomUUID(),
+    email,
+    password_hash: await bcrypt.hash(password, 12),
+    full_name: fullName,
+    student_id: nullable(input.student_id),
+    employee_id: null,
+    phone: nullable(input.phone),
+    role_name: 'user',
+    status: 'active',
+    created_at: now,
+    updated_at: now,
+  };
+  try {
+    await users.insertOne(user);
+  } catch (error) {
+    if (error.code === 11000) {
+      const duplicateError = new Error('An account with that email or student ID already exists.');
+      duplicateError.status = 400;
+      throw duplicateError;
+    }
+    throw error;
+  }
+  return toUser(user);
 }
 
 module.exports = { createAuthService };

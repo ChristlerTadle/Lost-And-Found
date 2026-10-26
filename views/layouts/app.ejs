@@ -12,7 +12,7 @@
 		<a class="sidebar-brand" href="/index.php?page=dashboard"><span class="brand-mark"><%- icon('shield', 22) %></span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a>
 		<nav class="sidebar-nav"><p class="sidebar-label">Navigation</p>
 			<% const visibleNavKeys = user.role_name === 'admin'
-				? ['admin-dashboard', 'admin-settings', 'items', 'notifications', 'profile']
+				? ['admin-dashboard', 'admin-users', 'admin-items', 'admin-claims', 'admin-inventory', 'admin-add-user', 'admin-settings', 'items', 'notifications', 'profile']
 				: user.role_name === 'staff'
 					? ['staff-dashboard', 'staff-records', 'staff-lost-reports', 'staff-found-items', 'staff-stored-items', 'staff-returned-items', 'staff-claims', 'notifications', 'profile']
 					: ['dashboard', 'report', 'report-found', 'items', 'reports', 'claims', 'notifications', 'profile'];

@@ -1,0 +1,21 @@
+<main class="container admin-edit-user">
+	<a class="back-link" href="/index.php?page=admin-users">&larr; Back to User Management</a>
+	<header class="page-header">
+		<div><h1>Edit User</h1><p>Update account details for <%= editUser.full_name %>.</p></div>
+		<span class="badge badge-<%= editUser.role_name === 'staff' ? 'active' : 'pending' %>"><%= editUser.role_name === 'staff' ? 'Staff' : 'User' %></span>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<section class="card admin-create-user">
+		<form method="post" action="/index.php?page=admin-edit-user&amp;id=<%= encodeURIComponent(editUser.id) %>" class="form-grid admin-create-user-form">
+			<div class="field"><label for="edit-user-name">Full name</label><input class="input" id="edit-user-name" name="full_name" value="<%= formValues.full_name || '' %>" autocomplete="name" required></div>
+			<div class="field"><label for="edit-user-email">Email address</label><input class="input" id="edit-user-email" name="email" type="email" value="<%= formValues.email || '' %>" autocomplete="email" required></div>
+			<div class="field"><label for="edit-user-student-id">Student ID</label><input class="input" id="edit-user-student-id" name="student_id" value="<%= formValues.student_id || '' %>"></div>
+			<div class="field"><label for="edit-user-phone">Phone number</label><input class="input" id="edit-user-phone" name="phone" type="tel" value="<%= formValues.phone || '' %>" autocomplete="tel"></div>
+			<div class="form-actions">
+				<a class="button button-secondary" href="/index.php?page=admin-users">Cancel</a>
+				<button class="button button-primary" type="submit">Save changes</button>
+			</div>
+		</form>
+	</section>
+</main>

@@ -1,38 +1,81 @@
-<main class="container admin-dashboard">
-	<header class="page-header">
-		<div><h1>Admin Dashboard</h1><p>Manage staff access for active user accounts.</p></div>
+<main class="container admin-overview">
+	<header class="page-header admin-overview-header">
+		<div><h1>Admin Dashboard</h1><p>System overview — Bukidnon State University Lost &amp; Found</p></div>
 	</header>
-	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
-	<section class="card admin-access-notice">
-		<h2>Assign staff access</h2>
-		<p>Only existing active user accounts can be assigned staff access. The account holder must sign out and back in before staff access takes effect. Admin roles cannot be assigned here.</p>
+	<section class="admin-overview-stats" aria-label="System statistics">
+		<article class="card admin-overview-stat">
+			<span class="admin-overview-icon users"><%- icon('user', 17) %></span>
+			<div><span class="stat-label">Total users</span><strong><%= userCount %></strong><small><%= activeUserCount %> active</small></div>
+		</article>
+		<article class="card admin-overview-stat">
+			<span class="admin-overview-icon items"><%- icon('clipboard', 17) %></span>
+			<div><span class="stat-label">Total items</span><strong><%= summary.totalItems %></strong><small><%= summary.lostItems %> lost, <%= summary.foundItems %> found</small></div>
+		</article>
+		<article class="card admin-overview-stat">
+			<span class="admin-overview-icon claims"><%- icon('file', 17) %></span>
+			<div><span class="stat-label">Pending claims</span><strong><%= summary.pendingClaims %></strong><small>Needs review</small></div>
+		</article>
+		<article class="card admin-overview-stat">
+			<span class="admin-overview-icon returned"><%- icon('check', 17) %></span>
+			<div><span class="stat-label">Items returned</span><strong><%= summary.returnedItems %></strong><small>Resolved</small></div>
+		</article>
+		<article class="card admin-overview-stat">
+			<span class="admin-overview-icon stored"><%- icon('clipboard', 17) %></span>
+			<div><span class="stat-label">Stored items</span><strong><%= summary.storedItems %></strong><small>In staff custody</small></div>
+		</article>
 	</section>
-	<section class="card admin-accounts">
-		<div class="admin-accounts-heading"><h2>Active accounts</h2><span><%= accounts.length %> accounts</span></div>
-		<% if (!accounts.length) { %><p class="empty">There are no active user or staff accounts to manage.</p><% } else { %>
-			<div class="table-wrap">
-				<table>
-					<thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col" class="right">Access</th></tr></thead>
-					<tbody>
-						<% accounts.forEach((account) => { %>
-							<tr>
-								<td class="item-name"><%= account.full_name %></td>
-								<td><%= account.email %></td>
-								<td><span class="badge badge-<%= account.role_name === 'staff' ? 'active' : 'pending' %>"><%= account.role_name === 'staff' ? 'Staff' : 'User' %></span></td>
-								<td class="right">
-									<% if (account.role_name === 'user') { %>
-										<form method="post" action="/index.php?page=admin-dashboard">
-											<input type="hidden" name="action" value="assign_staff">
-											<input type="hidden" name="user_id" value="<%= account.id %>">
-											<button class="button button-outline" type="submit">Assign staff</button>
-										</form>
-									<% } else { %><span class="admin-assigned-label">Staff access assigned</span><% } %>
-								</td>
-							</tr>
-						<% }); %>
-					</tbody>
-				</table>
+	<section class="admin-overview-middle">
+		<section class="card admin-overview-panel admin-category-panel">
+			<div class="admin-overview-panel-heading"><h2>Items by category</h2><span>All time</span></div>
+			<% if (!summary.categoryCounts.length) { %><p class="empty">No item records yet.</p><% } else { %>
+				<div class="admin-category-list">
+					<% summary.categoryCounts.forEach((entry) => { %>
+						<div class="admin-category-row">
+							<span class="admin-category-name"><%= entry.category %></span>
+							<span class="admin-category-track"><span style="width: <%= Math.max(4, Math.round(entry.count / summary.categoryCounts[0].count * 100)) %>%"></span></span>
+							<strong><%= entry.count %></strong>
+						</div>
+					<% }); %>
+				</div>
+			<% } %>
+		</section>
+		<section class="card admin-overview-panel admin-shortcuts-panel">
+			<h2>Administration</h2>
+			<div class="admin-shortcuts">
+				<a class="admin-shortcut" href="/index.php?page=admin-users"><%- icon('user', 17) %><span><strong>User Management</strong><small><%= userCount %> accounts</small></span></a>
+				<a class="admin-shortcut" href="/index.php?page=admin-items"><%- icon('clipboard', 17) %><span><strong>All Items</strong><small><%= summary.totalItems %> items</small></span></a>
+				<a class="admin-shortcut" href="/index.php?page=admin-claims"><%- icon('file', 17) %><span><strong>All Claims</strong><small><%= summary.totalClaims %> total · <%= summary.pendingClaims %> pending</small></span></a>
+				<a class="admin-shortcut" href="/index.php?page=admin-inventory"><%- icon('file', 17) %><span><strong>Inventory Report</strong><small><%= summary.storedItems %> in custody</small></span></a>
+				<a class="admin-shortcut" href="/index.php?page=admin-add-user"><%- icon('user', 17) %><span><strong>Add User</strong><small>Create an account</small></span></a>
+				<a class="admin-shortcut" href="/index.php?page=admin-settings"><%- icon('settings', 17) %><span><strong>Settings</strong><small>Sign-in integrations</small></span></a>
 			</div>
-		<% } %>
+		</section>
+	</section>
+	<section class="admin-overview-bottom">
+		<section class="card admin-overview-panel admin-status-panel">
+			<h2>Item status breakdown</h2>
+			<ul class="admin-status-list">
+				<li><span><i class="status-dot lost"></i>Lost (Active)</span><strong><%= summary.statusCounts.lostActive %></strong></li>
+				<li><span><i class="status-dot unverified"></i>Found (Unverified)</span><strong><%= summary.statusCounts.foundUnverified %></strong></li>
+				<li><span><i class="status-dot verified"></i>Verified</span><strong><%= summary.statusCounts.foundVerified %></strong></li>
+				<li><span><i class="status-dot stored"></i>Stored</span><strong><%= summary.statusCounts.stored %></strong></li>
+				<li><span><i class="status-dot claimed"></i>Claimed</span><strong><%= summary.statusCounts.claimed %></strong></li>
+				<li><span><i class="status-dot returned"></i>Returned</span><strong><%= summary.statusCounts.returned %></strong></li>
+			</ul>
+		</section>
+		<section class="card admin-overview-panel admin-recent-panel">
+			<div class="admin-overview-panel-heading"><h2>Recent activity</h2><a href="/index.php?page=admin-items">View items &rarr;</a></div>
+			<% if (!summary.activity.length) { %><p class="empty">No recent system activity.</p><% } else { %>
+				<div class="dashboard-activity">
+					<% summary.activity.forEach((entry) => { %>
+						<div class="dashboard-activity-row">
+							<span class="dashboard-activity-icon <%= entry.type %>"><%- icon(entry.type === 'claim' ? 'clipboard' : entry.type === 'found' ? 'check' : 'alert', 15) %></span>
+							<div><strong><%= entry.label %></strong><span><%= entry.name %> · <%= entry.detail %></span></div>
+							<time datetime="<%= entry.date %>"><%= formatDate(entry.date, 'M j, Y') %></time>
+						</div>
+					<% }); %>
+				</div>
+			<% } %>
+		</section>
 	</section>
 </main>

@@ -1,0 +1,43 @@
+<main class="container staff-workspace admin-claims-page">
+	<header class="page-header browse-header">
+		<div><h1>All Claims</h1><p><%= claims.length %> <%= claims.length === 1 ? 'claim' : 'claims' %> found</p></div>
+		<a class="button button-secondary" href="/index.php?page=admin-dashboard">Admin dashboard</a>
+	</header>
+	<form method="get" action="/index.php" class="browse-filter-form">
+		<input type="hidden" name="page" value="admin-claims">
+		<div class="card browse-toolbar">
+			<label class="browse-search" for="admin-claims-search">
+				<%- icon('search', 17) %>
+				<input id="admin-claims-search" name="query" value="<%= filters.query %>" placeholder="Search item, claimant, or claim details...">
+			</label>
+			<select class="select" id="admin-claims-status" name="status" aria-label="Filter by claim status">
+				<option value="">All statuses</option>
+				<% for (const status of ['pending', 'approved', 'rejected']) { %>
+					<option value="<%= status %>" <%= filters.status === status ? 'selected' : '' %>><%= status[0].toUpperCase() + status.slice(1) %></option>
+				<% } %>
+			</select>
+			<button class="button button-primary browse-search-submit" type="submit">Search</button>
+			<a class="button button-secondary" href="/index.php?page=admin-claims">Clear</a>
+		</div>
+	</form>
+	<section class="card staff-record-list staff-claims-list">
+		<div class="staff-list-heading"><h2>Claim records</h2><span><%= claims.length %> claims</span></div>
+		<% if (!claims.length) { %>
+			<div class="staff-claims-empty"><span class="staff-empty-icon"><%- icon('clipboard', 22) %></span><h3>No claims found</h3><p>Claims matching your filters will appear here.</p></div>
+		<% } %>
+		<% claims.forEach((claim) => { %>
+			<article class="admin-claim-record">
+				<div class="admin-claim-record-main">
+					<h3><%= claim.item_name %></h3>
+					<p><%= claim.item.category %> · <%= claim.item.location %> · Reported by <%= claim.item.reported_by || 'Unknown' %></p>
+					<p>Claimant: <strong><%= claim.claimant ? claim.claimant.full_name : 'Account unavailable' %></strong><% if (claim.claimant?.email) { %> · <%= claim.claimant.email %><% } %></p>
+					<p class="admin-claim-details"><%= claim.claim_details %></p>
+				</div>
+				<div class="admin-claim-record-meta">
+					<span class="badge badge-<%= claim.status %>"><%= claim.status[0].toUpperCase() + claim.status.slice(1) %></span>
+					<time datetime="<%= claim.created_at %>">Submitted <%= formatDate(claim.created_at, 'M j, Y') %></time>
+				</div>
+			</article>
+		<% }); %>
+	</section>
+</main>

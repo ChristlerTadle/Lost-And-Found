@@ -104,9 +104,31 @@ async function start() {
     { key: 'staff-returned-items', label: 'Returned Items', href: '/index.php?page=staff-returned-items', icon: 'check' },
     { key: 'staff-claims', label: 'Ownership Claims', href: '/index.php?page=staff-claims', icon: 'clipboard' },
     { key: 'admin-dashboard', label: 'Admin Dashboard', href: '/index.php?page=admin-dashboard', icon: 'shield' },
+    { key: 'admin-users', label: 'User Management', href: '/index.php?page=admin-users', icon: 'user' },
+    { key: 'admin-items', label: 'All Items', href: '/index.php?page=admin-items', icon: 'file' },
+    { key: 'admin-claims', label: 'All Claims', href: '/index.php?page=admin-claims', icon: 'clipboard' },
+    { key: 'admin-inventory', label: 'Inventory Report', href: '/index.php?page=admin-inventory', icon: 'clipboard' },
+    { key: 'admin-add-user', label: 'Add User', href: '/index.php?page=admin-add-user', icon: 'user' },
     { key: 'admin-settings', label: 'Settings', href: '/index.php?page=admin-settings', icon: 'settings' },
     { key: 'profile', label: 'Profile', href: '/index.php?page=profile', icon: 'user' },
   ];
+
+  app.use(async (req, res, next) => {
+    if (!req.session.user) return next();
+    try {
+      const currentUser = await app.locals.services.auth.findActiveSessionUser(req.session.user.id);
+      if (!currentUser) {
+        return req.session.destroy((error) => {
+          if (error) return next(error);
+          return res.redirect('/index.php?page=login&disabled=1');
+        });
+      }
+      req.session.user = currentUser;
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   app.use((req, res, next) => {
     res.locals.assetVersion = [

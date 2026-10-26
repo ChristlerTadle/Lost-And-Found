@@ -38,7 +38,7 @@ async function run() {
               return this;
             },
             toArray: async () => users.filter((user) => filter.role_name.$in.includes(user.role_name)
-              && user.status === filter.status)
+              && (!filter.status || user.status === filter.status))
               .map(({ _id, password_hash, ...user }) => ({ ...user, id: String(_id) })),
           }),
           updateOne: async (filter, update) => {

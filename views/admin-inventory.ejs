@@ -1,0 +1,39 @@
+<main class="container admin-inventory-page">
+	<header class="page-header">
+		<div><h1>Inventory Report</h1><p>Found items currently stored in Lost and Found custody.</p></div>
+		<div class="admin-inventory-actions">
+			<a class="button button-secondary" href="/index.php?page=admin-dashboard">Admin dashboard</a>
+			<button class="button button-primary" type="button" onclick="window.print()">Print report</button>
+		</div>
+	</header>
+	<section class="admin-inventory-summary" aria-label="Inventory summary">
+		<div class="card admin-inventory-stat"><span class="stat-label">Items in custody</span><strong><%= items.length %></strong></div>
+		<div class="card admin-inventory-stat"><span class="stat-label">Categories represented</span><strong><%= Object.keys(categoryCounts).length %></strong></div>
+		<div class="card admin-inventory-stat"><span class="stat-label">Report generated</span><strong><%= formatDate(generatedAt, 'M j, Y') %></strong></div>
+	</section>
+	<section class="card admin-inventory-table">
+		<div class="admin-accounts-heading"><h2>Stored found items</h2><span><%= items.length %> items</span></div>
+		<% if (!items.length) { %>
+			<p class="empty">There are currently no found items stored in staff custody.</p>
+		<% } else { %>
+			<div class="table-wrap">
+				<table>
+					<thead><tr><th scope="col">Item</th><th scope="col">Category</th><th scope="col">Location found</th><th scope="col">Date found</th><th scope="col">Reported by</th><th scope="col">Verification</th></tr></thead>
+					<tbody>
+						<% items.forEach((item) => { %>
+							<tr>
+								<td class="item-name"><%= item.item_name %></td>
+								<td><%= item.category %></td>
+								<td><%= item.location %></td>
+								<td><%= formatDate(item.date_lost, 'M j, Y') %></td>
+								<td><%= item.reported_by %></td>
+								<td><span class="badge badge-<%= item.physical_verification_status === 'verified' ? 'active' : 'pending' %>"><%= item.physical_verification_status === 'verified' ? 'Verified' : 'Not verified' %></span></td>
+							</tr>
+						<% }); %>
+					</tbody>
+				</table>
+			</div>
+		<% } %>
+	</section>
+	<p class="admin-inventory-footnote">This report includes found-item records currently marked as stored. Returned, claimed, and other records are excluded.</p>
+</main>

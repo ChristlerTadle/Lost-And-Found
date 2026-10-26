@@ -1,0 +1,21 @@
+<main class="container admin-add-user">
+	<a class="back-link" href="/index.php?page=admin-users">&larr; Back to User Management</a>
+	<header class="page-header">
+		<div><h1>Add User</h1><p>Create an active account. Staff access can be assigned separately from the admin dashboard.</p></div>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<% if (error) { %><div class="alert alert-error"><%= error %></div><% } %>
+	<section class="card admin-create-user">
+		<form method="post" action="/index.php?page=admin-add-user" class="form-grid admin-create-user-form">
+			<div class="field"><label for="new-user-name">Full name</label><input class="input" id="new-user-name" name="full_name" value="<%= formValues.full_name || '' %>" autocomplete="name" required></div>
+			<div class="field"><label for="new-user-email">Email address</label><input class="input" id="new-user-email" name="email" type="email" value="<%= formValues.email || '' %>" autocomplete="email" required></div>
+			<div class="field"><label for="new-user-student-id">Student ID</label><input class="input" id="new-user-student-id" name="student_id" value="<%= formValues.student_id || '' %>"></div>
+			<div class="field"><label for="new-user-phone">Phone number</label><input class="input" id="new-user-phone" name="phone" type="tel" value="<%= formValues.phone || '' %>" autocomplete="tel"></div>
+			<div class="field"><label for="new-user-password">Temporary password</label><input class="input" id="new-user-password" name="password" type="password" minlength="8" autocomplete="new-password" required><span class="hint">Use at least 8 characters.</span></div>
+			<div class="form-actions">
+				<a class="button button-secondary" href="/index.php?page=admin-dashboard">Cancel</a>
+				<button class="button button-primary" type="submit">Create user account</button>
+			</div>
+		</form>
+	</section>
+</main>

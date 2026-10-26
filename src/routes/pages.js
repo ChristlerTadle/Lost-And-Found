@@ -142,7 +142,8 @@ router.get('/index.php', asyncRoute(async (req, res) => {
     if (req.session.user) return res.redirect(dashboardPath(req.session.user));
     return res.render('login', {
       layout: 'layouts/public', title: 'Sign In', showRegister: req.query.tab === 'register',
-      showForgot: false, showReset: false, error: null, message: req.query.reset ? 'Your password has been reset. You can now sign in.' : null,
+      showForgot: false, showReset: false, error: null,
+      message: req.query.disabled ? 'Your account is no longer active. Contact an administrator for help.' : req.query.reset ? 'Your password has been reset. You can now sign in.' : null,
       googleError: req.query.google === 'failed' ? 'Google sign-in could not be completed. Please try again.'
         : req.query.google === 'unavailable' ? 'Google sign-in is not configured yet.' : null,
       hidePublicHeader: true,
@@ -314,11 +315,113 @@ router.get('/index.php', asyncRoute(async (req, res) => {
 
   if (page === 'admin-dashboard') {
     auth.requireRole(user, ['admin']);
-    const accounts = await auth.findAccountsForStaffAssignment();
+    const [userSummary, summary] = await Promise.all([
+      auth.getAdminUserSummary(),
+      itemService.getAdminDashboardSummary(),
+    ]);
     return setPage(res, 'Admin Dashboard', 'admin-dashboard', user, {
       view: 'admin-dashboard',
+      userCount: userSummary.totalUsers,
+      activeUserCount: userSummary.activeUsers,
+      summary,
+    });
+  }
+
+  if (page === 'admin-users') {
+    auth.requireRole(user, ['admin']);
+    const accounts = await auth.findAccountsForStaffAssignment();
+    return setPage(res, 'User Management', 'admin-users', user, {
+      view: 'admin-users',
       accounts,
-      message: req.query.updated ? 'Staff access has been assigned. The account must sign in again to activate staff access.' : null,
+      message: req.query.updated === 'staff' ? 'Staff access has been assigned.'
+        : req.query.updated === 'user' ? 'Staff access was removed. The account now has regular user access.'
+          : req.query.updated === 'disabled' ? 'Account disabled. The user will be signed out on their next request.'
+            : req.query.updated === 'enabled' ? 'Account re-enabled successfully.' : null,
+    });
+  }
+
+  if (page === 'admin-items') {
+    auth.requireRole(user, ['admin']);
+    const filters = {
+      query: String(req.query.query || ''),
+      item_type: ['lost', 'found'].includes(req.query.item_type) ? req.query.item_type : '',
+      status: ['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled'].includes(req.query.status)
+        ? req.query.status : '',
+      category: categories.includes(req.query.category) ? req.query.category : '',
+      date_from: String(req.query.date_from || ''),
+      date_to: String(req.query.date_to || ''),
+    };
+    const items = await itemService.findAdminItems(filters);
+    return setPage(res, 'All Items', 'admin-items', user, {
+      view: 'admin-items',
+      items,
+      filters,
+      categories,
+    });
+  }
+
+  if (page === 'admin-edit-item') {
+    auth.requireRole(user, ['admin']);
+    const editItem = await itemService.findAdminItem(String(req.query.id || ''));
+    return setPage(res, 'Edit Item', 'admin-items', user, {
+      view: 'admin-edit-item',
+      editItem,
+      formValues: editItem,
+      error: null,
+      message: req.query.saved ? 'Item record updated successfully.' : null,
+      categories,
+      today: today(),
+    });
+  }
+
+  if (page === 'admin-claims') {
+    auth.requireRole(user, ['admin']);
+    const filters = {
+      query: String(req.query.query || ''),
+      status: ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : '',
+    };
+    const claims = await itemService.findAdminClaims(filters);
+    return setPage(res, 'All Claims', 'admin-claims', user, {
+      view: 'admin-claims',
+      claims,
+      filters,
+    });
+  }
+
+  if (page === 'admin-inventory') {
+    auth.requireRole(user, ['admin']);
+    const items = await itemService.findInventoryReport();
+    const categoryCounts = items.reduce((counts, item) => {
+      counts[item.category] = (counts[item.category] || 0) + 1;
+      return counts;
+    }, {});
+    return setPage(res, 'Inventory Report', 'admin-inventory', user, {
+      view: 'admin-inventory',
+      items,
+      categoryCounts,
+      generatedAt: new Date(),
+    });
+  }
+
+  if (page === 'admin-add-user') {
+    auth.requireRole(user, ['admin']);
+    return setPage(res, 'Add User', 'admin-add-user', user, {
+      view: 'admin-add-user',
+      message: req.query.created ? 'User account created successfully.' : null,
+      error: null,
+      formValues: {},
+    });
+  }
+
+  if (page === 'admin-edit-user') {
+    auth.requireRole(user, ['admin']);
+    const editUser = await auth.findAdminEditableUser(String(req.query.id || ''));
+    return setPage(res, 'Edit User', 'admin-users', user, {
+      view: 'admin-edit-user',
+      editUser,
+      message: req.query.saved ? 'User account updated successfully.' : null,
+      error: null,
+      formValues: editUser,
     });
   }
 
@@ -592,18 +695,97 @@ router.post('/index.php', (req, res, next) => {
     return res.redirect('/index.php?page=notifications');
   }
 
-  if (page === 'admin-dashboard') {
+  if (page === 'admin-add-user') {
     auth.requireRole(user, ['admin']);
-    if (req.body.action !== 'assign_staff') throw new Error('Unknown admin action.');
+    try {
+      await auth.createAdminUser(req.body);
+    } catch (error) {
+      if (error.status !== 400) throw error;
+      return res.status(400).render('admin-add-user', {
+        layout: 'layouts/app',
+        title: 'Add User',
+        active: 'admin-add-user',
+        user,
+        message: null,
+        error: error.message,
+        formValues: req.body,
+      });
+    }
+    return res.redirect('/index.php?page=admin-add-user&created=1');
+  }
+
+  if (page === 'admin-edit-user') {
+    auth.requireRole(user, ['admin']);
+    const userId = String(req.query.id || '');
+    try {
+      await auth.updateUserByAdmin(userId, req.body);
+    } catch (error) {
+      if (error.status !== 400) throw error;
+      const editUser = await auth.findAdminEditableUser(userId);
+      return res.status(400).render('admin-edit-user', {
+        layout: 'layouts/app',
+        title: 'Edit User',
+        active: 'admin-users',
+        user,
+        editUser,
+        message: null,
+        error: error.message,
+        formValues: req.body,
+      });
+    }
+    return res.redirect(`/index.php?page=admin-edit-user&id=${encodeURIComponent(userId)}&saved=1`);
+  }
+
+  if (page === 'admin-edit-item') {
+    auth.requireRole(user, ['admin']);
+    const itemId = String(req.query.id || '');
+    try {
+      await itemService.updateAdminItem(itemId, req.body);
+    } catch (error) {
+      if (error.status !== 400) throw error;
+      const editItem = await itemService.findAdminItem(itemId);
+      return res.status(400).render('admin-edit-item', {
+        layout: 'layouts/app',
+        title: 'Edit Item',
+        active: 'admin-items',
+        user,
+        editItem,
+        formValues: req.body,
+        error: error.message,
+        message: null,
+        categories,
+        today: today(),
+      });
+    }
+    return res.redirect(`/index.php?page=admin-edit-item&id=${encodeURIComponent(itemId)}&saved=1`);
+  }
+
+  if (['admin-dashboard', 'admin-users'].includes(page)) {
+    auth.requireRole(user, ['admin']);
     const userId = String(req.body.user_id || '');
-    await auth.assignStaffRole(userId);
-    await req.app.locals.services.notifications.create(userId, {
-      type: 'status',
-      title: 'Staff access granted',
-      message: 'An administrator assigned staff access to your account. Sign out and sign in again to access the staff workspace.',
-      href: '/index.php?page=dashboard',
-    });
-    return res.redirect('/index.php?page=admin-dashboard&updated=1');
+    if (req.body.action === 'assign_staff') {
+      await auth.assignStaffRole(userId);
+      await req.app.locals.services.notifications.create(userId, {
+        type: 'status',
+        title: 'Staff access granted',
+        message: 'An administrator assigned staff access to your account.',
+        href: '/index.php?page=dashboard',
+      });
+      return res.redirect('/index.php?page=admin-users&updated=staff');
+    }
+    if (req.body.action === 'revert_staff') {
+      await auth.revertStaffRole(userId);
+      return res.redirect('/index.php?page=admin-users&updated=user');
+    }
+    if (req.body.action === 'disable_user') {
+      await auth.setUserAccountStatus(userId, 'disabled');
+      return res.redirect('/index.php?page=admin-users&updated=disabled');
+    }
+    if (req.body.action === 'enable_user') {
+      await auth.setUserAccountStatus(userId, 'active');
+      return res.redirect('/index.php?page=admin-users&updated=enabled');
+    }
+    throw new Error('Unknown admin action.');
   }
 
   if (page === 'admin-settings') {
@@ -635,7 +817,9 @@ router.use((error, req, res, next) => {
     user,
     active: '',
     error: message,
-    backHref: user ? '/index.php?page=items' : '/',
+    backHref: user?.role_name === 'staff' ? '/index.php?page=staff-dashboard'
+      : user?.role_name === 'admin' ? '/index.php?page=admin-dashboard'
+        : user ? '/index.php?page=items' : '/',
   });
 });
 

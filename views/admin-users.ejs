@@ -1,0 +1,59 @@
+<main class="container admin-dashboard">
+	<header class="page-header">
+		<div><h1>User Management</h1><p>Manage accounts, staff access, and account status.</p></div>
+		<a class="button button-primary" href="/index.php?page=admin-add-user">Add User</a>
+	</header>
+	<% if (message) { %><div class="alert alert-success"><%= message %></div><% } %>
+	<section class="card admin-access-notice">
+		<h2>Manage account access</h2>
+		<p>Assign or remove staff access, disable accounts, or re-enable them if they were disabled by mistake. Role changes apply on the account's next request, and disabled accounts are signed out then. Admin accounts are managed separately.</p>
+	</section>
+	<section class="card admin-accounts">
+		<div class="admin-accounts-heading"><h2>User accounts</h2><span><%= accounts.length %> accounts</span></div>
+		<% if (!accounts.length) { %><p class="empty">There are no user or staff accounts to manage.</p><% } else { %>
+			<div class="table-wrap">
+				<table>
+					<thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col" class="right">Actions</th></tr></thead>
+					<tbody>
+						<% accounts.forEach((account) => { %>
+							<tr>
+								<td class="item-name"><%= account.full_name %></td>
+								<td><%= account.email %></td>
+								<td><span class="badge badge-<%= account.role_name === 'staff' ? 'active' : 'pending' %>"><%= account.role_name === 'staff' ? 'Staff' : 'User' %></span></td>
+								<td><span class="badge badge-<%= account.status === 'active' ? 'active' : 'cancelled' %>"><%= account.status === 'active' ? 'Active' : 'Disabled' %></span></td>
+								<td class="right">
+									<div class="admin-account-actions">
+										<% if (account.status === 'active') { %>
+											<a class="button button-outline" href="/index.php?page=admin-edit-user&amp;id=<%= encodeURIComponent(account.id) %>">Edit</a>
+											<form method="post" action="/index.php?page=admin-users">
+												<input type="hidden" name="user_id" value="<%= account.id %>">
+												<% if (account.role_name === 'user') { %>
+													<input type="hidden" name="action" value="assign_staff">
+													<button class="button button-outline" type="submit">Assign staff</button>
+												<% } else { %>
+													<input type="hidden" name="action" value="revert_staff">
+													<button class="button button-outline" type="submit">Revert to user</button>
+												<% } %>
+											</form>
+											<form method="post" action="/index.php?page=admin-users" onsubmit="return confirm('Disable this account? The user will lose access to the system.');">
+												<input type="hidden" name="action" value="disable_user">
+												<input type="hidden" name="user_id" value="<%= account.id %>">
+												<button class="button button-danger" type="submit">Disable</button>
+											</form>
+										<% } else { %>
+											<form method="post" action="/index.php?page=admin-users">
+												<input type="hidden" name="action" value="enable_user">
+												<input type="hidden" name="user_id" value="<%= account.id %>">
+												<button class="button button-outline" type="submit">Re-enable</button>
+											</form>
+										<% } %>
+									</div>
+								</td>
+							</tr>
+						<% }); %>
+					</tbody>
+				</table>
+			</div>
+		<% } %>
+	</section>
+</main>
