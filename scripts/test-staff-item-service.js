@@ -7,6 +7,7 @@ function matches(document, filter) {
     if (key === '$and') return value.every((clause) => matches(document, clause));
     if (value && Array.isArray(value.$in)) return value.$in.includes(document[key]);
     if (value && Object.hasOwn(value, '$ne')) return document[key] !== value.$ne;
+    if (value && Object.hasOwn(value, '$exists')) return Object.hasOwn(document, key) === value.$exists;
     return document[key] === value;
   });
 }
@@ -143,11 +144,11 @@ async function run() {
     record_type: 'claims',
     item_type: 'found',
     status: 'pending',
-    query: 'keychain',
+    query: 'Blue wallet',
   });
   assert.equal(searchedClaims.items.length, 0);
-  assert.equal(searchedClaims.claims.length, 1);
-  assert.equal(searchedClaims.claims[0].claimant.full_name, 'Second Claimant');
+  assert.equal(searchedClaims.claims.length, 2);
+  assert.deepEqual(Object.keys(searchedClaims.claims[0]).sort(), ['created_at', 'id', 'item_name', 'status']);
   assert.equal((await service.findStaffRecords({ status: 'stored', record_type: 'items' })).items.length, 1);
   assert.equal(notifications.filter((notification) => notification.userId === 'staff-1'
     && notification.title === 'Ownership claim needs review').length, 2);
@@ -191,7 +192,7 @@ async function run() {
   assert.equal(returnedItems.length, 1);
   assert.equal(returnedItems[0].id, item.id);
   assert.equal(returnedItems[0].claimant.full_name, 'Claimant');
-  assert.equal((await service.findStaffReturnedItems({ query: 'claimant' })).length, 1);
+  assert.equal((await service.findStaffReturnedItems({ query: 'claimant' })).length, 0);
   assert.equal((await service.findStaffReturnedItems({ query: 'no match' })).length, 0);
   assert.equal((await service.findStaffReturnedItems({ category: 'Accessories' })).length, 1);
   assert.equal((await service.findStaffReturnedItems({ category: 'Documents & IDs' })).length, 0);
@@ -203,7 +204,10 @@ async function run() {
   assert.equal((await service.findPublic(item.id, 'claimant-1')).status, 'returned');
   const staffRecords = await service.findStaffRecords();
   assert.equal(staffRecords.items.find((record) => record.id === item.id).status, 'returned');
-  assert.equal(staffRecords.claims.find((claim) => claim.id === claims[0].id).item.status, 'returned');
+  assert.equal(staffRecords.claims.find((claim) => claim.id === claims[0].id).status, 'approved');
+  assert.deepEqual(Object.keys(staffRecords.items.find((record) => record.id === item.id)).sort(), [
+    'created_at', 'id', 'item_name', 'status',
+  ]);
   assert.equal(notifications.some((notification) => notification.userId === 'claimant-1'
     && notification.title === 'Item returned'), true);
   assert.equal(notifications.some((notification) => notification.userId === 'reporter-1'
@@ -245,6 +249,25 @@ async function run() {
   } finally {
     console.warn = originalWarn;
   }
+  const removed = await service.softDeleteAdminItem(item.id, 'admin-1');
+  assert.deepEqual({
+    id: removed.id,
+    item_name: removed.item_name,
+    category: removed.category,
+    status: removed.status,
+  }, {
+    id: item.id,
+    item_name: 'Blue wallet',
+    category: 'Accessories',
+    status: 'stored',
+  });
+  assert.ok(itemDocuments[0].deleted_at);
+  assert.equal(itemDocuments[0].deleted_by, 'admin-1');
+  assert.deepEqual(await service.findStaffItems('found'), []);
+  assert.deepEqual(await service.findForUser('reporter-1'), []);
+  assert.deepEqual(await service.search({}), []);
+  assert.deepEqual(await service.findStaffRecords(), { items: [], claims: [] });
+  await assert.rejects(service.findPublic(item.id, null), /not found/);
   console.log('Staff item verification and claim-review service checks passed.');
 }
 

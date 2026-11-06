@@ -2,9 +2,23 @@ const { randomUUID } = require('node:crypto');
 
 function createNotificationService(database) {
   const notifications = database.collection('notifications');
+  const users = database.collection('users');
+  const rolePermissions = database.collection('role_permissions');
 
   return {
-    async create(userId, { type, title, message, href }) {
+    async create(userId, { type, title, message, href }, options = {}) {
+      const user = await users.findOne(
+        { _id: String(userId) },
+        { projection: { role_name: 1 }, ...(options.session ? { session: options.session } : {}) },
+      );
+      if (!user || !['user', 'staff', 'admin'].includes(user.role_name)) return null;
+      if (user.role_name !== 'admin') {
+        const enabled = await rolePermissions.findOne(
+          { role: user.role_name, permission_key: 'receive_notifications', enabled: true },
+          options.session ? { projection: { _id: 1 }, session: options.session } : { projection: { _id: 1 } },
+        );
+        if (!enabled) return null;
+      }
       const notification = {
         _id: randomUUID(),
         user_id: String(userId),
@@ -15,7 +29,7 @@ function createNotificationService(database) {
         read_at: null,
         created_at: new Date().toISOString(),
       };
-      await notifications.insertOne(notification);
+      await notifications.insertOne(notification, options.session ? { session: options.session } : undefined);
       return { ...notification, id: notification._id };
     },
 

@@ -9,6 +9,10 @@ function createItemService(database, notificationService) {
   const items = database.collection('lost_items');
   const claims = database.collection('item_claims');
   const users = database.collection('users');
+  const activeItems = (filter = {}) => ({ ...filter, deleted_at: { $exists: false } });
+  const activeItemIds = async () => (await items.find(activeItems(), {
+    projection: { _id: 1 },
+  }).toArray()).map(({ _id }) => _id);
 
   return {
     async create(userId, input, imagePath = null) {
@@ -35,7 +39,7 @@ function createItemService(database, notificationService) {
     },
 
     async findForUser(userId) {
-      const documents = await items.find({ user_id: userId }).sort({ created_at: -1 }).toArray();
+      const documents = await items.find(activeItems({ user_id: userId })).sort({ created_at: -1 }).toArray();
       return Promise.all(documents.map(async (document) => {
         const item = normalizeItem(document);
         if (item.item_type === 'found' && item.status === 'found' && await this.hasApprovedClaim(item.id)) {
@@ -46,10 +50,10 @@ function createItemService(database, notificationService) {
       }));
     },
 
-    async hasApprovedClaim(itemId) {
+    async hasApprovedClaim(itemId, session = undefined) {
       return Boolean(await claims.findOne(
         { item_id: itemId, status: 'approved' },
-        { projection: { _id: 1 } },
+        { projection: { _id: 1 }, ...(session ? { session } : {}) },
       ));
     },
 
@@ -61,7 +65,7 @@ function createItemService(database, notificationService) {
           item_type: itemType,
           status: itemType === 'found' ? { $in: ['found', 'stored'] } : { $in: ['lost', 'found'] },
         };
-      const documents = await items.find(filter).sort({ created_at: -1 }).toArray();
+      const documents = await items.find(activeItems(filter)).sort({ created_at: -1 }).toArray();
       return Promise.all(documents.map(async (document) => {
         const item = normalizeItem(document);
         const reporter = await users.findOne({ _id: item.user_id }, {
@@ -72,8 +76,13 @@ function createItemService(database, notificationService) {
       }));
     },
 
+    async getStaffItemType(itemId) {
+      const item = await items.findOne(activeItems({ _id: String(itemId) }), { projection: { item_type: 1 } });
+      return item?.item_type || null;
+    },
+
     async findAdminItems(filters = {}) {
-      const documents = await items.find({}).sort({ created_at: -1 }).toArray();
+      const documents = await items.find(activeItems()).sort({ created_at: -1 }).toArray();
       const records = await Promise.all(documents.map(async (document) => {
         const item = normalizeItem(document);
         const reporter = await users.findOne({ _id: item.user_id }, {
@@ -103,7 +112,7 @@ function createItemService(database, notificationService) {
     },
 
     async findInventoryReport() {
-      const documents = await items.find({ item_type: 'found', status: 'stored' })
+      const documents = await items.find(activeItems({ item_type: 'found', status: 'stored' }))
         .sort({ category: 1, item_name: 1 }).toArray();
       return Promise.all(documents.map(async (document) => {
         const item = normalizeItem(document);
@@ -134,6 +143,8 @@ function createItemService(database, notificationService) {
     },
 
     async getAdminDashboardSummary() {
+      const currentItemIds = await activeItemIds();
+      const currentClaims = { item_id: { $in: currentItemIds } };
       const [
         totalItems,
         lostItems,
@@ -150,30 +161,31 @@ function createItemService(database, notificationService) {
         recentItems,
         recentClaims,
       ] = await Promise.all([
-        items.countDocuments({}),
-        items.countDocuments({ item_type: 'lost' }),
-        items.countDocuments({ item_type: 'found' }),
-        claims.countDocuments({ status: 'pending' }),
-        claims.countDocuments({}),
-        items.countDocuments({ item_type: 'found', status: 'returned' }),
-        items.countDocuments({ item_type: 'found', status: 'stored' }),
-        items.countDocuments({ item_type: 'lost', status: { $in: ['lost', 'found'] } }),
-        items.countDocuments({
+        items.countDocuments(activeItems()),
+        items.countDocuments(activeItems({ item_type: 'lost' })),
+        items.countDocuments(activeItems({ item_type: 'found' })),
+        claims.countDocuments({ ...currentClaims, status: 'pending' }),
+        claims.countDocuments(currentClaims),
+        items.countDocuments(activeItems({ item_type: 'found', status: 'returned' })),
+        items.countDocuments(activeItems({ item_type: 'found', status: 'stored' })),
+        items.countDocuments(activeItems({ item_type: 'lost', status: { $in: ['lost', 'found'] } })),
+        items.countDocuments(activeItems({
           item_type: 'found',
           status: { $in: ['found', 'stored'] },
           physical_verification_status: { $ne: 'verified' },
-        }),
-        items.countDocuments({
+        })),
+        items.countDocuments(activeItems({
           item_type: 'found',
           status: { $in: ['found', 'stored'] },
           physical_verification_status: 'verified',
-        }),
-        items.countDocuments({ item_type: 'found', status: 'claimed' }),
+        })),
+        items.countDocuments(activeItems({ item_type: 'found', status: 'claimed' })),
         items.aggregate([
+          { $match: { deleted_at: { $exists: false } } },
           { $group: { _id: '$category', count: { $sum: 1 } } },
           { $sort: { count: -1, _id: 1 } },
         ]).toArray(),
-        items.find({}, {
+        items.find(activeItems(), {
           projection: {
             item_type: 1, item_name: 1, status: 1, created_at: 1, updated_at: 1,
             physical_verification_status: 1, physical_verified_at: 1,
@@ -217,7 +229,8 @@ function createItemService(database, notificationService) {
         }
       }
       for (const claim of recentClaims) {
-        const item = await items.findOne({ _id: claim.item_id }, { projection: { item_name: 1 } });
+        const item = await items.findOne(activeItems({ _id: claim.item_id }), { projection: { item_name: 1 } });
+        if (!item) continue;
         activity.push({
           type: 'claim',
           label: claim.status === 'pending' ? 'Claim submitted' : `Claim ${claim.status}`,
@@ -253,23 +266,36 @@ function createItemService(database, notificationService) {
 
     async findStaffRecords(filters = {}) {
       const [itemDocuments, claimDocuments] = await Promise.all([
-        items.find({}).sort({ created_at: -1 }).toArray(),
-        claims.find({}).sort({ created_at: -1 }).toArray(),
+        items.find(activeItems(), { projection: { item_name: 1, item_type: 1, status: 1, created_at: 1 } })
+          .sort({ created_at: -1 }).toArray(),
+        claims.find({}, { projection: { item_id: 1, status: 1, created_at: 1 } })
+          .sort({ created_at: -1 }).toArray(),
       ]);
-      const itemRecords = await Promise.all(itemDocuments.map(async (document) => {
-        const item = normalizeItem(document);
-        const reporter = await users.findOne({ _id: item.user_id }, {
-          projection: { full_name: 1 },
-        });
-        item.reported_by = reporter?.full_name || 'Unknown';
-        return item;
+      const itemRecords = itemDocuments.map((document) => ({
+        id: String(document._id),
+        item_name: document.item_name,
+        status: document.status,
+        created_at: document.created_at,
+        item_type: document.item_type,
       }));
-      const claimRecords = await this.enrichExistingStaffClaims(claimDocuments);
+      const claimRecords = await Promise.all(claimDocuments.map(async (document) => {
+        const item = await items.findOne(
+          activeItems({ _id: document.item_id }),
+          { projection: { item_name: 1, item_type: 1 } },
+        );
+        if (!item) return null;
+        return {
+          id: String(document._id),
+          item_name: item?.item_name || 'Unknown item',
+          item_type: item?.item_type || '',
+          status: document.status,
+          created_at: document.created_at,
+        };
+      }));
       const query = String(filters.query || '').trim().toLocaleLowerCase();
       const recordType = ['items', 'claims'].includes(filters.record_type) ? filters.record_type : 'all';
       const itemType = ['lost', 'found'].includes(filters.item_type) ? filters.item_type : '';
       const status = String(filters.status || '');
-      const category = String(filters.category || '');
       const dateFrom = isDate(String(filters.date_from || '')) ? String(filters.date_from) : '';
       const dateTo = isDate(String(filters.date_to || '')) ? String(filters.date_to) : '';
       const matchesDate = (date) => {
@@ -281,25 +307,97 @@ function createItemService(database, notificationService) {
       const filteredItems = recordType === 'claims' ? [] : itemRecords.filter((item) => (
         (!itemType || item.item_type === itemType)
         && (!status || item.status === status)
-        && (!category || item.category === category)
         && matchesDate(item.created_at)
-        && matchesQuery(item.item_name, item.description, item.category, item.location, item.reported_by)
+        && matchesQuery(item.id, item.item_name)
       ));
-      const filteredClaims = recordType === 'items' ? [] : claimRecords.filter((claim) => (
-        (!itemType || claim.item.item_type === itemType)
+      const filteredClaims = recordType === 'items' ? [] : claimRecords.filter((claim) => claim && (
+        (!itemType || claim.item_type === itemType)
         && (!status || claim.status === status)
-        && (!category || claim.item.category === category)
         && matchesDate(claim.created_at)
-        && matchesQuery(
-          claim.item_name, claim.claim_details, claim.claimant?.full_name,
-          claim.claimant?.email, claim.item.category, claim.item.location, claim.item.reported_by,
-        )
+        && matchesQuery(claim.id, claim.item_name)
       ));
-      return { items: filteredItems, claims: filteredClaims };
+      const summarize = ({ id, item_name, status, created_at }) => ({
+        id,
+        item_name,
+        status,
+        created_at,
+      });
+      return {
+        items: filteredItems.map(summarize),
+        claims: filteredClaims.map(summarize),
+      };
+    },
+
+    async findStaffDashboardSummary(permissions = []) {
+      const granted = new Set(permissions);
+      const stats = {};
+      const itemTypes = [];
+      if (granted.has('view_lost_reports')) {
+        stats.lostCount = await items.countDocuments(activeItems({
+          item_type: 'lost', status: { $in: ['lost', 'found'] },
+        }));
+        itemTypes.push('lost');
+      }
+      if (granted.has('view_found_items')) {
+        const [foundCount, storedCount, returnedCount] = await Promise.all([
+          items.countDocuments(activeItems({ item_type: 'found', status: { $in: ['found', 'stored'] } })),
+          items.countDocuments(activeItems({ item_type: 'found', status: 'stored' })),
+          items.countDocuments(activeItems({ item_type: 'found', status: 'returned' })),
+        ]);
+        stats.foundCount = foundCount;
+        stats.storedCount = storedCount;
+        stats.returnedCount = returnedCount;
+        itemTypes.push('found');
+      }
+      if (granted.has('view_claims')) {
+        const currentItemIds = await activeItemIds();
+        stats.pendingClaimCount = await claims.countDocuments({
+          status: 'pending',
+          item_id: { $in: currentItemIds },
+        });
+      }
+
+      const activities = [];
+      if (itemTypes.length) {
+        const recentItems = await items.find(
+          activeItems({ item_type: { $in: itemTypes } }),
+          { projection: { item_type: 1, item_name: 1, created_at: 1 } },
+        ).sort({ created_at: -1 }).limit(7).toArray();
+        activities.push(...recentItems.map((item) => ({
+          type: item.item_type,
+          label: `${item.item_type === 'found' ? 'Found' : 'Lost'} report submitted`,
+          name: item.item_name,
+          date: item.created_at,
+        })));
+      }
+      if (granted.has('view_claims')) {
+        const recentClaims = await claims.find(
+          {},
+          { projection: { item_id: 1, status: 1, created_at: 1 } },
+        ).sort({ created_at: -1 }).limit(7).toArray();
+        for (const claim of recentClaims) {
+          const item = await items.findOne(
+            activeItems({ _id: claim.item_id }),
+            { projection: { item_name: 1 } },
+          );
+          activities.push({
+            type: 'claim',
+            label: `Claim ${claim.status}`,
+            name: item?.item_name || 'Unknown item',
+            date: claim.created_at,
+          });
+        }
+      }
+      return {
+        stats,
+        activity: activities
+          .sort((left, right) => String(right.date).localeCompare(String(left.date)))
+          .slice(0, 7),
+      };
     },
 
     async findStaffReturnedItems(filters = {}) {
-      const documents = await items.find({ item_type: 'found', status: 'returned' })
+      const documents = await items.find(activeItems({ item_type: 'found', status: 'returned' }))
         .sort({ returned_at: -1, updated_at: -1 }).toArray();
       const query = String(filters.query || '').trim().toLocaleLowerCase();
       const category = String(filters.category || '');
@@ -321,7 +419,6 @@ function createItemService(database, notificationService) {
         const returnedDate = String(item.returned_at || item.updated_at || '').slice(0, 10);
         const matchesQuery = !query || [
           item.item_name, item.category, item.location, item.reported_by,
-          item.claimant?.full_name, item.claimant?.email,
         ].some((value) => String(value || '').toLocaleLowerCase().includes(query));
         return matchesQuery
           && (!category || item.category === category)
@@ -331,7 +428,7 @@ function createItemService(database, notificationService) {
     },
 
     async findStaffItem(itemId) {
-      const document = await items.findOne({ _id: itemId });
+      const document = await items.findOne(activeItems({ _id: itemId }));
       if (!document) throw new Error('Item record was not found.');
       const item = normalizeItem(document);
       const reporter = await users.findOne({ _id: item.user_id }, {
@@ -345,7 +442,7 @@ function createItemService(database, notificationService) {
     },
 
     async findAdminItem(itemId) {
-      const document = await items.findOne({ _id: String(itemId) });
+      const document = await items.findOne(activeItems({ _id: String(itemId) }));
       if (!document) {
         const error = new Error('Item record was not found.');
         error.status = 404;
@@ -359,8 +456,9 @@ function createItemService(database, notificationService) {
       return item;
     },
 
-    async updateAdminItem(itemId, input) {
-      const existing = await items.findOne({ _id: String(itemId) });
+    async updateAdminItem(itemId, input, session = undefined) {
+      const options = session ? { session } : undefined;
+      const existing = await items.findOne({ _id: String(itemId), deleted_at: { $exists: false } }, options);
       if (!existing) {
         const error = new Error('Item record was not found.');
         error.status = 404;
@@ -388,8 +486,9 @@ function createItemService(database, notificationService) {
         update.$unset = { physical_verified_by: '', physical_verified_at: '' };
       }
       const result = await items.updateOne(
-        { _id: String(itemId), updated_at: existing.updated_at },
+        { _id: String(itemId), updated_at: existing.updated_at, deleted_at: { $exists: false } },
         update,
+        options,
       );
       if (!result.matchedCount) {
         const error = new Error('The item changed before your update. Reload the record and try again.');
@@ -402,12 +501,39 @@ function createItemService(database, notificationService) {
         title: 'Item report updated by an administrator',
         message: `An administrator corrected the details for "${data.item_name}".`,
         href: `/index.php?page=reports&highlight=item-${encodeURIComponent(String(itemId))}`,
-      });
+      }, options);
       return this.findAdminItem(itemId);
     },
 
-    async updateItemStatus(itemId, staffId, status) {
-      const document = await items.findOne({ _id: itemId });
+    async softDeleteAdminItem(itemId, adminId, session = undefined, deletedAt = new Date()) {
+      const options = session ? { session } : undefined;
+      const item = await items.findOne(
+        { _id: String(itemId), deleted_at: { $exists: false } },
+        { projection: { _id: 1, item_name: 1, category: 1, status: 1 } },
+      );
+      if (!item) {
+        const error = new Error('Item record was not found.');
+        error.status = 404;
+        throw error;
+      }
+      const result = await items.updateOne(
+        { _id: String(itemId), deleted_at: { $exists: false } },
+        { $set: { deleted_at: deletedAt, deleted_by: String(adminId), updated_at: deletedAt.toISOString() } },
+        options,
+      );
+      if (!result.matchedCount) throw new Error('The item was already removed.');
+      return {
+        id: String(item._id),
+        item_name: item.item_name,
+        category: item.category,
+        status: item.status,
+        deleted_at: deletedAt,
+      };
+    },
+
+    async updateItemStatus(itemId, staffId, status, session = undefined) {
+      const options = session ? { session } : undefined;
+      const document = await items.findOne(activeItems({ _id: itemId }), options);
       if (!document) throw new Error('Item record was not found.');
       const allowedStatuses = document.item_type === 'found'
         ? ['found', 'stored']
@@ -418,8 +544,9 @@ function createItemService(database, notificationService) {
       }
       const now = new Date().toISOString();
       const result = await items.updateOne(
-        { _id: itemId, status: document.status },
+        { _id: itemId, status: document.status, deleted_at: { $exists: false } },
         { $set: { status, status_updated_by: staffId, updated_at: now } },
+        options,
       );
       if (!result.matchedCount) throw new Error('The item status changed before your update. Reload and try again.');
       await notificationService.create(String(document.user_id), {
@@ -427,30 +554,32 @@ function createItemService(database, notificationService) {
         title: 'Item status updated',
         message: `The status of "${document.item_name}" was updated to ${status}.`,
         href: `/index.php?page=reports&highlight=item-${itemId}`,
-      });
+      }, options);
       return this.findStaffItem(itemId);
     },
 
-    async verifyFoundItem(itemId, staffId) {
+    async verifyFoundItem(itemId, staffId, session = undefined) {
+      const options = session ? { session } : undefined;
       const now = new Date().toISOString();
       const result = await items.updateOne(
-        { _id: itemId, item_type: 'found', status: { $in: activeFoundItemStatuses } },
+        activeItems({ _id: itemId, item_type: 'found', status: { $in: activeFoundItemStatuses } }),
         { $set: {
           physical_verification_status: 'verified',
           physical_verified_by: staffId,
           physical_verified_at: now,
           updated_at: now,
         } },
+        options,
       );
       if (!result.matchedCount) throw new Error('Active found item was not found.');
-      const item = await items.findOne({ _id: itemId });
+      const item = await items.findOne(activeItems({ _id: itemId }), options);
       if (!item) throw new Error('The verified found item record could not be loaded.');
       await notificationService.create(String(item.user_id), {
         type: 'status',
         title: 'Found item verified',
         message: `Staff physically verified your found item report for "${item.item_name}".`,
         href: `/index.php?page=reports&highlight=item-${itemId}`,
-      });
+      }, options);
       return this.findStaffItem(itemId);
     },
 
@@ -459,28 +588,30 @@ function createItemService(database, notificationService) {
       return this.enrichExistingStaffClaims(documents);
     },
 
-    async findStaffClaim(claimId) {
-      const document = await claims.findOne({ _id: claimId });
+    async findStaffClaim(claimId, session = undefined) {
+      const document = await claims.findOne({ _id: claimId }, session ? { session } : undefined);
       if (!document) throw new Error('Claim was not found.');
-      return this.enrichStaffClaim(document);
+      return this.enrichStaffClaim(document, null, session);
     },
 
-    async reviewClaim(claimId, staffId, decision) {
+    async reviewClaim(claimId, staffId, decision, session = undefined) {
+      const options = session ? { session } : undefined;
       if (!['approved', 'rejected'].includes(decision)) throw new Error('Choose approve or reject for this claim.');
       const now = new Date().toISOString();
-      const pendingClaim = await claims.findOne({ _id: claimId, status: 'pending' });
+      const pendingClaim = await claims.findOne({ _id: claimId, status: 'pending' }, options);
       if (!pendingClaim) throw new Error('Only pending claims can be reviewed.');
       let otherPendingClaims = [];
       let previousItemStatus = null;
       if (decision === 'approved') {
-        if (await this.hasApprovedClaim(pendingClaim.item_id)) {
+        if (await this.hasApprovedClaim(pendingClaim.item_id, session)) {
           throw new Error('This item already has an approved claim.');
         }
         const availableItem = await items.findOne({
           _id: pendingClaim.item_id,
           item_type: 'found',
           status: { $in: claimableItemStatuses },
-        });
+          deleted_at: { $exists: false },
+        }, options);
         if (!availableItem) throw new Error('This item is no longer available to approve another claim.');
         previousItemStatus = availableItem.status;
         const result = await items.updateOne(
@@ -492,12 +623,14 @@ function createItemService(database, notificationService) {
             claimed_at: now,
             updated_at: now,
           } },
+          options,
         );
         if (!result.matchedCount) throw new Error('This item is no longer available to approve another claim.');
       }
       const result = await claims.updateOne(
         { _id: claimId, status: 'pending' },
         { $set: { status: decision, reviewed_by: staffId, reviewed_at: now, updated_at: now } },
+        options,
       );
       if (!result.matchedCount) {
         if (decision === 'approved') {
@@ -505,6 +638,7 @@ function createItemService(database, notificationService) {
             { _id: pendingClaim.item_id, status: 'claimed', claimed_claim_id: pendingClaim._id },
             { $set: { status: previousItemStatus, updated_at: new Date().toISOString() },
               $unset: { claimed_by: '', claimed_claim_id: '', claimed_at: '' } },
+            options,
           );
         }
         throw new Error('Only pending claims can be reviewed.');
@@ -514,7 +648,7 @@ function createItemService(database, notificationService) {
           item_id: pendingClaim.item_id,
           status: 'pending',
           _id: { $ne: pendingClaim._id },
-        }).toArray();
+        }, options).toArray();
         otherPendingClaims = otherClaims;
         await claims.updateMany(
           { item_id: pendingClaim.item_id, status: 'pending', _id: { $ne: pendingClaim._id } },
@@ -524,9 +658,10 @@ function createItemService(database, notificationService) {
             reviewed_at: now,
             updated_at: now,
           } },
+          options,
         );
       }
-      const claim = await this.findStaffClaim(claimId);
+      const claim = await this.findStaffClaim(claimId, session);
       const notifications = [
         notificationService.create(claim.user_id, {
           type: 'claim',
@@ -535,7 +670,7 @@ function createItemService(database, notificationService) {
             ? `Your claim for "${claim.item_name}" was approved. Please collect your item from Lost and Found staff. Staff will mark it as returned after you receive it.`
             : `Your claim for "${claim.item_name}" was rejected.`,
           href: `/index.php?page=claims&highlight=claim-${claim.id}`,
-        }),
+        }, options),
       ];
       if (decision === 'approved') {
         notifications.push(notificationService.create(String(claim.item.user_id), {
@@ -543,20 +678,21 @@ function createItemService(database, notificationService) {
           title: 'Found item claimed',
           message: `The found item "${claim.item_name}" has been claimed by its verified owner.`,
           href: `/index.php?page=reports&highlight=item-${claim.item.id}`,
-        }));
+        }, options));
         notifications.push(...otherPendingClaims.map((otherClaim) => notificationService.create(String(otherClaim.user_id), {
           type: 'claim',
           title: 'Claim rejected',
           message: `Your claim for "${claim.item_name}" was closed because the item was approved for another claimant.`,
           href: `/index.php?page=claims&highlight=claim-${otherClaim._id}`,
-        })));
+        }, options)));
       }
       await Promise.all(notifications);
       return claim;
     },
 
-    async markItemReturned(claimId, staffId) {
-      const claim = await claims.findOne({ _id: claimId, status: 'approved' });
+    async markItemReturned(claimId, staffId, session = undefined) {
+      const options = session ? { session } : undefined;
+      const claim = await claims.findOne({ _id: claimId, status: 'approved' }, options);
       if (!claim) throw new Error('Only an approved claim can be marked as returned.');
       const now = new Date().toISOString();
       const result = await items.updateOne(
@@ -566,6 +702,7 @@ function createItemService(database, notificationService) {
           status: 'claimed',
           claimed_claim_id: claim._id,
           claimed_by: claim.user_id,
+          deleted_at: { $exists: false },
         },
         { $set: {
           status: 'returned',
@@ -573,37 +710,40 @@ function createItemService(database, notificationService) {
           returned_at: now,
           updated_at: now,
         } },
+        options,
       );
       if (!result.matchedCount) throw new Error('This approved claim is not attached to an item awaiting return.');
-      const item = await items.findOne({ _id: claim.item_id });
+      const item = await items.findOne(activeItems({ _id: claim.item_id }), options);
       await Promise.all([
         notificationService.create(String(claim.user_id), {
           type: 'status',
           title: 'Item returned',
           message: `The item "${item.item_name}" has been marked as returned to you.`,
           href: `/index.php?page=claims&highlight=claim-${claim._id}`,
-        }),
+        }, options),
         notificationService.create(String(item.user_id), {
           type: 'status',
           title: 'Item return recorded',
           message: `The item "${item.item_name}" has been marked as returned to its owner.`,
           href: `/index.php?page=reports&highlight=item-${item._id}`,
-        }),
+        }, options),
       ]);
-      return this.findStaffClaim(claimId);
+      return this.findStaffClaim(claimId, session);
     },
 
-    async enrichStaffClaim(document, knownItemDocument = null) {
+    async enrichStaffClaim(document, knownItemDocument = null, session = undefined) {
+      const options = session ? { session } : undefined;
       const [itemDocument, claimant] = await Promise.all([
-        knownItemDocument || items.findOne({ _id: document.item_id }),
+        knownItemDocument || items.findOne(activeItems({ _id: document.item_id }), options),
         users.findOne({ _id: document.user_id }, {
           projection: { full_name: 1, email: 1, student_id: 1, phone: 1 },
+          ...(session ? { session } : {}),
         }),
       ]);
       if (!itemDocument) throw new Error('The item for this claim was not found.');
       const reporter = await users.findOne(
         { _id: itemDocument.user_id },
-        { projection: { full_name: 1 } },
+        { projection: { full_name: 1 }, ...(session ? { session } : {}) },
       );
       const item = normalizeItem(itemDocument);
       item.reported_by = reporter?.full_name || 'Unknown';
@@ -619,7 +759,7 @@ function createItemService(database, notificationService) {
 
     async enrichExistingStaffClaims(documents) {
       const records = await Promise.all(documents.map(async (document) => {
-        const itemDocument = await items.findOne({ _id: document.item_id });
+        const itemDocument = await items.findOne(activeItems({ _id: document.item_id }));
         if (!itemDocument) {
           console.warn(`Skipping claim ${document._id} because item ${document.item_id} was not found.`);
           return null;
@@ -631,7 +771,7 @@ function createItemService(database, notificationService) {
 
     async update(userId, itemId, input, imagePath = null) {
       const existing = await items.findOne(
-        { _id: itemId, user_id: userId, status: { $in: activeStatuses } },
+        activeItems({ _id: itemId, user_id: userId, status: { $in: activeStatuses } }),
         { projection: { item_type: 1 } },
       );
       if (!existing) throw new Error('Editable report was not found.');
@@ -646,7 +786,7 @@ function createItemService(database, notificationService) {
         update.$unset = { physical_verified_by: '', physical_verified_at: '' };
       }
       const result = await items.updateOne(
-        { _id: itemId, user_id: userId, status: { $in: activeStatuses } },
+        activeItems({ _id: itemId, user_id: userId, status: { $in: activeStatuses } }),
         update,
       );
       if (!result.matchedCount) throw new Error('Editable report was not found.');
@@ -661,7 +801,7 @@ function createItemService(database, notificationService) {
 
     async cancel(userId, itemId) {
       const result = await items.updateOne(
-        { _id: itemId, user_id: userId, status: { $in: activeStatuses } },
+        activeItems({ _id: itemId, user_id: userId, status: { $in: activeStatuses } }),
         { $set: { status: 'cancelled', updated_at: new Date().toISOString() } },
       );
       if (!result.matchedCount) throw new Error('Only an active report can be cancelled.');
@@ -692,7 +832,8 @@ function createItemService(database, notificationService) {
       if (isDate(filters.date_to)) dateFilter.$lte = filters.date_to;
       if (Object.keys(dateFilter).length) clauses.push({ date_lost: dateFilter });
 
-      const foundItems = await items.find({ $and: clauses }).sort({ date_lost: -1, created_at: -1 }).toArray();
+      const foundItems = await items.find({ $and: [...clauses, { deleted_at: { $exists: false } }] })
+        .sort({ date_lost: -1, created_at: -1 }).toArray();
       const results = await Promise.all(foundItems.map(async (document) => {
         const item = normalizeItem(document);
         const [reporter, claim, approvedClaim] = await Promise.all([
@@ -714,7 +855,7 @@ function createItemService(database, notificationService) {
       const details = String(input.claim_details || '').trim();
       if (!itemId || !details) throw new Error('Select an item and provide ownership details.');
       const item = await items.findOne(
-        { _id: itemId, status: { $in: claimableItemStatuses } },
+        activeItems({ _id: itemId, status: { $in: claimableItemStatuses } }),
         { projection: { user_id: 1, item_type: 1, item_name: 1 } },
       );
       if (!item) throw new Error('That item is no longer available for claims.');
@@ -738,7 +879,7 @@ function createItemService(database, notificationService) {
         throw error;
       }
       const [stillAvailable, approvedClaim] = await Promise.all([
-        items.findOne({ _id: itemId, item_type: 'found', status: { $in: claimableItemStatuses } }),
+        items.findOne(activeItems({ _id: itemId, item_type: 'found', status: { $in: claimableItemStatuses } })),
         this.hasApprovedClaim(itemId),
       ]);
       if (!stillAvailable || approvedClaim) {
@@ -774,7 +915,7 @@ function createItemService(database, notificationService) {
     async findClaimsForUser(userId) {
       const userClaims = await claims.find({ user_id: userId }).sort({ created_at: -1 }).toArray();
       return Promise.all(userClaims.map(async (claim) => {
-        const item = await items.findOne({ _id: claim.item_id });
+        const item = await items.findOne(activeItems({ _id: claim.item_id }));
         if (!item) return null;
         return {
           ...documentToRecord(claim),
@@ -790,6 +931,7 @@ function createItemService(database, notificationService) {
     async findPublic(itemId, userId) {
       const document = await items.findOne({
         _id: itemId,
+        deleted_at: { $exists: false },
         $or: [{ status: { $in: browseableStatuses } }, { status: { $in: ['claimed', 'returned'] } }],
       });
       if (!document) throw new Error('Item was not found or is no longer available.');
@@ -810,8 +952,21 @@ function createItemService(database, notificationService) {
       return item;
     },
 
+    async findPublicItemImage(itemId, userId) {
+      const document = await items.findOne({
+        _id: String(itemId),
+        deleted_at: { $exists: false },
+        item_type: 'lost',
+        $or: [
+          { status: { $in: [...browseableStatuses, 'claimed', 'returned'] } },
+          ...(userId ? [{ user_id: String(userId) }] : []),
+        ],
+      }, { projection: { image_path: 1 } });
+      return document?.image_path || null;
+    },
+
     async findOne(userId, itemId) {
-      const document = await items.findOne({ _id: itemId, user_id: userId });
+      const document = await items.findOne(activeItems({ _id: itemId, user_id: userId }));
       if (!document) throw new Error('Report was not found.');
       const item = normalizeItem(document);
       if (item.item_type === 'found') delete item.image_path;
@@ -819,7 +974,7 @@ function createItemService(database, notificationService) {
     },
 
     async findAvailable(itemId, userId) {
-      const document = await items.findOne({ _id: itemId, item_type: 'found', status: { $in: claimableItemStatuses } });
+      const document = await items.findOne(activeItems({ _id: itemId, item_type: 'found', status: { $in: claimableItemStatuses } }));
       if (!document) throw new Error('Item was not found or is not yet stored for claims.');
        if (await this.hasApprovedClaim(itemId)) throw new Error('Item has already been claimed.');
        if (String(document.user_id) === userId) throw new Error('You cannot claim your own report.');

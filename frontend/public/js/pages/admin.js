@@ -1,0 +1,357 @@
+import * as shared from '../shared.js';
+const { API, sessionInfo, h, date, param, link, buttonLink, badge, itemStatusLabel, itemTypeLabel, field, selectField, optionsFrom, request, icon, pageHeader, table, formAction } = shared;
+
+async function adminDashboard() {
+  const { users, summary } = await request('/admin/dashboard');
+  const adminStat = (name, style, title, value, note) => `<article class="card admin-overview-stat"><span class="admin-overview-icon ${style}">${icon(name, 17)}</span>
+    <div><span class="stat-label">${title}</span><strong>${value}</strong><small>${note}</small></div></article>`;
+  const shortcuts = [
+    ['user', 'User Management', `${users.totalUsers} accounts`, 'admin-users'],
+    ['clipboard', 'All Items', `${summary.totalItems} items`, 'admin-items'],
+    ['file', 'All Claims', `${summary.totalClaims} total · ${summary.pendingClaims} pending`, 'admin-claims'],
+    ['file', 'Inventory Report', `${summary.storedItems} in custody`, 'admin-inventory'],
+    ['user', 'Add User', 'Create an account', 'admin-add-user'],
+    ['shield', 'Role Permissions', 'Manage User and Staff access', 'admin-role-permissions'],
+    ['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records'],
+    ['settings', 'Settings', 'Sign-in integrations', 'admin-settings'],
+  ];
+  return `<main class="container admin-overview">${pageHeader('Admin Dashboard', 'System overview — Bukidnon State University Lost &amp; Found')}
+    <section class="admin-overview-stats" aria-label="System statistics">
+      ${adminStat('user', 'users', 'Total users', users.totalUsers, `${users.activeUsers} active`)}
+      ${adminStat('clipboard', 'items', 'Total items', summary.totalItems, `${summary.lostItems} lost, ${summary.foundItems} recovered`)}
+      ${adminStat('file', 'claims', 'Pending claims', summary.pendingClaims, 'Needs review')}
+      ${adminStat('check', 'returned', 'Items returned', summary.returnedItems, 'Resolved')}
+      ${adminStat('clipboard', 'stored', 'Items in staff custody', summary.storedItems, 'Awaiting return to their owners')}
+    </section><section class="admin-overview-middle">
+      <section class="card admin-overview-panel admin-category-panel"><div class="admin-overview-panel-heading"><h2>Items by category</h2><span>All time</span></div>
+        ${summary.categoryCounts.length ? `<div class="admin-category-list">${summary.categoryCounts.map((entry) => `<div class="admin-category-row"><span class="admin-category-name">${h(entry.category)}</span>
+          <span class="admin-category-track"><span style="width:${Math.max(4, Math.round(entry.count / summary.categoryCounts[0].count * 100))}%"></span></span><strong>${entry.count}</strong></div>`).join('')}</div>` : '<p class="empty">No item records yet.</p>'}</section>
+      <section class="card admin-overview-panel admin-shortcuts-panel"><h2>Administration</h2><div class="admin-shortcuts">
+        ${shortcuts.map(([iconName, title, note, destination]) => `<a class="admin-shortcut" href="/?page=${destination}">${icon(iconName, 17)}<span><strong>${title}</strong><small>${note}</small></span></a>`).join('')}
+      </div></section></section>
+      <section class="admin-overview-bottom"><section class="card admin-overview-panel admin-status-panel"><h2>Item status breakdown</h2><ul class="admin-status-list">
+        <li><span><i class="status-dot lost"></i>Lost (Active)</span><strong>${summary.statusCounts.lostActive}</strong></li>
+        <li><span><i class="status-dot unverified"></i>Awaiting handoff</span><strong>${summary.statusCounts.foundUnverified}</strong></li>
+        <li><span><i class="status-dot verified"></i>Verified</span><strong>${summary.statusCounts.foundVerified}</strong></li>
+        <li><span><i class="status-dot stored"></i>In staff custody</span><strong>${summary.statusCounts.stored}</strong></li>
+        <li><span><i class="status-dot claimed"></i>Claimed</span><strong>${summary.statusCounts.claimed}</strong></li>
+        <li><span><i class="status-dot returned"></i>Returned</span><strong>${summary.statusCounts.returned}</strong></li></ul></section>
+      <section class="card admin-overview-panel admin-recent-panel"><div class="admin-overview-panel-heading"><h2>Recent activity</h2>${link('admin-items', 'View items →')}</div>
+        ${summary.activity.length ? `<div class="dashboard-activity">${summary.activity.map((entry) => `<div class="dashboard-activity-row">
+          <span class="dashboard-activity-icon ${entry.type}">${icon(entry.type === 'claim' ? 'clipboard' : entry.type === 'found' ? 'check' : 'alert', 15)}</span>
+          <div><strong>${h(entry.label)}</strong><span>${h(entry.name)} · ${h(entry.detail)}</span></div><time>${date(entry.date)}</time></div>`).join('')}</div>` : '<p class="empty">No recent system activity.</p>'}</section></section>
+    </main>`;
+}
+
+async function adminUsers() {
+  const { users } = await request('/admin/users');
+  const rows = users.map((account) => `<tr><td class="item-name">${h(account.full_name)}</td><td>${h(account.email)}</td>
+    <td><span class="badge badge-${account.role_name === 'staff' ? 'active' : 'pending'}">${account.role_name === 'staff' ? 'Staff' : 'User'}</span></td>
+    <td><span class="badge badge-${account.status === 'active' ? 'active' : 'cancelled'}">${account.status === 'active' ? 'Active' : 'Disabled'}</span></td>
+    <td class="right"><div class="admin-account-actions">
+      ${account.status === 'active' ? `<a class="button button-outline" href="/?page=admin-edit-user&amp;id=${encodeURIComponent(account.id)}">Edit</a>
+        ${formAction('admin-user', account.id, account.role_name === 'user' ? 'Assign staff' : 'Revert to user', 'secondary',
+          { action: account.role_name === 'user' ? 'assign_staff' : 'revert_staff' })}
+        ${formAction('admin-user', account.id, 'Disable', 'danger', { action: 'disable' })}`
+        : formAction('admin-user', account.id, 'Re-enable', 'secondary', { action: 'enable' })}</div></td></tr>`);
+  return `<main class="container admin-dashboard">${pageHeader('User Management', 'Manage accounts, staff access, and account status.',
+    buttonLink('admin-add-user', 'Add User', 'button-primary'))}
+    <section class="card admin-access-notice"><h2>Manage account access</h2><p>Assign or remove staff access, disable accounts, or re-enable them if they were disabled by mistake. Role changes apply on the account’s next request, and disabled accounts are signed out then. Admin accounts are managed separately.</p></section>
+    <section class="card admin-accounts"><div class="admin-accounts-heading"><h2>User accounts</h2><span>${users.length} accounts</span></div>
+      ${users.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="right">Actions</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`
+        : '<p class="empty">There are no user or staff accounts to manage.</p>'}
+    </section></main>`;
+}
+
+function adminAddUser() {
+  return `<main class="container admin-dashboard admin-add-user"><a class="back-link" href="/?page=admin-users">&larr; Back to User Management</a>
+    ${pageHeader('Add User', 'Create an active account. Staff access can be assigned separately from the admin dashboard.')}
+    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-add-user">${field('Full name', 'full_name', 'text', '', true)}
+    ${field('Email address', 'email', 'email', '', true)}${field('Student ID', 'student_id')}
+    ${field('Phone number', 'phone', 'tel')}<div class="field"><label for="password">Temporary password</label>
+      <input class="input" id="password" name="password" type="password" required minlength="8"><small class="admin-password-hint">Use at least 8 characters.</small></div>
+    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Create user account</button></div></form></main>`;
+}
+
+async function adminRolePermissions() {
+  const { roles } = await request('/admin/role-permissions');
+  const selectedRole = param('role') === 'staff' ? 'staff' : 'user';
+  const selected = roles.find((entry) => entry.role === selectedRole);
+  const permissions = selected.permissions;
+  const groups = [...new Set(permissions.map(({ group }) => group))];
+  const enabled = permissions.filter(({ enabled: isEnabled }) => isEnabled).map(({ key }) => key);
+  return `<main class="container admin-dashboard admin-role-permissions">${pageHeader(
+    'Role Permissions',
+    'Changes apply to every account with the selected role immediately.',
+  )}
+    <div class="card role-permission-selector"><div class="field"><label for="role-permission-role">Role</label>
+      <select class="select" id="role-permission-role" data-action="role-permission-role">
+        <option value="user" ${selectedRole === 'user' ? 'selected' : ''}>User</option>
+        <option value="staff" ${selectedRole === 'staff' ? 'selected' : ''}>Staff</option>
+      </select></div><p class="muted">Admin permissions are fixed and cannot be changed.</p></div>
+    <form class="card role-permission-form" data-form="admin-role-permissions" data-role="${selectedRole}"
+      data-saved-permissions="${h(JSON.stringify(enabled))}"
+      data-dependencies="${h(JSON.stringify(Object.fromEntries(permissions.map(({ key, requires }) => [key, requires]))))}">
+      <h2>${selectedRole === 'user' ? 'User' : 'Staff'} checklist</h2>
+      <p class="role-permission-warning">Turning off a permission disables that feature for every ${selectedRole} account.</p>
+      <div class="role-permission-groups">${groups.map((group) => `<fieldset class="role-permission-group"><legend>${h(group)}</legend>
+        ${permissions.filter((permission) => permission.group === group).map((permission) => `<label class="role-permission-option">
+          <input type="checkbox" name="permissions" value="${h(permission.key)}" ${permission.enabled ? 'checked' : ''}>
+          <span><strong>${h(permission.label)}</strong>${permission.requires.length ? `<small>Requires: ${h(permission.requires.map((key) => permissions.find((entry) => entry.key === key)?.label || key).join(', '))}</small>` : ''}</span>
+        </label>`).join('')}
+      </fieldset>`).join('')}</div>
+      <div class="form-actions"><button class="button button-secondary" type="button" data-action="cancel-role-permissions">Cancel</button>
+        <button class="button button-primary" type="submit" disabled>Save Changes</button></div>
+    </form>
+  </main>`;
+}
+
+async function adminEditUser(id) {
+  const { users } = await request('/admin/users');
+  const user = users.find((account) => account.id === id);
+  if (!user) throw new Error('User account was not found.');
+  return `<main class="container admin-dashboard admin-edit-user">${pageHeader('Edit user')}
+    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}">
+    ${field('Full name', 'full_name', 'text', user.full_name, true)}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
+    ${field('Student ID', 'student_id', 'text', user.student_id || '')}${field('Phone number', 'phone', 'tel', user.phone || '')}
+    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save changes</button></div></form></main>`;
+}
+
+async function adminItems() {
+  const query = new URLSearchParams(location.search);
+  const search = new URLSearchParams();
+  ['query', 'item_type', 'status', 'category', 'date_from', 'date_to'].forEach((key) => {
+    if (query.get(key)) search.set(key, query.get(key));
+  });
+  const { items } = await request(`/admin/items?${search}`);
+  const rows = items.map((item) => `<article class="admin-item-row"><div class="admin-item-summary">
+      <h3>${h(item.item_name)}</h3><p>${itemTypeLabel(item.item_type)} report · ${h(item.category)} · ${h(item.location)}</p>
+      <p>Reported by ${h(item.reported_by || 'Unknown')} · ${date(item.created_at)}</p><p class="admin-item-description">${h(item.description)}</p>
+    </div><div class="admin-item-actions">${badge(item.status, itemStatusLabel(item.status, item.item_type))}
+      <a class="button button-outline" href="/?page=admin-edit-item&amp;id=${encodeURIComponent(item.id)}">Edit record</a>
+      ${formAction('admin-item-remove', item.id, 'Remove', 'danger')}</div></article>`);
+  return `<main class="container admin-dashboard admin-items-page"><header class="page-header browse-header"><div><h1>All Items</h1><p>${items.length} item records found</p></div>
+    ${buttonLink('admin-dashboard', 'Admin dashboard', 'button-secondary')}</header>
+    <form method="get" class="browse-filter-form"><input type="hidden" name="page" value="admin-items"><div class="card browse-toolbar">
+      <label class="browse-search" for="query">${icon('search', 17)}<input id="query" name="query" value="${h(query.get('query') || '')}" placeholder="Search item, description, location, reporter..."></label>
+      <select class="select" name="item_type" aria-label="Filter by item type"><option value="">All Types</option>${['lost', 'found'].map((value) => `<option value="${value}" ${query.get('item_type') === value ? 'selected' : ''}>${itemTypeLabel(value)}</option>`).join('')}</select>
+      <select class="select" name="status" aria-label="Filter by status"><option value="">All Statuses</option>${['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled'].map((value) => `<option value="${value}" ${query.get('status') === value ? 'selected' : ''}>${itemStatusLabel(value)}</option>`).join('')}</select>
+      <select class="select" name="category" aria-label="Filter by category">${optionsFrom(sessionInfo.categories).map(([value, label]) => `<option value="${value}" ${query.get('category') === value ? 'selected' : ''}>${h(label)}</option>`).join('')}</select>
+      <button class="button button-primary browse-search-submit" type="submit">Search</button></div>
+      <details class="browse-more-filters" ${query.get('date_from') || query.get('date_to') ? 'open' : ''}><summary>Filter by date</summary><div class="browse-more-grid">
+        <div class="field"><label for="date_from">From date</label><input class="input" id="date_from" name="date_from" type="date" value="${h(query.get('date_from') || '')}"></div>
+        <div class="field"><label for="date_to">To date</label><input class="input" id="date_to" name="date_to" type="date" value="${h(query.get('date_to') || '')}"></div>
+        <div class="browse-more-actions"><button class="button button-primary" type="submit">Apply filters</button><a class="button button-secondary" href="/?page=admin-items">Clear filters</a></div>
+      </div></details>
+    </form><section class="card admin-items-list"><div class="admin-items-list-heading"><h2>Item records</h2><span>${items.length} ${items.length === 1 ? 'item' : 'items'}</span></div>
+      ${rows.length ? rows.join('') : '<p class="empty">No item records match these filters.</p>'}
+    </section></main>`;
+}
+
+async function adminEditItem(id) {
+  const { item } = await request(`/admin/items/${encodeURIComponent(id)}`);
+  const dateLabel = item.item_type === 'found' ? 'Date found' : 'Date lost';
+  const imageUrl = item.item_type === 'found' && item.image_path
+    ? `${API}/admin/items/${encodeURIComponent(item.id)}/image`
+    : '';
+  return `<main class="container admin-edit-item-page">
+    <a class="back-link" href="/?page=admin-items">← Back to All Items</a>
+    <header class="admin-edit-item-heading"><div><h1>Edit Item Record</h1>
+      <p>Correct item details reported by ${h(item.reported_by || 'Unknown')}.</p></div>
+      ${badge(item.item_type, itemTypeLabel(item.item_type))}</header>
+    <div class="tip admin-edit-item-notice">Editing the record does not change its owner, item type, or workflow status. If verified found-item details are changed, staff verification will need to be repeated.</div>
+    <div class="admin-edit-item-layout${imageUrl ? ' has-image' : ''}">
+    <form class="card form-grid admin-edit-item-form" data-form="admin-edit-item" data-id="${h(id)}">
+      ${field('Item name', 'item_name', 'text', item.item_name, true)}
+      ${selectField('Category', 'category', sessionInfo.categories.map((value) => [value, value]), item.category, true)}
+      ${field('Location', 'location', 'text', item.location, true)}
+      ${field(dateLabel, 'date_lost', 'date', String(item.date_lost).slice(0, 10), true)}
+      <div class="field full"><label for="description">Description</label><textarea class="textarea" id="description" name="description" required>${h(item.description)}</textarea></div>
+      <div class="field full"><label for="identifying_details">Private identifying details</label><textarea class="textarea" id="identifying_details" name="identifying_details" required>${h(item.identifying_details)}</textarea>
+        <p class="admin-edit-item-hint">Only authorized staff can use these details to verify ownership claims.</p></div>
+      <div class="admin-edit-item-actions field full"><a class="button button-secondary" href="/?page=admin-items">Cancel</a>
+        <button class="button button-primary" type="submit">Save changes</button></div>
+    </form>
+    ${imageUrl ? `<figure class="admin-edit-item-media"><img alt="${h(item.item_name)}" src="${h(imageUrl)}"><figcaption>Photo provided with the report</figcaption></figure>` : ''}
+    </div></main>`;
+}
+
+async function adminClaims() {
+  const query = new URLSearchParams(location.search);
+  const filters = new URLSearchParams();
+  ['query', 'status'].forEach((key) => { if (query.get(key)) filters.set(key, query.get(key)); });
+  const { claims } = await request(`/admin/claims?${filters}`);
+  return `<main class="container staff-workspace admin-claims-page"><header class="page-header browse-header"><div><h1>All Claims</h1><p>${claims.length} ${claims.length === 1 ? 'claim' : 'claims'} found</p></div>
+    ${buttonLink('admin-dashboard', 'Admin dashboard', 'button-secondary')}</header>
+    <form method="get" class="browse-filter-form"><input type="hidden" name="page" value="admin-claims"><div class="card browse-toolbar">
+      <label class="browse-search" for="admin-claims-search">${icon('search', 17)}<input id="admin-claims-search" name="query" value="${h(query.get('query') || '')}" placeholder="Search item, claimant, or claim details..."></label>
+      <select class="select" name="status" aria-label="Filter by claim status">${optionsFrom(['pending', 'approved', 'rejected']).map(([value, label]) => `<option value="${value}" ${query.get('status') === value ? 'selected' : ''}>${label ? label[0].toUpperCase() + label.slice(1) : 'All statuses'}</option>`).join('')}</select>
+      <button class="button button-primary browse-search-submit" type="submit">Search</button><a class="button button-secondary" href="/?page=admin-claims">Clear</a>
+    </div></form><section class="card staff-record-list staff-claims-list"><div class="staff-list-heading"><h2>Claim records</h2><span>${claims.length} claims</span></div>
+      ${claims.length ? claims.map((claim) => `<article class="admin-claim-record"><div class="admin-claim-record-main"><h3>${h(claim.item_name)}</h3>
+        <p>${h(claim.item.category)} · ${h(claim.item.location)} · Reported by ${h(claim.item.reported_by || 'Unknown')}</p>
+        <p>Claimant: <strong>${h(claim.claimant?.full_name || 'Account unavailable')}</strong>${claim.claimant?.email ? ` · ${h(claim.claimant.email)}` : ''}</p>
+        <p class="admin-claim-details">${h(claim.claim_details)}</p></div><div class="admin-claim-record-meta">${badge(claim.status)}<time>Submitted ${date(claim.created_at)}</time></div></article>`).join('')
+        : `<div class="staff-claims-empty"><span class="staff-empty-icon">${icon('clipboard', 22)}</span><h3>No claims found</h3><p>Claims matching your filters will appear here.</p></div>`}
+    </section></main>`;
+}
+
+async function adminInventory() {
+  const { items } = await request('/admin/inventory');
+  const categories = new Set(items.map((item) => item.category).filter(Boolean));
+  const generatedOn = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const inventoryTable = items.map((item) => `<tr><td class="item-name">${h(item.item_name)}</td><td>${h(item.category)}</td>
+    <td>${h(item.location)}</td><td>${date(item.date_lost)}</td><td>${h(item.reported_by || 'Unknown')}</td>
+    <td><span class="badge ${item.physical_verification_status === 'verified' ? 'badge-active' : 'badge-not-verified'}">${item.physical_verification_status === 'verified' ? 'Verified' : 'Pending'}</span></td></tr>`);
+  return `<main class="container admin-dashboard admin-inventory-page">
+    <header class="page-header admin-inventory-header"><div><h1>Inventory Report</h1><p>Found items currently stored in Lost and Found custody.</p></div>
+      <div class="admin-inventory-actions">${buttonLink('admin-dashboard', 'Admin dashboard', 'button-secondary')}
+        <button class="button button-primary" type="button" data-action="print-inventory">Print report</button></div></header>
+    <section class="admin-inventory-summary" aria-label="Inventory summary">
+      <article class="card admin-inventory-stat"><span class="stat-label">Items in custody</span><strong>${items.length}</strong></article>
+      <article class="card admin-inventory-stat"><span class="stat-label">Categories represented</span><strong>${categories.size}</strong></article>
+      <article class="card admin-inventory-stat"><span class="stat-label">Report generated</span><strong>${generatedOn}</strong></article>
+    </section>
+    <section class="card admin-inventory-table"><div class="admin-inventory-table-heading"><h2>Stored found items</h2><span>${items.length} ${items.length === 1 ? 'item' : 'items'}</span></div>
+      ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Item</th><th>Category</th><th>Location found</th><th>Date found</th><th>Reported by</th><th>Verification</th></tr></thead><tbody>${inventoryTable.join('')}</tbody></table></div>`
+        : '<p class="empty">There are no found items currently in staff custody.</p>'}
+    </section>
+    <p class="admin-inventory-footnote">This report includes found-item records currently marked as stored. Returned, claimed, and other records are excluded.</p>
+  </main>`;
+}
+
+async function adminSettings() {
+  const { integrations, csrfToken } = await request('/admin/settings');
+  const descriptions = {
+    google_auth: 'Allow users to sign in or create an account using a verified Google account.',
+    recaptcha: 'Require users to complete a reCAPTCHA challenge before signing in or creating an account.',
+    smtp: 'Send password reset messages using this SMTP server.',
+  };
+  const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}">
+    <div class="integration-setting-main">
+      <div class="integration-setting-copy"><div class="integration-setting-heading"><h2>${h(integration.label)}</h2></div>
+        <p>${h(descriptions[integration.id] || '')}</p>
+        <p class="integration-config-status">Status: <span class="badge ${integration.active ? 'badge-active' : integration.configured ? 'badge-cancelled' : 'badge-pending'}" data-integration-status>${h(integration.status)}</span></p>
+        <p class="integration-missing-fields" data-integration-missing>${integration.missingFields.length
+          ? `Missing: ${integration.missingFields.map((name) => {
+            const field = integration.fields.find((entry) => entry.name === name);
+            return h(field?.label || name);
+          }).join(', ')}` : ''}</p>
+      </div>
+      <div class="integration-setting-actions">
+        <button class="button button-outline" type="button" data-action="integration-toggle" data-enabled="${integration.enabled}">
+          ${integration.enabled ? 'Disable' : 'Enable'}</button>
+      </div>
+    </div>
+    <details class="integration-fields-disclosure">
+      <summary class="button button-outline">Change keys / settings</summary>
+      <div class="integration-fields">${integration.fields.map((field) => `<div class="field">
+        <label for="integration-${h(integration.id)}-${h(field.name)}">${h(field.label)}${field.required ? ' <span aria-hidden="true">*</span>' : ''}</label>
+        ${field.type === 'checkbox'
+          ? `<input id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="checkbox" ${field.value ? 'checked' : ''}>`
+          : `<input class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="${h(field.secret ? 'password' : field.type)}"
+            value="${field.secret ? '' : h(field.value)}" placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
+            ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? 'inputmode="numeric"' : ''} autocomplete="off">`}
+        <small class="integration-field-error" data-field-error="${h(field.name)}" role="alert"></small>
+      </div>`).join('')}</div>
+      ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test Connection</button>' : ''}
+    </details>
+    <div class="integration-card-actions" hidden>
+      <button class="button button-primary" type="button" data-action="save-integration">Save Changes</button>
+      <button class="button button-outline" type="button" data-action="cancel-integration">Cancel</button>
+    </div>
+  </section>`).join('');
+  return `<main class="container admin-dashboard admin-settings" data-csrf-token="${h(csrfToken)}">
+    ${pageHeader('Settings', 'Manage optional sign-in integrations for the system.')}
+    <form data-form="integration-settings" novalidate>${cards}
+      <p class="integration-settings-note">Save Changes and Cancel appear at the bottom of a card after you edit a field or toggle. Secret values remain masked; leave a secret field empty to keep its saved value.</p>
+    </form>
+  </main>`;
+}
+
+async function adminSystemRecords() {
+  const query = new URLSearchParams(location.search);
+  const now = new Date();
+  const maxDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const dateFrom = query.get('date_from') || '';
+  const dateTo = query.get('date_to') || '';
+  const safeDateFrom = dateFrom <= maxDate ? dateFrom : '';
+  const safeDateTo = dateTo <= maxDate ? dateTo : '';
+  const filters = new URLSearchParams();
+  for (const key of ['date_from', 'date_to', 'actor_id', 'actor_role', 'action', 'target_type', 'result']) {
+    if (query.get(key)) filters.set(key, query.get(key));
+  }
+  if (dateFrom > maxDate) filters.delete('date_from');
+  if (dateTo > maxDate) filters.delete('date_to');
+  filters.set('page', query.get('audit_page') || '1');
+  const { records, page, total, total_pages: totalPages } = await request(`/admin/system-records?${filters}`);
+  const actions = [
+    'user.create', 'user.update', 'user.disable', 'staff_permissions.update', 'role_permissions.update',
+    'item.update', 'item.remove', 'report.generate', 'claim.approve',
+    'claim.reject', 'ownership.verify', 'item.status_update', 'item.mark_returned',
+    'auth.login', 'auth.login_failed', 'access.denied',
+    'integration.enable', 'integration.disable', 'integration.update',
+  ];
+  const rows = records.map((record) => `<tr>
+    <td data-label="Date"><time class="audit-date" datetime="${h(record.created_at)}">
+      <span>${h(new Date(record.created_at).toLocaleDateString())}</span>
+      <small>${h(new Date(record.created_at).toLocaleTimeString())}</small>
+    </time></td>
+    <td class="audit-actor" data-label="Actor">
+      <div class="audit-cell-content">
+        <span class="audit-role audit-role-${record.actor_role === 'admin' ? 'admin' : record.actor_role === 'staff' ? 'staff' : 'unknown'}">${h(record.actor_role || 'Unauthenticated')}</span>
+        <code>${h(record.actor_role ? record.actor_id || 'ID unavailable' : 'No account ID')}</code>
+      </div>
+    </td>
+    <td class="audit-action" data-label="Action / result"><div class="audit-cell-content"><strong>${h(record.action)}</strong><span class="audit-result audit-result-${h(record.result)}">${h(record.result)}</span></div></td>
+    <td class="audit-target" data-label="Target"><div class="audit-cell-content"><span>${h(record.target_type || 'No target')}</span>
+      ${record.target_id ? `<code>${h(record.target_id)}</code>` : ''}
+    </div>
+    </td>
+    <td data-label="Changes"><details class="audit-details"><summary>View details</summary><pre>${h(JSON.stringify({
+      ...(record.old_value ? { old: record.old_value } : {}),
+      ...(record.new_value ? { new: record.new_value } : {}),
+      ...(record.ip_address ? { ip_address: record.ip_address } : {}),
+    }, null, 2))}</pre></details></td></tr>`);
+  const pageLink = (target) => {
+    const params = new URLSearchParams(filters);
+    params.delete('page');
+    params.set('audit_page', String(target));
+    const urlParams = new URLSearchParams({ page: 'admin-system-records' });
+    for (const [key, value] of params) urlParams.set(key, value);
+    return `/?${urlParams.toString()}`;
+  };
+  return `<main class="container admin-dashboard admin-system-records">
+    <header class="audit-page-header"><div><span class="audit-eyebrow">ADMINISTRATION / AUDIT TRAIL</span>
+      <h1>System Records</h1><p>Review important administrative and staff activity across your system.</p></div>
+      <div class="audit-page-badge"><span aria-hidden="true">●</span> Read-only log</div>
+    </header>
+    <form method="get" class="card system-record-filters"><input type="hidden" name="page" value="admin-system-records">
+      <div class="audit-filter-heading"><div><h2>Filter records</h2><p>Choose criteria to narrow the audit history.</p></div></div>
+      <div class="field"><label for="audit-from">From</label><input class="input" id="audit-from" name="date_from" type="date" max="${maxDate}" value="${h(safeDateFrom)}"></div>
+      <div class="field"><label for="audit-to">To</label><input class="input" id="audit-to" name="date_to" type="date" max="${maxDate}" value="${h(safeDateTo)}"></div>
+      <div class="field"><label for="audit-actor">Actor ID</label><input class="input" id="audit-actor" name="actor_id" placeholder="Enter an account ID" value="${h(query.get('actor_id') || '')}"></div>
+      <div class="field"><label for="audit-actor-role">Actor role</label><select class="select" id="audit-actor-role" name="actor_role">
+        ${['', 'admin', 'staff'].map((value) => `<option value="${value}" ${query.get('actor_role') === value ? 'selected' : ''}>${value || 'All roles'}</option>`).join('')}</select></div>
+      <div class="field"><label for="audit-action">Action</label><select class="select" id="audit-action" name="action"><option value="">All actions</option>
+        ${actions.map((action) => `<option value="${action}" ${query.get('action') === action ? 'selected' : ''}>${action}</option>`).join('')}</select></div>
+      <div class="field"><label for="audit-target">Target type</label><select class="select" id="audit-target" name="target_type">
+        ${['', 'user', 'staff', 'item', 'claim', 'report', 'integration'].map((value) => `<option value="${value}" ${query.get('target_type') === value ? 'selected' : ''}>${value || 'All types'}</option>`).join('')}</select></div>
+      <div class="field"><label for="audit-result">Result</label><select class="select" id="audit-result" name="result">
+        ${['', 'success', 'denied', 'failed', 'attempted'].map((value) => `<option value="${value}" ${query.get('result') === value ? 'selected' : ''}>${value || 'All results'}</option>`).join('')}</select></div>
+      <button class="button button-primary" type="submit">Apply filters</button>
+      <a class="button button-secondary" href="/?page=admin-system-records">Clear</a>
+    </form>
+    <section class="card system-record-table"><div class="admin-items-list-heading"><div><h2>Audit events</h2><p>Newest activity appears first.</p></div><span>${total} ${total === 1 ? 'record' : 'records'}</span></div>
+      ${rows.length ? `<div class="table-wrap"><table class="system-records-grid"><thead><tr><th>Date</th><th>Actor</th><th>Action / result</th><th>Target</th><th>Changes</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`
+        : '<p class="empty">No records match these filters.</p>'}
+      <nav class="system-record-pagination" aria-label="System records pages">
+        <span>Page ${page} of ${Math.max(1, totalPages)}</span>
+        ${page > 1 ? `<a class="button button-outline" href="${pageLink(page - 1)}">Previous</a>` : ''}
+        ${page < totalPages ? `<a class="button button-outline" href="${pageLink(page + 1)}">Next</a>` : ''}
+      </nav>
+    </section>
+  </main>`;
+}
+
+export { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminRolePermissions, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };

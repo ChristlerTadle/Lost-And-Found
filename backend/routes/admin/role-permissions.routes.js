@@ -1,0 +1,11 @@
+const express = require('express');
+const { asyncRoute } = require('../../middlewares/async-route');
+
+function createAdminRolePermissionsRoutes({ controllers, guards }) {
+  const router = express.Router();
+  router.get('/role-permissions', guards.requireRole(['admin']), asyncRoute(controllers.admin.getAdminRolePermissions));
+  router.put('/role-permissions/:role', guards.requireRole(['admin']), asyncRoute(controllers.admin.putAdminRolePermissions));
+  return router;
+}
+
+module.exports = { createAdminRolePermissionsRoutes };

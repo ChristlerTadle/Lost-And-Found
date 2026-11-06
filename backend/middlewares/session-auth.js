@@ -1,0 +1,74 @@
+const { asyncRoute } = require('./async-route');
+
+async function optionalUser(req) {
+  return currentUser(req);
+}
+
+async function currentUser(req) {
+  if (!req.session.user) return null;
+  const user = await req.app.locals.services.auth.findActiveSessionUser(req.session.user.id);
+  if (!user) {
+    await destroySession(req);
+    return null;
+  }
+  req.session.user = user;
+  return user;
+}
+
+async function requireUser(req) {
+  const user = await currentUser(req);
+  if (!user) {
+    const error = new Error('Sign in is required.');
+    error.status = 401;
+    throw error;
+  }
+  req.session.user = user;
+  return user;
+}
+
+function startSession(req, user) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((error) => {
+      if (error) return reject(error);
+      req.session.user = user;
+      req.session.save((saveError) => (saveError ? reject(saveError) : resolve()));
+    });
+  });
+}
+
+function saveSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.save((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function destroySession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.destroy((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function createAuthGuards(auth) {
+  const authenticated = asyncRoute(async (req, _res, next) => {
+    req.user = await requireUser(req);
+    next();
+  });
+  const requireRole = (roles) => asyncRoute(async (req, _res, next) => {
+    const user = req.user || await requireUser(req);
+    req.user = user;
+    auth.requireRole(user, roles);
+    next();
+  });
+
+  return { authenticated, requireRole };
+}
+
+module.exports = {
+  optionalUser,
+  currentUser,
+  requireUser,
+  startSession,
+  saveSession,
+  destroySession,
+  createAuthGuards,
+};

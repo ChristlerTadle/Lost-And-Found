@@ -1,20 +1,29 @@
 const { randomBytes } = require('node:crypto');
 const { OAuth2Client } = require('google-auth-library');
 
-function createGoogleOAuth(config) {
-  const enabled = Boolean(config.clientId && config.clientSecret);
-  if (enabled && process.env.NODE_ENV === 'production' && new URL(config.redirectUri).protocol !== 'https:') {
-    throw new Error('GOOGLE_REDIRECT_URI must use HTTPS in production.');
+function createGoogleOAuth(getIntegration) {
+  async function getClient() {
+    const integration = await getIntegration('google_auth');
+    if (!integration.active) {
+      const error = new Error(integration.configured
+        ? 'Google sign-in is disabled.'
+        : 'Google sign-in is not configured.');
+      error.status = 400;
+      throw error;
+    }
+    const { client_id: clientId, client_secret: clientSecret, callback_url: callbackUrl } = integration.settings;
+    if (process.env.NODE_ENV === 'production' && new URL(callbackUrl).protocol !== 'https:') {
+      throw new Error('Google callback URL must use HTTPS in production.');
+    }
+    return {
+      config: { clientId, callbackUrl },
+      client: new OAuth2Client(clientId, clientSecret, callbackUrl),
+    };
   }
-  const client = enabled
-    ? new OAuth2Client(config.clientId, config.clientSecret, config.redirectUri)
-    : null;
 
   return {
-    enabled,
-
     async createAuthorizationRequest() {
-      if (!client) throw new Error('Google sign-in is not configured.');
+      const { client } = await getClient();
       const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
       const state = randomBytes(32).toString('base64url');
       const nonce = randomBytes(32).toString('base64url');
@@ -30,7 +39,7 @@ function createGoogleOAuth(config) {
     },
 
     async verifyAuthorizationResponse({ code, codeVerifier, nonce }) {
-      if (!client) throw new Error('Google sign-in is not configured.');
+      const { client, config } = await getClient();
       if (!code || !codeVerifier || !nonce) throw new Error('The Google sign-in response is incomplete.');
 
       const { tokens } = await client.getToken({ code, codeVerifier });

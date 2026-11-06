@@ -25,6 +25,19 @@ async function connectDatabase() {
     database.collection('item_claims').createIndex({ user_id: 1, created_at: -1 }),
     database.collection('notifications').createIndex({ user_id: 1, created_at: -1 }),
     database.collection('notifications').createIndex({ user_id: 1, read_at: 1 }),
+    database.collection('permissions').createIndex({ name: 1 }, { unique: true }),
+    database.collection('staff_permissions').createIndex(
+      { staff_id: 1, permission_id: 1 },
+      { unique: true },
+    ),
+    database.collection('staff_permissions').createIndex({ permission_id: 1, staff_id: 1 }),
+    database.collection('role_permissions').createIndex(
+      { role: 1, permission_key: 1 },
+      { unique: true },
+    ),
+    database.collection('audit_log').createIndex({ created_at: -1, _id: -1 }),
+    database.collection('audit_log').createIndex({ actor_id: 1, created_at: -1 }),
+    database.collection('audit_log').createIndex({ action: 1, created_at: -1 }),
   ]);
   return database;
 }
@@ -35,4 +48,8 @@ async function closeDatabase() {
   database = undefined;
 }
 
-module.exports = { connectDatabase, closeDatabase };
+module.exports = {
+  connectDatabase,
+  closeDatabase,
+  getMongoClient: () => client,
+};

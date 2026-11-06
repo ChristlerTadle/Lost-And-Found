@@ -1,0 +1,110 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const {
+  PERMISSIONS_BY_ROLE,
+  ROLE_PERMISSION_ROUTE_MAP,
+  normalizeRolePermissions,
+} = require('../config/role-permissions');
+const { createRolePermissionService } = require('../../src/services/role-permissions');
+const { createNotificationService } = require('../../src/services/notifications');
+
+function createMemoryCollection(initial = []) {
+  const rows = [...initial];
+  return {
+    rows,
+    find(filter = {}) {
+      return {
+        async toArray() {
+          return rows.filter((row) => Object.entries(filter).every(([key, value]) => row[key] === value));
+        },
+      };
+    },
+    async findOne(filter = {}) {
+      return rows.find((row) => Object.entries(filter).every(([key, value]) => row[key] === value)) || null;
+    },
+    async updateOne(filter, update, { upsert = false } = {}) {
+      let row = rows.find((entry) => Object.entries(filter).every(([key, value]) => entry[key] === value));
+      if (!row && upsert) {
+        row = { ...filter, ...(update.$setOnInsert || {}) };
+        rows.push(row);
+      }
+      if (row) Object.assign(row, update.$set || {});
+      return { matchedCount: row ? 1 : 0 };
+    },
+    async insertOne(document) {
+      rows.push(document);
+      return { insertedId: document._id };
+    },
+  };
+}
+
+function memoryDatabase(collections) {
+  return { collection: (name) => collections[name] };
+}
+
+test('role permission dependencies expand parents and reject unknown keys for a role', () => {
+  assert.deepEqual(normalizeRolePermissions('staff', ['approve_claim']), [
+    'view_claims', 'verify_item_ownership', 'approve_claim',
+  ]);
+  assert.deepEqual(normalizeRolePermissions('user', ['filter_items']), [
+    'view_items', 'search_items', 'filter_items',
+  ]);
+  assert.throws(() => normalizeRolePermissions('user', ['view_claims']), { status: 400 });
+  assert.throws(() => normalizeRolePermissions('admin', []), { status: 400 });
+});
+
+test('role permissions update globally and are checked from current storage on every request', async () => {
+  const initial = ['user', 'staff'].flatMap((role) => PERMISSIONS_BY_ROLE[role].map(({ key }) => ({
+    role,
+    permission_key: key,
+    enabled: true,
+  })));
+  const collection = createMemoryCollection(initial);
+  const service = createRolePermissionService(memoryDatabase({ role_permissions: collection }));
+
+  const saved = await service.replaceRolePermissions('user', ['edit_my_report']);
+  assert.deepEqual(saved.permissions, ['view_my_reports', 'edit_my_report']);
+  assert.equal(await service.isEnabled('user', 'view_my_reports'), true);
+  assert.equal(await service.isEnabled('user', 'view_items'), false);
+  assert.equal(await service.isEnabled('staff', 'view_items'), false);
+  assert.deepEqual(await service.findRolePermissions('user'), ['view_my_reports', 'edit_my_report']);
+  assert.equal(await service.isEnabled('admin', 'anything'), true);
+
+  const parentDisabled = await service.replaceRolePermissions('user', []);
+  assert.deepEqual(parentDisabled.permissions, []);
+  assert.equal(await service.isEnabled('user', 'edit_my_report'), false);
+});
+
+test('route permission map has unique method/path entries and records both dynamic routes', () => {
+  const routeKeys = ROLE_PERMISSION_ROUTE_MAP.map(({ method, path }) => `${method} ${path}`);
+  assert.equal(new Set(routeKeys).size, routeKeys.length);
+  assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, note }) =>
+    method === 'GET' && path === '/items' && note?.includes('multiple permissions')));
+  assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, note }) =>
+    method === 'PATCH' && path === '/staff/claims/:id' && note?.includes('approve_claim')));
+});
+
+test('notifications are suppressed for roles without receive_notifications', async () => {
+  const users = createMemoryCollection([
+    { _id: 'user-1', role_name: 'user' },
+    { _id: 'staff-1', role_name: 'staff' },
+    { _id: 'admin-1', role_name: 'admin' },
+  ]);
+  const rolePermissions = createMemoryCollection([
+    { role: 'user', permission_key: 'receive_notifications', enabled: false },
+    { role: 'staff', permission_key: 'receive_notifications', enabled: true },
+  ]);
+  const notifications = createMemoryCollection();
+  const service = createNotificationService(memoryDatabase({
+    users,
+    role_permissions: rolePermissions,
+    notifications,
+  }));
+  const content = { type: 'status', title: 'Update', message: 'Status changed', href: '/' };
+
+  assert.equal(await service.create('user-1', content), null);
+  assert.equal(notifications.rows.length, 0);
+  assert.ok(await service.create('staff-1', content));
+  assert.ok(await service.create('admin-1', content));
+  assert.equal(notifications.rows.length, 2);
+});

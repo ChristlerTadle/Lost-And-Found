@@ -1,0 +1,4 @@
+.front-action-form { display: inline-flex; }
+.front-action-form button { font: inherit; }
+.notification.unread { background: #f8fcf8; }
+.notification .front-action-form { align-self: flex-start; }

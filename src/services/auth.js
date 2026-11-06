@@ -16,8 +16,8 @@ function createAuthService(database) {
       return createPasswordAccount(users, input);
     },
 
-    async createAdminUser(input) {
-      return createPasswordAccount(users, input);
+    async createAdminUser(input, options = {}) {
+      return createPasswordAccount(users, input, options.session);
     },
 
     async login(emailInput, password) {
@@ -25,7 +25,9 @@ function createAuthService(database) {
       const user = await users.findOne({ email });
       if (!user || user.status !== 'active' || !user.password_hash
         || !(await bcrypt.compare(String(password || ''), user.password_hash))) {
-        throw new Error('Invalid credentials.');
+        const error = new Error('Invalid credentials.');
+        if (user) error.accountId = String(user._id);
+        throw error;
       }
       return toUser(user);
     },
@@ -126,7 +128,7 @@ function createAuthService(database) {
       return toUser(user);
     },
 
-    async updateUserByAdmin(userId, input) {
+    async updateUserByAdmin(userId, input, options = {}) {
       const email = String(input.email || '').trim().toLowerCase();
       const fullName = String(input.full_name || '').trim();
       if (!/^\S+@\S+\.\S+$/.test(email) || !fullName) {
@@ -145,6 +147,7 @@ function createAuthService(database) {
             phone: nullable(input.phone),
             updated_at: new Date().toISOString(),
           } },
+          options.session ? { session: options.session } : undefined,
         );
         if (!result.matchedCount) {
           const error = new Error('Active user account was not found.');
@@ -161,10 +164,11 @@ function createAuthService(database) {
       }
     },
 
-    async assignStaffRole(userId) {
+    async assignStaffRole(userId, options = {}) {
       const result = await users.updateOne(
         { _id: String(userId), role_name: 'user', status: 'active' },
         { $set: { role_name: 'staff', updated_at: new Date().toISOString() } },
+        options.session ? { session: options.session } : undefined,
       );
       if (!result.matchedCount) {
         const error = new Error('Only active user accounts can be assigned staff access.');
@@ -173,10 +177,11 @@ function createAuthService(database) {
       }
     },
 
-    async revertStaffRole(userId) {
+    async revertStaffRole(userId, options = {}) {
       const result = await users.updateOne(
         { _id: String(userId), role_name: 'staff', status: 'active' },
         { $set: { role_name: 'user', updated_at: new Date().toISOString() } },
+        options.session ? { session: options.session } : undefined,
       );
       if (!result.matchedCount) {
         const error = new Error('Only active staff accounts can be changed back to user access.');
@@ -185,7 +190,7 @@ function createAuthService(database) {
       }
     },
 
-    async setUserAccountStatus(userId, status) {
+    async setUserAccountStatus(userId, status, options = {}) {
       if (!['active', 'disabled'].includes(status)) throw new Error('Choose a valid account status.');
       const filter = {
         _id: String(userId),
@@ -195,6 +200,7 @@ function createAuthService(database) {
       const result = await users.updateOne(
         filter,
         { $set: { status, updated_at: new Date().toISOString() } },
+        options.session ? { session: options.session } : undefined,
       );
       if (!result.matchedCount) {
         const error = new Error('The account status could not be changed. Refresh the account list and try again.');
@@ -292,7 +298,7 @@ function nullable(value) {
   return text || null;
 }
 
-async function createPasswordAccount(users, input) {
+async function createPasswordAccount(users, input, session = undefined) {
   const email = String(input.email || '').trim().toLowerCase();
   const password = String(input.password || '');
   const fullName = String(input.full_name || '').trim();
@@ -317,7 +323,7 @@ async function createPasswordAccount(users, input) {
     updated_at: now,
   };
   try {
-    await users.insertOne(user);
+    await users.insertOne(user, session ? { session } : undefined);
   } catch (error) {
     if (error.code === 11000) {
       const duplicateError = new Error('An account with that email or student ID already exists.');
