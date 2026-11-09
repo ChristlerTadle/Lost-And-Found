@@ -1,7 +1,7 @@
 const { randomBytes } = require('node:crypto');
 const { OAuth2Client } = require('google-auth-library');
 
-function createGoogleOAuth(getIntegration) {
+function createGoogleOAuth(getIntegration, callIntegration = runDirectly) {
   async function getClient() {
     const integration = await getIntegration('google_auth');
     if (!integration.active) {
@@ -38,13 +38,15 @@ function createGoogleOAuth(getIntegration) {
       return { url, state, nonce, codeVerifier };
     },
 
-    async verifyAuthorizationResponse({ code, codeVerifier, nonce }) {
+    async verifyAuthorizationResponse({ code, codeVerifier, nonce }, auditContext) {
       const { client, config } = await getClient();
       if (!code || !codeVerifier || !nonce) throw new Error('The Google sign-in response is incomplete.');
 
-      const { tokens } = await client.getToken({ code, codeVerifier });
+      const { tokens } = await callIntegration('google_auth',
+        () => client.getToken({ code, codeVerifier }), auditContext);
       if (!tokens.id_token) throw new Error('Google did not return an identity token.');
-      const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: config.clientId });
+      const ticket = await callIntegration('google_auth',
+        () => client.verifyIdToken({ idToken: tokens.id_token, audience: config.clientId }), auditContext);
       const payload = ticket.getPayload();
       if (!payload || payload.nonce !== nonce) throw new Error('The Google sign-in response could not be verified.');
 
@@ -56,6 +58,10 @@ function createGoogleOAuth(getIntegration) {
       };
     },
   };
+}
+
+function runDirectly(_integrationId, operation) {
+  return operation({ signal: new AbortController().signal });
 }
 
 module.exports = { createGoogleOAuth };

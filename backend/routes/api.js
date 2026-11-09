@@ -49,17 +49,26 @@ function createApiRouter({ services, frontendOrigin }) {
       frontendOrigin,
       audit: services.audit,
     }),
-    items: createItemsController({ items: services.items }),
-    claims: createClaimsController({ items: services.items }),
+    items: createItemsController({
+      items: services.items,
+      googleCalendar: services.googleCalendar,
+    }),
+    claims: createClaimsController({ items: services.items, googleCalendar: services.googleCalendar }),
     profile: createProfileController({ auth: services.auth, items: services.items }),
     notifications: createNotificationsController({ notifications: services.notifications }),
-    staff: createStaffController({ items: services.items, audit: services.audit }),
+    staff: createStaffController({
+      items: services.items,
+      audit: services.audit,
+      googleCalendar: services.googleCalendar,
+    }),
     admin: createAdminController({
       auth: services.auth,
       items: services.items,
       rolePermissions: services.rolePermissions,
       notifications: services.notifications,
       integrationSettings: services.integrationSettings,
+      integrationSecurity: services.integrationSecurity,
+      googleCalendar: services.googleCalendar,
       email: services.email,
       audit: services.audit,
     }),
@@ -67,18 +76,23 @@ function createApiRouter({ services, frontendOrigin }) {
 
   router.use('/', createHealthRoutes());
   router.use('/auth', createAuthRoutes({ controllers }));
-  router.use('/items', createItemsRoutes({ controllers, guards }));
+  router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin }));
   router.use('/claims', createClaimsRoutes({ controllers, guards }));
   router.use('/profile', createProfileRoutes({ controllers, guards }));
   router.use('/notifications', createNotificationsRoutes({ controllers, guards }));
-  router.use('/staff', createStaffRoutes({ controllers, guards }));
+  router.use('/staff', createStaffRoutes({ controllers, guards, frontendOrigin }));
   router.use('/admin', createAdminRolePermissionsRoutes({ controllers, guards }));
   router.use('/admin', createAdminDashboardRoutes({ controllers, guards }));
   router.use('/admin', createAdminUsersRoutes({ controllers, guards }));
   router.use('/admin', createAdminSystemRecordsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminItemsRoutes({ controllers, guards }));
+  router.use('/admin', createAdminItemsRoutes({ controllers, guards, frontendOrigin }));
   router.use('/admin', createAdminClaimsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminSettingsRoutes({ controllers, guards, frontendOrigin }));
+  router.use('/admin', createAdminSettingsRoutes({
+    controllers,
+    guards,
+    frontendOrigin,
+    integrationSecurity: services.integrationSecurity,
+  }));
   router.use(guards.denyUnmapped);
 
   return router;

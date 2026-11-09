@@ -53,7 +53,15 @@ function memoryAuditService({ transactions = false, insertFails = false } = {}) 
 
 function matches(entry, filter) {
   for (const [key, value] of Object.entries(filter)) {
-    if (key === 'created_at') {
+    if (key === '$or') {
+      if (!value.some((condition) => matches(entry, condition))) return false;
+    } else if (key === '$and') {
+      if (!value.every((condition) => matches(entry, condition))) return false;
+    } else if (key === 'action' && value && typeof value === 'object' && '$in' in value) {
+      if (!value.$in.includes(entry.action)) return false;
+    } else if (key === 'action' && value && typeof value === 'object' && '$nin' in value) {
+      if (value.$nin.includes(entry.action)) return false;
+    } else if (key === 'created_at') {
       if (value.$gte && entry.created_at < value.$gte) return false;
       if (value.$lte && entry.created_at > value.$lte) return false;
     } else if (entry[key] !== value) return false;
@@ -216,4 +224,41 @@ test('System Records ignores future dates in audit filters', async () => {
   const toFuture = await memory.service.findRecords({ date_to: futureDate });
   assert.equal(fromFuture.total, 1);
   assert.equal(toFuture.total, 1);
+});
+
+test('System Records result filters include legacy integration failures and lockouts', async () => {
+  const memory = memoryAuditService();
+  for (const [action, result] of [
+    ['integration.unlock_failed', 'success'],
+    ['integration.code_failed', 'success'],
+    ['integration.unlock_failed', 'failed'],
+    ['integration.unlock_locked', 'success'],
+    ['integration.unlock', 'success'],
+    ['integration.update', 'failed'],
+  ]) {
+    await memory.service.logAction({
+      actor_id: 'admin-1',
+      actor_role: 'admin',
+      action,
+      target_type: action.startsWith('integration.') ? 'integration' : null,
+      target_id: 'google_auth',
+      result,
+    });
+  }
+
+  const failed = await memory.service.findRecords({ result: 'failed' });
+  assert.equal(failed.total, 4);
+  assert.deepEqual(new Set(failed.records.map(({ action }) => action)), new Set([
+    'integration.unlock_failed',
+    'integration.code_failed',
+    'integration.update',
+  ]));
+
+  const denied = await memory.service.findRecords({ result: 'denied' });
+  assert.equal(denied.total, 1);
+  assert.equal(denied.records[0].action, 'integration.unlock_locked');
+
+  const success = await memory.service.findRecords({ result: 'success' });
+  assert.equal(success.total, 1);
+  assert.equal(success.records[0].action, 'integration.unlock');
 });

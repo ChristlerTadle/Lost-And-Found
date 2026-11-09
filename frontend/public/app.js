@@ -5,6 +5,8 @@ import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItem
 import { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminRolePermissions, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
 
 const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, setSessionInfo } = shared;
+let pendingIntegrationCard = null;
+let integrationCodeResendTimer;
 
 async function render() {
   app.innerHTML = '<main class="loading" aria-live="polite">Loading…</main>';
@@ -126,9 +128,21 @@ function bindForms() {
   app.querySelectorAll('[data-action="integration-toggle"]').forEach((button) => button.addEventListener('click', toggleIntegration));
   app.querySelectorAll('[data-action="save-integration"]').forEach((button) => button.addEventListener('click', saveIntegrationSettings));
   app.querySelectorAll('[data-action="cancel-integration"]').forEach((button) => button.addEventListener('click', cancelIntegrationChanges));
+  app.querySelectorAll('[data-action="set-integration-default"]').forEach((button) => button.addEventListener('click', setIntegrationDefault));
+  app.querySelectorAll('[data-action="restore-integration-default"]').forEach((button) => button.addEventListener('click', restoreIntegrationDefault));
   app.querySelectorAll('[data-action="smtp-test"]').forEach((button) => button.addEventListener('click', testSmtpConnection));
+  app.querySelectorAll('[data-action="calendar-test"]').forEach((button) => button.addEventListener('click', testCalendarConnection));
+  app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
+  app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
+  app.querySelectorAll('[data-integration-code-dialog]').forEach((dialog) => {
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      void cancelIntegrationCode({ currentTarget: dialog });
+    });
+  });
   const integrationForm = app.querySelector('form[data-form="integration-settings"]');
   if (integrationForm) bindIntegrationSettings(integrationForm);
+  app.querySelectorAll('form[data-form="integration-pin"]').forEach(bindIntegrationPinForm);
   app.querySelectorAll('[data-action="print-inventory"]').forEach((button) => button.addEventListener('click', () => window.print()));
   app.querySelectorAll('form[data-form="admin-role-permissions"]').forEach(bindRolePermissionCheckboxes);
   app.querySelector('[data-action="cancel-role-permissions"]')?.addEventListener('click', cancelRolePermissionChanges);
@@ -173,6 +187,8 @@ async function onFormSubmit(event) {
   try {
     switch (form.dataset.form) {
       case 'integration-settings': return;
+      case 'integration-pin': await unlockIntegrationSettings(form); return;
+      case 'integration-code': await verifyIntegrationCode(form); return;
       case 'login':
       case 'register': {
         if (sessionInfo.recaptcha?.active) {
@@ -208,6 +224,16 @@ async function onFormSubmit(event) {
         return;
       }
       case 'claim': await request('/claims', jsonPost(values)); navigate('claims'); return;
+      case 'approve-claim':
+        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}`, jsonPatch({
+          action: 'review',
+          decision: 'approved',
+          ...values,
+        }));
+        break;
+      case 'reschedule-pickup':
+        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}/pickup`, jsonPatch(values));
+        break;
       case 'profile': await request('/profile', jsonPatch(values)); break;
       case 'staff-status': await request(`/staff/items/${encodeURIComponent(form.dataset.id)}/status`, jsonPatch(values)); break;
       case 'admin-add-user': await request('/admin/users', jsonPost(values)); navigate('admin-users'); return;
@@ -331,6 +357,7 @@ async function onActionForm(event) {
       case 'verify-item': await request(`/staff/items/${encodeURIComponent(id)}/verify`, { method: 'POST' }); break;
       case 'review-claim': await request(`/staff/claims/${encodeURIComponent(id)}`, jsonPatch({ action: 'review', ...values })); break;
       case 'mark-returned': await request(`/staff/claims/${encodeURIComponent(id)}`, jsonPatch({ action: 'returned' })); break;
+      case 'retry-calendar-sync': await request(`/staff/claims/${encodeURIComponent(id)}/calendar-sync`, jsonPost({})); break;
       case 'admin-user': await request(`/admin/users/${encodeURIComponent(id)}`, jsonPatch(values)); break;
       case 'admin-item-remove':
         if (!confirm('Remove this item record? It will be soft-deleted and retained for audit.')) return;
@@ -360,8 +387,42 @@ function bindIntegrationSettings(form) {
   for (const card of form.querySelectorAll('[data-integration]')) {
     card.dataset.savedState = JSON.stringify(integrationCardPayload(card));
   }
-  form.addEventListener('input', () => updateIntegrationSaveState(form));
-  form.addEventListener('change', () => updateIntegrationSaveState(form));
+  form.addEventListener('input', handleIntegrationEdit);
+  form.addEventListener('change', handleIntegrationEdit);
+  const settingsPage = form.closest('.admin-settings');
+  window.addEventListener('pagehide', () => {
+    fetch(`${API}/admin/settings/lock`, {
+      method: 'POST',
+      credentials: 'include',
+      keepalive: true,
+      headers: { 'X-CSRF-Token': settingsPage.dataset.csrfToken },
+    }).catch(() => console.warn('Integration Settings could not be locked during navigation.'));
+  }, { once: true });
+}
+
+function bindIntegrationPinForm(form) {
+  const dialog = form.closest('dialog');
+  if (!dialog.open) dialog.showModal();
+  dialog.addEventListener('cancel', (event) => event.preventDefault());
+  form.addEventListener('input', () => {
+    form.querySelector('[data-integration-pin-error]').textContent = '';
+  });
+}
+
+function handleIntegrationEdit(event) {
+  const form = event.currentTarget;
+  const card = event.target.closest('[data-integration]');
+  if (pendingIntegrationCard && card === pendingIntegrationCard) {
+    pendingIntegrationCard = null;
+    closeIntegrationCodeDialog();
+    request('/admin/settings/code/cancel', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
+      body: JSON.stringify({}),
+    }).catch((error) => showNotice(error.message, true));
+    showNotice('Settings changed. Save again to request a new verification code.');
+  }
+  updateIntegrationSaveState(form);
 }
 
 function integrationCardPayload(card) {
@@ -377,6 +438,9 @@ function updateIntegrationSaveState(form) {
   for (const card of form.querySelectorAll('[data-integration]')) {
     const changed = JSON.stringify(integrationCardPayload(card)) !== card.dataset.savedState;
     card.querySelector('.integration-card-actions').hidden = !changed;
+    card.querySelector('[data-action="set-integration-default"]').disabled = changed;
+    card.querySelector('[data-action="smtp-test"]')?.toggleAttribute('disabled', changed);
+    card.querySelector('[data-action="calendar-test"]')?.toggleAttribute('disabled', changed);
     updateIntegrationCardStatus(card);
   }
 }
@@ -395,10 +459,213 @@ function updateIntegrationCardStatus(card) {
     missing.push('SMTP username/password pair');
   }
   const enabled = card.querySelector('[data-action="integration-toggle"]').dataset.enabled === 'true';
-  const label = missing.length ? 'Not configured' : enabled ? 'Enabled' : 'Disabled';
+  const label = card.dataset.failing === 'true'
+    ? 'Failing' : missing.length ? 'Not configured' : enabled ? 'Enabled' : 'Disabled';
   status.textContent = label;
-  status.className = `badge ${label === 'Enabled' ? 'badge-active' : label === 'Disabled' ? 'badge-cancelled' : 'badge-pending'}`;
+  status.className = `badge ${label === 'Failing' ? 'badge-failing'
+    : label === 'Enabled' ? 'badge-active' : label === 'Disabled' ? 'badge-cancelled' : 'badge-pending'}`;
   card.querySelector('[data-integration-missing]').textContent = missing.length ? `Missing: ${missing.join(', ')}` : '';
+}
+
+function updateIntegrationHealth(card, integration) {
+  const health = integration.health || {};
+  const failing = integration.status === 'Failing';
+  card.dataset.failing = String(failing);
+  const status = card.querySelector('[data-integration-status]');
+  status.textContent = failing ? 'Failing' : integration.status;
+  status.className = `badge ${failing ? 'badge-failing'
+    : integration.active ? 'badge-active'
+      : integration.configured ? 'badge-cancelled' : 'badge-pending'}`;
+
+  const healthElement = card.querySelector('[data-integration-health]');
+  healthElement.hidden = !failing;
+  if (failing) {
+    const time = health.last_error_at ? new Date(health.last_error_at).toLocaleString() : '';
+    const count = health.consecutive_failures ? ` (${health.consecutive_failures} consecutive)` : '';
+    healthElement.textContent = `${time ? `Last failure: ${time} · ` : ''}${health.last_error_message || ''}${count}`;
+  } else {
+    healthElement.textContent = '';
+  }
+}
+
+function settingsCsrf(form) {
+  return form.closest('.admin-settings')?.dataset.csrfToken || form.dataset.csrfToken;
+}
+
+async function unlockIntegrationSettings(form) {
+  const submit = form.querySelector('[type="submit"]');
+  const pin = form.querySelector('[name="pin"]');
+  const error = form.querySelector('[data-integration-pin-error]');
+  submit.disabled = true;
+  error.textContent = '';
+  try {
+    await request('/admin/settings/unlock', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settingsCsrf(form) },
+      body: JSON.stringify({ pin: pin.value }),
+    });
+    pin.value = '';
+    await render();
+  } catch (requestError) {
+    error.textContent = requestError.message;
+    pin.value = '';
+    pin.focus();
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function openIntegrationCodeDialog(form, resendInSeconds) {
+  const dialog = form.closest('.admin-settings').querySelector('[data-integration-code-dialog]');
+  const codeForm = dialog.querySelector('form');
+  codeForm.reset();
+  codeForm.querySelector('[data-integration-code-error]').textContent = '';
+  if (!dialog.open) dialog.showModal();
+  startIntegrationCodeResendTimer(dialog, resendInSeconds);
+}
+
+function startIntegrationCodeResendTimer(dialog, seconds) {
+  const button = dialog.querySelector('[data-action="resend-integration-code"]');
+  clearInterval(integrationCodeResendTimer);
+  let remaining = Math.max(0, Number(seconds) || 0);
+  const update = () => {
+    button.disabled = remaining > 0;
+    button.textContent = remaining ? `Resend (${remaining}s)` : 'Resend';
+    remaining -= 1;
+    if (remaining < 0) clearInterval(integrationCodeResendTimer);
+  };
+  update();
+  integrationCodeResendTimer = setInterval(update, 1000);
+}
+
+function closeIntegrationCodeDialog() {
+  clearInterval(integrationCodeResendTimer);
+  app.querySelector('[data-integration-code-dialog]')?.close();
+}
+
+async function verifyIntegrationCode(form) {
+  const card = pendingIntegrationCard;
+  const dialog = form.closest('dialog');
+  const submit = form.querySelector('[type="submit"]');
+  const error = form.querySelector('[data-integration-code-error]');
+  if (!card) {
+    dialog.close();
+    return;
+  }
+  submit.disabled = true;
+  error.textContent = '';
+  try {
+    const result = await request('/admin/settings/code/verify', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
+      body: JSON.stringify({
+        code: form.querySelector('[name="code"]').value,
+        integrations: { [card.dataset.integration]: integrationCardPayload(card) },
+      }),
+    });
+    pendingIntegrationCard = null;
+    closeIntegrationCodeDialog();
+    applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
+  } catch (requestError) {
+    error.textContent = requestError.message;
+    form.querySelector('[name="code"]').value = '';
+    if (requestError.message.includes('pending settings changed')) {
+      pendingIntegrationCard = null;
+      closeIntegrationCodeDialog();
+    }
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function resendIntegrationCode(event) {
+  const button = event.currentTarget;
+  const dialog = button.closest('dialog');
+  const card = pendingIntegrationCard;
+  if (!card) return;
+  button.disabled = true;
+  try {
+    const result = await request('/admin/settings/code/resend', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
+      body: JSON.stringify({ integrations: { [card.dataset.integration]: integrationCardPayload(card) } }),
+    });
+    startIntegrationCodeResendTimer(dialog, result.resendInSeconds);
+    showNotice('A new verification code was sent.');
+  } catch (error) {
+    showNotice(error.message, true);
+    button.disabled = false;
+  }
+}
+
+async function cancelIntegrationCode(event) {
+  const dialog = event.currentTarget.closest('dialog');
+  const card = pendingIntegrationCard;
+  if (card) {
+    try {
+      await request('/admin/settings/code/cancel', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
+        body: JSON.stringify({}),
+      });
+    } catch (error) {
+      showNotice(error.message, true);
+      return;
+    }
+  }
+  pendingIntegrationCard = null;
+  dialog.close();
+  clearInterval(integrationCodeResendTimer);
+}
+
+async function setIntegrationDefault(event) {
+  const button = event.currentTarget;
+  const card = button.closest('[data-integration]');
+  const form = card.closest('form');
+  const name = card.querySelector('h2').textContent;
+  if (!confirm(`Set the current saved ${name} configuration as the default?`)) return;
+  button.disabled = true;
+  try {
+    const result = await request(`/admin/settings/${encodeURIComponent(card.dataset.integration)}/default`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settingsCsrf(form) },
+      body: JSON.stringify({}),
+    });
+    applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    showNotice(`${name} default settings updated.`);
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function restoreIntegrationDefault(event) {
+  const button = event.currentTarget;
+  const card = button.closest('[data-integration]');
+  const form = card.closest('form');
+  const name = card.querySelector('h2').textContent;
+  const dirty = JSON.stringify(integrationCardPayload(card)) !== card.dataset.savedState;
+  const prompt = dirty
+    ? `Discard unsaved ${name} edits and restore default settings?`
+    : `Restore default settings for ${name}?`;
+  if (!confirm(prompt)) return;
+  button.disabled = true;
+  try {
+    const result = await request(`/admin/settings/${encodeURIComponent(card.dataset.integration)}/restore-default`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settingsCsrf(form) },
+      body: JSON.stringify({}),
+    });
+    applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    if (result.warning) showNotice(`Default restored. ${result.warning}`, true);
+    else showNotice(result.noticeSent ? 'Default restored and SU_EMAIL notified.' : 'Default settings are already active.');
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function toggleIntegration(event) {
@@ -431,23 +698,14 @@ async function saveIntegrationSettings(event) {
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
       body: JSON.stringify({ integrations: payload }),
     });
-    const savedIntegration = result.integrations[card.dataset.integration];
-    for (const field of savedIntegration.fields) {
-      const input = card.querySelector(`[name="${CSS.escape(field.name)}"]`);
-      if (!input) continue;
-      if (input.type === 'checkbox') input.checked = Boolean(field.value);
-      else if (input.type === 'password') {
-        input.value = '';
-        input.placeholder = field.hasValue ? field.value : '';
-      } else input.value = field.value ?? '';
+    if (result.verificationRequired) {
+      pendingIntegrationCard = card;
+      openIntegrationCodeDialog(form, result.resendInSeconds);
+      showNotice('A verification code was sent to the configured administrator email.');
+      return;
     }
-    const toggle = card.querySelector('[data-action="integration-toggle"]');
-    toggle.dataset.enabled = String(savedIntegration.enabled);
-    toggle.textContent = savedIntegration.enabled ? 'Disable' : 'Enable';
-    card.dataset.savedState = JSON.stringify(integrationCardPayload(card));
-    clearIntegrationErrors(card);
-    updateIntegrationSaveState(form);
-    showNotice(`${savedIntegration.label} settings saved.`);
+    applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
   } catch (error) {
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
     showNotice(error.message, true);
@@ -455,6 +713,31 @@ async function saveIntegrationSettings(event) {
     button.disabled = false;
     updateIntegrationSaveState(form);
   }
+}
+
+function applySavedIntegration(card, integration) {
+  for (const field of integration.fields) {
+    const input = card.querySelector(`[name="${CSS.escape(field.name)}"]`);
+    if (!input) continue;
+    if (input.type === 'checkbox') input.checked = Boolean(field.value);
+    else if (field.secret) {
+      input.value = '';
+      input.placeholder = field.hasValue ? field.value : '';
+    } else input.value = field.value ?? '';
+  }
+  const toggle = card.querySelector('[data-action="integration-toggle"]');
+  toggle.dataset.enabled = String(integration.enabled);
+  toggle.textContent = integration.enabled ? 'Disable' : 'Enable';
+  card.dataset.usingDefault = String(integration.usingDefault);
+  card.dataset.hasDefault = String(integration.hasDefault);
+  updateIntegrationHealth(card, integration);
+  card.querySelector('[data-default-status]').textContent = integration.usingDefault
+    ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved';
+  card.querySelector('[data-action="restore-integration-default"]').disabled =
+    !integration.hasDefault || integration.usingDefault;
+  card.dataset.savedState = JSON.stringify(integrationCardPayload(card));
+  clearIntegrationErrors(card);
+  updateIntegrationSaveState(card.closest('form'));
 }
 
 function clearIntegrationErrors(card) {
@@ -497,6 +780,8 @@ async function cancelIntegrationChanges(event) {
     if (input.type === 'checkbox') input.checked = Boolean(value);
     else input.value = value ?? '';
   }
+  card.querySelector('[data-default-status]').textContent = card.dataset.usingDefault === 'true'
+    ? 'Using default' : card.dataset.hasDefault === 'true' ? 'Modified' : 'No default saved';
   clearIntegrationErrors(card);
   updateIntegrationSaveState(card.closest('form'));
 }
@@ -505,25 +790,55 @@ async function testSmtpConnection(event) {
   const button = event.currentTarget;
   const form = button.closest('form');
   const card = button.closest('[data-integration]');
-  const fields = Object.fromEntries([...card.querySelectorAll('.integration-fields [name]')].map((input) => [
-    input.name,
-    input.type === 'checkbox' ? input.checked : input.value,
-  ]));
   button.disabled = true;
   try {
-    await request('/admin/settings/smtp/test', {
+    const result = await request('/admin/settings/smtp/test', {
       method: 'POST',
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
-      body: JSON.stringify({ fields }),
+      body: JSON.stringify({}),
     });
-    showNotice('SMTP connection verified.');
+    applySavedIntegration(card, result.integrations.smtp);
+    showNotice('Saved SMTP connection verified and set as the default.');
   } catch (error) {
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
+    try {
+      const current = await request('/admin/settings');
+      if (current.integrations?.smtp) applySavedIntegration(card, current.integrations.smtp);
+    } catch {
+      console.warn('Integration health could not be refreshed after the SMTP test.');
+    }
     showNotice(error.message, true);
   } finally {
     button.disabled = false;
   }
 }
+
+async function testCalendarConnection(event) {
+  const button = event.currentTarget;
+  const form = button.closest('form');
+  const card = button.closest('[data-integration]');
+  button.disabled = true;
+  try {
+    const result = await request('/admin/settings/google-calendar/test', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
+      body: JSON.stringify({}),
+    });
+    applySavedIntegration(card, result.integrations.google_calendar);
+    showNotice('Google Calendar is reachable and the saved settings are now the default.');
+  } catch (error) {
+    try {
+      const current = await request('/admin/settings');
+      if (current.integrations?.google_calendar) applySavedIntegration(card, current.integrations.google_calendar);
+    } catch {
+      console.warn('Google Calendar health could not be refreshed after the connection test.');
+    }
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function showNotice(message, isError = false) {
   const previous = app.querySelector('.alert');
   if (previous) previous.remove();

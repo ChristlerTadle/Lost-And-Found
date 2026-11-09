@@ -6,7 +6,7 @@ function createNotificationService(database) {
   const rolePermissions = database.collection('role_permissions');
 
   return {
-    async create(userId, { type, title, message, href }, options = {}) {
+    async create(userId, { type, title, message, href, calendar_url }, options = {}) {
       const user = await users.findOne(
         { _id: String(userId) },
         { projection: { role_name: 1 }, ...(options.session ? { session: options.session } : {}) },
@@ -26,6 +26,7 @@ function createNotificationService(database) {
         title,
         message,
         href,
+        ...(calendar_url ? { calendar_url } : {}),
         read_at: null,
         created_at: new Date().toISOString(),
       };

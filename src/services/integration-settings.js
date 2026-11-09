@@ -1,4 +1,4 @@
-const { createCipheriv, createDecipheriv, randomBytes } = require('node:crypto');
+const { createCipheriv, createDecipheriv, createHmac, randomBytes } = require('node:crypto');
 const { integrations } = require('../config/integrations');
 
 const MASK = '••••••••';
@@ -49,18 +49,39 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     };
   }
 
+  function getIntegrationLabel(integrationId) {
+    const definition = integrations[integrationId];
+    if (!definition) throw validationError('Unknown integration.');
+    return definition.label;
+  }
+
   async function getAdminIntegrations() {
     const result = {};
     for (const [id, definition] of Object.entries(integrations)) {
       const integration = await getIntegration(id);
+      const document = await settings.findOne({ _id: id });
+      const defaultValues = await decryptSnapshot(id, document?.defaults);
+      const hasDefault = Boolean(document?.defaults && typeof document.defaults === 'object');
+      const usingDefault = hasDefault
+        && JSON.stringify(integration.settings) === JSON.stringify(defaultValues);
+      const failing = integration.active && Boolean(document?.last_error_code);
       result[id] = {
         id,
         label: definition.label,
         enabled: integration.enabled,
         configured: integration.configured,
         active: integration.active,
-        status: integration.status,
+        status: failing ? 'Failing' : integration.status,
         missingFields: integration.missingFields,
+        health: {
+          last_error_at: document?.last_error_at || null,
+          last_error_code: document?.last_error_code || null,
+          last_error_message: document?.last_error_message || null,
+          consecutive_failures: document?.consecutive_failures || 0,
+          last_success_at: document?.last_success_at || null,
+        },
+        hasDefault,
+        usingDefault,
         fields: definition.fields.map((field) => {
           const value = integration.settings[field.name];
           return {
@@ -68,14 +89,92 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
             label: field.label,
             type: field.type,
             secret: field.secret,
+            credential: Boolean(field.credential),
             required: field.required,
-            value: field.secret && value ? `${MASK}${value.slice(-4)}` : value,
+            value: field.secret && value
+              ? field.name === 'private_key' ? MASK : `${MASK}${value.slice(-4)}`
+              : value,
             hasValue: Boolean(value),
           };
         }),
       };
     }
     return result;
+  }
+
+  async function recordIntegrationFailure(integrationId, { code, message, at }) {
+    if (!integrations[integrationId]) throw validationError('Unknown integration.');
+    await settings.updateOne(
+      { _id: integrationId },
+      {
+        $set: {
+          last_error_at: at,
+          last_error_code: code,
+          last_error_message: message,
+        },
+        $inc: { consecutive_failures: 1 },
+      },
+      { upsert: true },
+    );
+  }
+
+  async function recordIntegrationSuccess(integrationId) {
+    if (!integrations[integrationId]) throw validationError('Unknown integration.');
+    await settings.updateOne(
+      { _id: integrationId },
+      {
+        $set: {
+          last_success_at: new Date(),
+          consecutive_failures: 0,
+        },
+        $unset: {
+          last_error_at: '',
+          last_error_code: '',
+          last_error_message: '',
+        },
+      },
+      { upsert: true },
+    );
+  }
+
+  async function claimIntegrationFailureAudit(integrationId, cutoff) {
+    if (!integrations[integrationId]) throw validationError('Unknown integration.');
+    await settings.updateOne(
+      { _id: integrationId },
+      { $setOnInsert: { _id: integrationId } },
+      { upsert: true },
+    );
+    const result = await settings.updateOne(
+      {
+        _id: integrationId,
+        $or: [
+          { last_failure_audit_at: { $exists: false } },
+          { last_failure_audit_at: { $lte: cutoff } },
+        ],
+      },
+      { $set: { last_failure_audit_at: new Date() } },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async function claimCalendarSyncFailureAudit(integrationId, cutoff) {
+    if (integrationId !== 'google_calendar') throw validationError('Unknown integration.');
+    await settings.updateOne(
+      { _id: integrationId },
+      { $setOnInsert: { _id: integrationId } },
+      { upsert: true },
+    );
+    const result = await settings.updateOne(
+      {
+        _id: integrationId,
+        $or: [
+          { last_calendar_sync_failure_audit_at: { $exists: false } },
+          { last_calendar_sync_failure_audit_at: { $lte: cutoff } },
+        ],
+      },
+      { $set: { last_calendar_sync_failure_audit_at: new Date() } },
+    );
+    return result.modifiedCount === 1;
   }
 
   async function validateIntegrationFields(integrationId, submittedFields) {
@@ -106,6 +205,11 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
   }
 
   async function saveIntegrations(input, audit, auditContext) {
+    const plan = await prepareIntegrationSave(input);
+    return applyIntegrationSave(plan, audit, auditContext);
+  }
+
+  async function prepareIntegrationSave(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
       throw validationError('Submit valid integration settings.');
     }
@@ -135,6 +239,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       const current = await getIntegration(id);
       const nextValues = { ...current.settings };
       const changedFields = [];
+      const credentialFields = [];
       const persist = {};
       const fieldErrors = {};
 
@@ -150,6 +255,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         if (result.value !== current.settings[field.name]) {
           nextValues[field.name] = result.value;
           changedFields.push(field.name);
+          if (field.credential) credentialFields.push(field.name);
           persist[field.name] = field.secret ? encryptValue(result.value, key) : result.value;
         }
       }
@@ -165,11 +271,23 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         fieldErrors.user = message;
         fieldErrors.password = message;
       }
+      if (id === 'google_calendar'
+        && nextValues.pickup_open_time >= nextValues.pickup_close_time) {
+        fieldErrors.pickup_close_time = 'Pickup closing time must be later than opening time.';
+      }
       if (Object.keys(fieldErrors).length) errors[id] = fieldErrors;
 
       const enabledChanged = submitted.enabled !== current.enabled;
       if (changedFields.length || enabledChanged) {
-        updates.push({ id, enabled: submitted.enabled, persist, changedFields, enabledChanged });
+        updates.push({
+          id,
+          enabled: submitted.enabled,
+          persist,
+          values: nextValues,
+          changedFields,
+          credentialFields,
+          enabledChanged,
+        });
         changed.push(id);
       }
     }
@@ -179,6 +297,24 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       error.fieldErrors = errors;
       throw error;
     }
+    const credentialChanges = updates.flatMap(({ id, credentialFields }) => (
+      credentialFields.length ? [{ integration: id, fields: credentialFields }] : []
+    ));
+    const changes = updates.map(({ id, changedFields }) => ({ integration: id, fields: changedFields }));
+    const canonical = updates.map(({ id, enabled, values, changedFields }) => ({
+      id,
+      enabled,
+      changedFields,
+      values,
+    }));
+    const payloadHash = createHmac('sha256', key)
+      .update(JSON.stringify(canonical))
+      .digest('hex');
+    return { updates, changed, credentialChanges, changes, payloadHash };
+  }
+
+  async function applyIntegrationSave(plan, audit, auditContext) {
+    const { updates, changed } = plan;
     if (!updates.length) return { integrations: await getAdminIntegrations(), changed: [] };
 
     const operations = updates.map(({ id, enabled, persist }) => {
@@ -212,6 +348,94 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return { integrations: await getAdminIntegrations(), changed };
   }
 
+  async function getDefaultRestorePreview(integrationId) {
+    const definition = integrations[integrationId];
+    if (!definition) throw validationError('Unknown integration.');
+    const document = await settings.findOne({ _id: integrationId });
+    if (!document?.defaults || typeof document.defaults !== 'object') {
+      const error = new Error('No default settings have been saved for this integration.');
+      error.status = 404;
+      throw error;
+    }
+    const current = await getIntegration(integrationId);
+    const defaults = await decryptSnapshot(integrationId, document.defaults);
+    const changedFields = definition.fields
+      .filter(({ name }) => defaults[name] !== current.settings[name])
+      .map(({ name }) => name);
+    return { id: integrationId, changedFields, values: defaults };
+  }
+
+  async function setIntegrationDefault(integrationId, audit, auditContext) {
+    const current = await getIntegration(integrationId);
+    if (!current.configured) {
+      const error = new Error('Configure all required fields before setting a default.');
+      error.status = 400;
+      throw error;
+    }
+    const snapshot = await encryptSnapshot(integrationId, current.settings);
+    const changedFields = Object.keys(current.settings);
+    await audit.runAction({
+      ...auditContext,
+      action: 'integration.set_default',
+      target_type: 'integration',
+      target_id: integrationId,
+      new_value: { changed_fields: changedFields },
+    }, () => settings.updateOne(
+      { _id: integrationId },
+      { $set: { defaults: snapshot, updated_at: new Date().toISOString() } },
+      { upsert: true },
+    ));
+    return { integrations: await getAdminIntegrations() };
+  }
+
+  async function restoreIntegrationDefault(integrationId, audit, auditContext) {
+    const preview = await getDefaultRestorePreview(integrationId);
+    if (!preview.changedFields.length) {
+      return { integrations: await getAdminIntegrations(), changed: [], restored: false };
+    }
+    const persist = await encryptSnapshot(integrationId, preview.values);
+    const definition = integrations[integrationId];
+    const set = { updated_at: new Date().toISOString() };
+    for (const { name } of definition.fields) set[`values.${name}`] = persist[name];
+    await audit.runAction({
+      ...auditContext,
+      action: 'integration.restore_default',
+      target_type: 'integration',
+      target_id: integrationId,
+      new_value: { changed_fields: preview.changedFields },
+    }, () => settings.updateOne(
+      { _id: integrationId },
+      { $set: set },
+      { upsert: true },
+    ));
+    return {
+      integrations: await getAdminIntegrations(),
+      changed: preview.changedFields,
+      restored: true,
+    };
+  }
+
+  async function encryptSnapshot(integrationId, values) {
+    const definition = integrations[integrationId];
+    if (!definition) throw validationError('Unknown integration.');
+    const snapshot = {};
+    for (const field of definition.fields) {
+      const value = normalizeFieldValue(field, values[field.name]);
+      snapshot[field.name] = field.secret && value ? encryptValue(value, key) : value;
+    }
+    return snapshot;
+  }
+
+  async function decryptSnapshot(integrationId, snapshot) {
+    const definition = integrations[integrationId];
+    const values = {};
+    for (const field of definition.fields) {
+      const value = snapshot?.[field.name] ?? '';
+      values[field.name] = field.secret && value ? decryptValue(value, key) : normalizeFieldValue(field, value);
+    }
+    return values;
+  }
+
   async function migrateEnvironmentValues() {
     const results = [];
     for (const [id, definition] of Object.entries(integrations)) {
@@ -238,6 +462,14 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         set.updated_at = new Date().toISOString();
         await settings.updateOne({ _id: id }, { $set: set }, { upsert: true });
       }
+      if (!document?.defaults_initialized) {
+        const effective = await getIntegration(id);
+        const defaultSet = { defaults_initialized: true, updated_at: new Date().toISOString() };
+        if ((!document?.defaults || typeof document.defaults !== 'object') && effective.configured) {
+          defaultSet.defaults = await encryptSnapshot(id, effective.settings);
+        }
+        await settings.updateOne({ _id: id }, { $set: defaultSet }, { upsert: true });
+      }
       results.push({
         id,
         fieldsMigrated: fieldNames,
@@ -255,14 +487,26 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       for (const field of definition.fields) {
         const value = document?.values?.[field.name];
         if (field.secret && value) decryptValue(value, key);
+        const defaultValue = document?.defaults?.[field.name];
+        if (field.secret && defaultValue) decryptValue(defaultValue, key);
       }
     }
   }
 
   return {
     getIntegration,
+    getIntegrationLabel,
     getAdminIntegrations,
+    recordIntegrationFailure,
+    recordIntegrationSuccess,
+    claimIntegrationFailureAudit,
+    claimCalendarSyncFailureAudit,
     saveIntegrations,
+    prepareIntegrationSave,
+    applyIntegrationSave,
+    getDefaultRestorePreview,
+    setIntegrationDefault,
+    restoreIntegrationDefault,
     validateIntegrationFields,
     migrateEnvironmentValues,
     validateStoredSecrets,
@@ -281,11 +525,12 @@ function getEnvironmentValue(integrationId, field, env) {
     const sender = parseSender(env.SMTP_FROM || '');
     value = field.name === 'sender_email' ? sender.email : sender.name;
   }
+  if (!value && field.defaultValue !== undefined) value = field.defaultValue;
   return normalizeFieldValue(field, value);
 }
 
 function normalizeFieldValue(field, value) {
-  if (field.name === 'secure') return value === true || value === 'true';
+  if (field.type === 'checkbox') return value === true || value === 'true';
   if (field.name === 'port') return value === '' || value === null ? '' : String(value);
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -308,10 +553,16 @@ function validateField(field, raw) {
       : { error: 'Choose a valid value.' };
   }
   if (typeof raw !== 'string') return { error: 'Enter a valid value.' };
-  const value = raw.trim();
+  let value = raw.trim();
+  if (field.format === 'private_key') {
+    value = value.replace(/\\n/g, '\n').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  }
   if (field.secret && isMaskPlaceholder(value)) return { value: '' };
   if (value.length > (field.maxLength || 2048)) return { error: `Use at most ${field.maxLength} characters.` };
-  if (/[\u0000-\u001f\u007f]/.test(value)) return { error: 'Control characters are not allowed.' };
+  const controlCharacters = field.format === 'private_key'
+    ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
+    : /[\u0000-\u001f\u007f]/;
+  if (controlCharacters.test(value)) return { error: 'Control characters are not allowed.' };
   if (field.required && !value) return { error: 'This field is required.' };
   if (!value) return { value };
   if (field.format === 'url') {
@@ -330,10 +581,31 @@ function validateField(field, raw) {
   } else if (field.format === 'sender_email'
     && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) {
     return { error: 'Enter a valid sender email address.' };
+  } else if (field.format === 'service_account_email'
+    && !/^[^\s@<>]+@[a-zA-Z0-9.-]+\.iam\.gserviceaccount\.com$/.test(value)) {
+    return { error: 'Enter a valid Google service account email address.' };
+  } else if (field.format === 'calendar_id' && /\s/.test(value)) {
+    return { error: 'Calendar ID must not contain spaces.' };
+  } else if (field.format === 'iana_timezone' && !isIanaTimeZone(value)) {
+    return { error: 'Enter a valid IANA time zone, such as Asia/Manila.' };
+  } else if (field.format === 'time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    return { error: 'Enter a time in 24-hour HH:MM format.' };
+  } else if (field.format === 'private_key'
+    && !/^-----BEGIN (?:RSA )?PRIVATE KEY-----\n[\s\S]+\n-----END (?:RSA )?PRIVATE KEY-----$/.test(value)) {
+    return { error: 'Enter a valid PEM private key.' };
   } else if (field.format === 'text' && !value) {
     return { error: 'Enter a valid value.' };
   }
   return { value };
+}
+
+function isIanaTimeZone(value) {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseSender(value) {

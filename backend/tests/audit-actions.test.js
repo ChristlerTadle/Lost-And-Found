@@ -83,6 +83,7 @@ test('admin mutations audit safe values and soft-delete items', async () => {
     notifications: {},
     integrationSettings: {},
     googleOAuth: { enabled: false },
+    googleCalendar: { async cleanupForItem() {} },
   });
 
   await controller.postAdminUsers(adminRequest({
@@ -123,6 +124,7 @@ test('staff claim decisions, status changes, and returns are audited without cla
   const events = [];
   const controller = createStaffController({
     audit,
+    googleCalendar: { async cleanupClaim() {} },
     items: {
       async findStaffItem() {
         return { id: 'item-1', status: 'found', physical_verification_status: 'pending' };
@@ -167,6 +169,56 @@ test('staff claim decisions, status changes, and returns are audited without cla
     'ownership.verify', 'claim.reject', 'item.mark_returned',
   ]);
   assert.equal(JSON.stringify(audit.events).includes('NEVER AUDIT THIS CLAIM VERIFICATION DETAIL'), false);
+});
+
+test('calendar sync failure does not block claim approval', async () => {
+  const audit = createAuditRecorder();
+  const calls = [];
+  const claim = {
+    id: 'claim-1',
+    status: 'approved',
+    pickup_at: '2030-01-07T08:30:00.000Z',
+    pickup_location: 'Buksu SSC Office',
+  };
+  const controller = createStaffController({
+    audit,
+    googleCalendar: {
+      async validatePickup() {
+        return {
+          pickup_at: claim.pickup_at,
+          pickup_location: claim.pickup_location,
+          pickup_time_zone: 'Asia/Manila',
+        };
+      },
+      async syncApprovedClaim() {
+        calls.push('calendar:failed');
+        return { status: 'failed' };
+      },
+      async sendApprovalEmail() { calls.push('email'); },
+      async getPickupFormDefaults() { return {}; },
+    },
+    items: {
+      async reviewClaim() { return claim; },
+      async findStaffClaim() { return claim; },
+    },
+  });
+  const res = response();
+  await controller.patchStaffClaimsById({
+    user: { id: 'staff-1', role_name: 'staff' },
+    rolePermissions: ['approve_claim', 'schedule_pickup'],
+    ip: '127.0.0.1',
+    body: {
+      action: 'review',
+      decision: 'approved',
+      pickup_date: '2030-01-07',
+      pickup_time: '16:30',
+      pickup_location: 'Buksu SSC Office',
+    },
+    params: { id: claim.id },
+  }, res);
+
+  assert.equal(res.body.claim.status, 'approved');
+  assert.deepEqual(calls, ['calendar:failed', 'email']);
 });
 
 test('admin and staff logins are audited, and failed login never records credentials', async () => {

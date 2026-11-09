@@ -3,8 +3,19 @@ const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const { saveSession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
+const { IntegrationError } = require('../../src/services/integration-calls');
 
-function createAdminController({ auth, items, rolePermissions, notifications, integrationSettings, email, audit }) {
+function createAdminController({
+  auth,
+  items,
+  rolePermissions,
+  notifications,
+  integrationSettings,
+  integrationSecurity,
+  googleCalendar,
+  email,
+  audit,
+}) {
   return {
     getAdminDashboard: async (req, res) => {
       const [users, summary] = await Promise.all([
@@ -150,6 +161,11 @@ function createAdminController({ auth, items, rolePermissions, notifications, in
         old_value: keyFields,
         new_value: { deleted_at: deletedAt.toISOString(), deleted_by: req.user.id },
       }), (session) => items.softDeleteAdminItem(req.params.id, req.user.id, session, deletedAt));
+      await googleCalendar.cleanupForItem(
+        req.params.id,
+        requestAuditContext(req, null),
+        { notify: true },
+      );
       return res.json({ message: 'Item removed.' });
     },
 
@@ -169,50 +185,237 @@ function createAdminController({ auth, items, rolePermissions, notifications, in
       return res.json(await audit.findRecords(req.query));
     },
 
-    getAdminSettings: async (req, res) => {
+    getAdminSettingsAccess: async (req, res) => {
       if (!req.session.csrfToken) {
         req.session.csrfToken = randomBytes(32).toString('base64url');
-        await saveSession(req);
       }
+      const state = integrationSecurity.configuration();
+      const unlocked = state.accessReady
+        && integrationSecurity.touchSession(req.session, req.user.id);
+      await saveSession(req);
       return res.json({
         csrfToken: req.session.csrfToken,
+        accessReady: state.accessReady,
+        accessError: state.accessError,
+        unlocked,
+        verificationEmailConfigured: state.verificationEmailConfigured,
+        verificationEmailError: state.verificationEmailError,
+      });
+    },
+
+    postAdminSettingsUnlock: async (req, res) => {
+      await integrationSecurity.unlock({
+        adminId: req.user.id,
+        ipAddress: req.ip,
+        candidate: req.body?.pin,
+        session: req.session,
+        auditContext: requestAuditContext(req, null),
+        audit,
+      });
+      await saveSession(req);
+      return res.json({ unlocked: true });
+    },
+
+    postAdminSettingsLock: async (req, res) => {
+      delete req.session.integrationSettingsAccess;
+      await integrationSecurity.cancelCode({ adminId: req.user.id, sessionId: req.sessionID });
+      await saveSession(req);
+      return res.json({ locked: true });
+    },
+
+    getAdminSettings: async (req, res) => {
+      return res.json({
         integrations: await integrationSettings.getAdminIntegrations(),
       });
     },
 
     putAdminSettings: async (req, res) => {
       try {
-        return res.json(await integrationSettings.saveIntegrations(
-          req.body?.integrations,
-          audit,
-          requestAuditContext(req, null),
+        const plan = await integrationSettings.prepareIntegrationSave(
+          requireSingleIntegration(req.body?.integrations),
+        );
+        if (plan.credentialChanges.length) {
+          const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
+          return res.json({ verificationRequired: true, ...result });
+        }
+        return res.json(await integrationSettings.applyIntegrationSave(
+          plan, audit, requestAuditContext(req, null),
         ));
       } catch (error) {
-        if (error.status === 400 && error.fieldErrors) {
-          return res.status(400).json({ error: error.message, fieldErrors: error.fieldErrors });
-        }
-        if (error.status === 400) throw error;
-        const safeError = new Error('Integration settings could not be saved.');
-        safeError.status = 500;
-        throw safeError;
+        return integrationSettingsError(res, error, 'Integration settings could not be saved.');
       }
+    },
+
+    postAdminSettingsCodeResend: async (req, res) => {
+      try {
+        const plan = await integrationSettings.prepareIntegrationSave(
+          requireSingleIntegration(req.body?.integrations),
+        );
+        if (!plan.credentialChanges.length) {
+          const error = new Error('There are no credential changes to verify.');
+          error.status = 400;
+          throw error;
+        }
+        const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
+        return res.json({ verificationRequired: true, ...result });
+      } catch (error) {
+        return integrationSettingsError(res, error, 'The verification code could not be sent.');
+      }
+    },
+
+    postAdminSettingsCodeCancel: async (req, res) => {
+      await integrationSecurity.cancelCode({ adminId: req.user.id, sessionId: req.sessionID });
+      return res.json({ cancelled: true });
+    },
+
+    postAdminSettingsCodeVerify: async (req, res) => {
+      try {
+        const plan = await integrationSettings.prepareIntegrationSave(
+          requireSingleIntegration(req.body?.integrations),
+        );
+        if (!plan.credentialChanges.length) {
+          const error = new Error('There are no credential changes to verify.');
+          error.status = 400;
+          throw error;
+        }
+        await integrationSecurity.verifyCode({
+          adminId: req.user.id,
+          sessionId: req.sessionID,
+          candidate: req.body?.code,
+          payloadHash: plan.payloadHash,
+          auditContext: requestAuditContext(req, null),
+          audit,
+          changes: plan.changes,
+        });
+        return res.json(await integrationSettings.applyIntegrationSave(
+          plan, audit, requestAuditContext(req, null),
+        ));
+      } catch (error) {
+        return integrationSettingsError(res, error, 'Integration settings could not be saved.');
+      }
+    },
+
+    postAdminSettingsDefault: async (req, res) => {
+      return res.json(await integrationSettings.setIntegrationDefault(
+        req.params.integrationId, audit, requestAuditContext(req, null),
+      ));
+    },
+
+    postAdminSettingsRestoreDefault: async (req, res) => {
+      const preview = await integrationSettings.getDefaultRestorePreview(req.params.integrationId);
+      let noticeSent = false;
+      let warning = '';
+      if (preview.changedFields.length) {
+        const state = integrationSecurity.configuration();
+        if (state.verificationEmailConfigured) {
+          const names = integrationSettings.getIntegrationLabel(req.params.integrationId);
+          const requester = req.user.full_name || req.user.email || 'Administrator';
+          const fields = preview.changedFields.join(', ');
+          try {
+            await integrationSecurity.sendBootstrapEmail({
+              subject: 'Integration defaults restored',
+              text: [
+                `${names} default settings were restored.`,
+                `Changed fields: ${fields}`,
+                `Requested by: ${requester}`,
+                `Time: ${new Date().toISOString()}`,
+                `IP: ${req.ip || 'Unavailable'}`,
+              ].join('\n'),
+            });
+            noticeSent = true;
+          } catch {
+            const error = new Error('The default was not restored because its notification could not be sent.');
+            error.status = 503;
+            throw error;
+          }
+        } else {
+          warning = state.verificationEmailError;
+        }
+      }
+      const result = await integrationSettings.restoreIntegrationDefault(
+        req.params.integrationId, audit, requestAuditContext(req, null),
+      );
+      return res.json({ ...result, noticeSent, warning });
     },
 
     postAdminSettingsSmtpTest: async (_req, res) => {
       try {
-        const smtpSettings = await integrationSettings.validateIntegrationFields('smtp', _req.body.fields);
-        await email.testConnection(smtpSettings);
-        return res.json({ verified: true });
-      } catch (error) {
-        if (error.status === 400 && error.fieldErrors) {
-          return res.status(400).json({ error: error.message, fieldErrors: error.fieldErrors });
+        const smtp = await integrationSettings.getIntegration('smtp');
+        if (!smtp.configured) {
+          const error = new Error('Configure all required saved SMTP fields before testing.');
+          error.status = 400;
+          throw error;
         }
-        const safeError = new Error('SMTP connection could not be verified. Check the host, port, and credentials.');
-        safeError.status = 400;
+        await email.testConnection(smtp.settings);
+        const result = await integrationSettings.setIntegrationDefault(
+          'smtp', audit, requestAuditContext(_req, null),
+        );
+        return res.json({ verified: true, ...result });
+      } catch (error) {
+        const safeError = new Error('SMTP connection could not be verified. Check saved SMTP settings and credentials.');
+        safeError.status = error.status || 400;
+        throw safeError;
+      }
+    },
+
+    postAdminSettingsGoogleCalendarTest: async (req, res) => {
+      try {
+        await googleCalendar.testConnection(requestAuditContext(req, null));
+        const result = await integrationSettings.setIntegrationDefault(
+          'google_calendar', audit, requestAuditContext(req, null),
+        );
+        return res.json({ verified: true, ...result });
+      } catch (error) {
+        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
+          ? 'Google Calendar credentials were rejected. Check the service-account email and private key.'
+          : error instanceof IntegrationError
+            ? error.message
+            : error.status === 400
+              ? error.message
+              : 'Google Calendar connection could not be verified. Check the saved calendar and service-account settings.';
+        const safeError = new Error(safeMessage);
+        safeError.status = error.status || 503;
         throw safeError;
       }
     },
   };
+}
+
+async function sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit) {
+  const changes = plan.changes.map(({ integration, fields }) => ({
+    integration,
+    label: integrationSettings.getIntegrationLabel(integration),
+    fields,
+  }));
+  return integrationSecurity.sendCode({
+    adminId: req.user.id,
+    sessionId: req.sessionID,
+    payloadHash: plan.payloadHash,
+    changes,
+    requester: req.user.full_name || req.user.email || 'Administrator',
+    ipAddress: req.ip,
+    auditContext: requestAuditContext(req, null),
+    audit,
+  });
+}
+
+function integrationSettingsError(res, error, fallbackMessage) {
+  if (error.fieldErrors) {
+    return res.status(error.status || 400).json({ error: error.message, fieldErrors: error.fieldErrors });
+  }
+  if ([400, 403, 404, 429, 503].includes(error.status)) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  return res.status(500).json({ error: fallbackMessage });
+}
+
+function requireSingleIntegration(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1) {
+    const error = new Error('Save one integration card at a time.');
+    error.status = 400;
+    throw error;
+  }
+  return input;
 }
 
 async function findAccount(auth, id) {

@@ -6,6 +6,10 @@ const ACTIONS = new Set([
   'claim.reject', 'ownership.verify', 'item.status_update', 'item.mark_returned',
   'auth.login', 'auth.login_failed', 'access.denied',
   'integration.enable', 'integration.disable', 'integration.update',
+  'integration.unlock', 'integration.unlock_failed', 'integration.unlock_locked',
+  'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
+  'integration.set_default', 'integration.failure',
+  'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
 ]);
 
 function createAuditLogService(database, client) {
@@ -114,8 +118,25 @@ function createAuditLogService(database, client) {
     if (['user', 'staff', 'item', 'claim', 'report', 'integration'].includes(filters.target_type)) {
       filter.target_type = filters.target_type;
     }
-    if (['success', 'denied', 'failed', 'attempted'].includes(filters.result)) {
+    if (filters.result === 'failed') {
+      filter.$or = [
+        { result: 'failed' },
+        { action: { $in: ['integration.unlock_failed', 'integration.code_failed'] } },
+      ];
+    } else if (filters.result === 'denied') {
+      filter.$or = [
+        { result: 'denied' },
+        { action: 'integration.unlock_locked' },
+      ];
+    } else if (['success', 'attempted'].includes(filters.result)) {
       filter.result = filters.result;
+      if (filters.result === 'success') {
+        filter.$and = [{
+          action: {
+            $nin: ['integration.unlock_failed', 'integration.code_failed', 'integration.unlock_locked'],
+          },
+        }];
+      }
     }
     const page = Math.max(1, Math.min(1_000_000, parsePositiveInteger(filters.page, 1)));
     const pageSize = 25;

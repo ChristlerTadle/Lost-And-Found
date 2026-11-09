@@ -1,8 +1,9 @@
 const path = require('node:path');
 const { saveItemImage } = require('../lib/save-item-image');
 const { optionalUser } = require('../middlewares/session-auth');
+const { requestAuditContext } = require('../../src/services/audit-log');
 
-function createItemsController({ items }) {
+function createItemsController({ items, googleCalendar }) {
   return {
     getItems: async (req, res) => {
         const user = await optionalUser(req);
@@ -60,6 +61,7 @@ function createItemsController({ items }) {
     deleteItemsById: async (req, res) => {
       const user = req.user;
       await items.cancel(user.id, req.params.id);
+      await googleCalendar.cleanupForItem(req.params.id, requestAuditContext(req, null), { notify: true });
       return res.json({ message: 'Report cancelled.' });
     },
   };

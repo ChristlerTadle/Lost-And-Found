@@ -56,7 +56,7 @@ This migration copies `permission_audit_log` and `access_denied_log` into `audit
 
 ### Integration settings and secret encryption
 
-The Admin **Settings** page stores Google OAuth, reCAPTCHA, and SMTP settings in the existing MongoDB `integration_settings` collection. Integration secrets are encrypted with AES-256-GCM. Before starting the updated API, create a stable encryption key and put it in the root `.env`:
+The Admin **Settings** page stores Google OAuth, reCAPTCHA, SMTP, and Google Calendar settings in the existing MongoDB `integration_settings` collection. Integration secrets are encrypted with AES-256-GCM. Before starting the updated API, create a stable encryption key and put it in the root `.env`:
 
 ```powershell
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
@@ -72,7 +72,43 @@ npm.cmd run migrate:integrations
 
 It copies non-empty environment settings into MongoDB, encrypts secret fields, preserves existing Google/reCAPTCHA enabled states, and sets SMTP enabled only when the SMTP environment configuration is complete. It logs integration IDs and field names, never values. The Admin page then supports pending edits, Save Changes, Cancel, field-level validation, and masked secrets. SMTP **Test Connection** verifies the current form values without sending an email.
 
+Google Calendar uses the pinned official Calendar-only Node.js client, `@googleapis/calendar@16.0.0`, and a service account (not per-user OAuth). Enable Calendar API for the service-account project, create or select one organization pickup calendar, and share **only that dedicated calendar** with the service-account email with permission to manage events. Do not grant the service account organization-wide calendar access or domain-wide delegation. In Admin → Settings, enter the calendar ID, service-account email, and private key; changes to these credentials require the Integration Settings PIN and emailed verification code. The key is encrypted at rest and fully masked in settings. Test Connection checks the saved credentials and calendar access without changing calendar data; a successful test saves the current configuration as the default. Pickup settings default to Asia/Manila, Buksu SSC Office, 08:00–17:00 Monday–Saturday, and can be changed on that card. After deploying, rerun `npm.cmd run migrate:role-permissions` to seed **Schedule pickup** as enabled for the Staff role; existing role-wide choices are preserved.
+
+Pickup events contain only the claim reference and pickup location; claimant information and ownership-verification details are never added. Calendar events use a deterministic ID so retry and reschedule operations update the same event. Calendar provider errors do not reverse claim decisions. Staff can retry failed syncs; reject, item removal, and item return clean up linked events. Claimants receive pickup details and a local Google Calendar template link in the in-app notification and, when SMTP is enabled, by email. The template link and `.ics` download do not require Calendar API availability.
+
 After confirming the settings in Admin → Settings and testing the integrations, the migrated environment variables can be removed from `.env`: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `API_GOOGLE_REDIRECT_URI`, `GOOGLE_REDIRECT_URI`, `RECAPTCHA_SITE_KEY`, `RECAPTCHA_SECRET_KEY`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`. These remain temporary fallbacks only when the corresponding MongoDB field is empty. Keep `INTEGRATION_ENCRYPTION_KEY`; it is required to decrypt database secrets. Keep `API_PORT` if you use it; otherwise the callback URL is stored during migration using its current value/default.
+
+Integration Settings has a separate server-side PIN gate. Set `SU_PIN` to a private random value and `SU_EMAIL` to the administrator inbox that receives verification and restore notices. To generate and configure the PIN in PowerShell:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"
+```
+
+1. Run the command from the project folder (any folder with Node.js available also works).
+2. Copy the entire value printed by the command, without adding quotes or spaces.
+3. Paste it after `SU_PIN=` in the root `.env` file, for example: `SU_PIN=<paste-the-generated-value>`.
+4. Save `.env` and restart the API with `npm.cmd start`.
+
+This value is the Integration Settings PIN, not the `INTEGRATION_ENCRYPTION_KEY`. Keep it private and do not commit `.env` to source control. `SU_PIN` remains the same until you change it in `.env`; restarting the API is required for a changed value to take effect.
+
+Verification and restore notices use only the independent `SU_SMTP_*` bootstrap account, never the editable SMTP integration or its fallback variables. Copy these values from the existing settings before removing any old variables:
+
+| New variable | Copy from |
+|---|---|
+| `SU_SMTP_HOST` | `SMTP_HOST` |
+| `SU_SMTP_PORT` | `SMTP_PORT` |
+| `SU_SMTP_SECURE` | `SMTP_SECURE` |
+| `SU_SMTP_USER` | `SMTP_USER` |
+| `SU_SMTP_PASSWORD` | `SMTP_PASSWORD` |
+| `SU_SMTP_FROM` | `SMTP_FROM` |
+
+Set `SU_SMTP_SECURE=false` explicitly when the old value is unset but the server uses STARTTLS on port 587. All six `SU_SMTP_*` variables and `SU_EMAIL` must be configured for code delivery. If bootstrap mail is incomplete, Integration Settings remains usable for non-credential changes, but credential changes are blocked with a configuration message; the rest of the application continues to work. Do not remove the old `SMTP_*` values until you have confirmed both verification-code and restore-notice emails arrive. `.env` is ignored by Git; keep it private and do not commit it.
+
+Verification-code throttling can be adjusted with `SU_CODE_REQUEST_LIMIT` (default `5` requests), `SU_CODE_REQUEST_WINDOW_SECONDS` (default `3600` seconds), and `SU_CODE_RESEND_SECONDS` (default `60` seconds between sends). For local testing, for example, set them to `20`, `60`, and `1`; restore the defaults before deployment. Values must be positive whole numbers, and changing them requires restarting the API.
+
+Integration card changes remain pending until saved. Credential changes (including client IDs and SMTP usernames) require a one-use six-digit email code before any values in that Save Changes request are written. PIN unlocks expire after 10 minutes of inactivity and are cleared when leaving the settings page or signing out. Environment migration creates an encrypted-secret default snapshot; later defaults are only set by a successful saved SMTP test or an explicit admin action. Restoring a default sends a field-name-only notice through the bootstrap account when configured.
+
+When an enabled integration has a provider, credential, network, or timeout failure, the API returns a safe temporary-unavailable message and records a sanitized failure in the integration card. The card shows the last failure time, safe reason, and consecutive failure count; a successful provider call or connection test clears the failure. Calendar sync failures are separately rate-limited in the audit log and expose only claim and event IDs. Disabled integrations are skipped without being marked as failing. Invalid or expired user CAPTCHA challenges and cancelled Google sign-ins do not count as integration failures. Password-reset requests always return the same generic response, while SMTP delivery failures are logged and recorded in SMTP health. Bootstrap email failures are logged separately and do not affect the editable SMTP card.
 
 Admin and staff mutations write audit events through `src\services\audit-log.js`. Replica-set or sharded MongoDB deployments use a transaction for the action and its audit row. Standalone MongoDB uses the specified fallback: critical actions first append an `attempted` event, then finalize only that event as `success` or `failed`. The Admin-only **System Records** page is newest-first, server-filtered, and paginated at 25 rows. It is read-only.
 

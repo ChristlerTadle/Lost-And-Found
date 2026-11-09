@@ -1,20 +1,19 @@
-function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch) {
+const { providerFailure, UserProviderError } = require('./integration-calls');
+
+function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch, callIntegration = runDirectly) {
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required to verify reCAPTCHA responses.');
 
   return {
-    async verifyResponse(token, remoteIp) {
+    async verifyResponse(token, remoteIp, auditContext) {
       const integration = await getIntegration('recaptcha');
-      if (!integration.active) {
-        const error = new Error(integration.configured
-          ? 'reCAPTCHA is disabled.'
-          : 'reCAPTCHA is enabled but its keys are not configured.');
-        error.status = 503;
-        throw error;
+      if (!integration.enabled) return false;
+      if (!integration.configured || !integration.settings.secret_key) {
+        return callIntegration('recaptcha', async () => {
+          throw providerFailure('invalid_credentials');
+        }, auditContext);
       }
       if (typeof token !== 'string' || !token.trim()) {
-        const error = new Error('Complete the reCAPTCHA challenge.');
-        error.status = 400;
-        throw error;
+        throw new UserProviderError('Complete the reCAPTCHA challenge.');
       }
 
       const body = new URLSearchParams({
@@ -23,41 +22,36 @@ function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch) {
       });
       if (typeof remoteIp === 'string' && remoteIp) body.set('remoteip', remoteIp);
 
-      let response;
-      try {
-        response = await fetchImpl('https://www.google.com/recaptcha/api/siteverify', {
+      return callIntegration('recaptcha', async ({ signal }) => {
+        const response = await fetchImpl('https://www.google.com/recaptcha/api/siteverify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body,
+          signal,
         });
-      } catch {
-        const error = new Error('Unable to verify reCAPTCHA right now. Please try again.');
-        error.status = 503;
-        throw error;
-      }
+        if (!response.ok) throw providerFailure('provider_error');
 
-      if (!response.ok) {
-        const error = new Error('Unable to verify reCAPTCHA right now. Please try again.');
-        error.status = 503;
-        throw error;
-      }
-
-      let result;
-      try {
-        result = await response.json();
-      } catch {
-        const error = new Error('Unable to verify reCAPTCHA right now. Please try again.');
-        error.status = 503;
-        throw error;
-      }
-
-      if (result.success !== true) {
-        const error = new Error('The reCAPTCHA challenge could not be verified. Please try again.');
-        error.status = 400;
-        throw error;
-      }
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw providerFailure('provider_error');
+        }
+        const errors = Array.isArray(result['error-codes']) ? result['error-codes'] : [];
+        if (errors.some((code) => ['invalid-input-secret', 'missing-input-secret'].includes(code))) {
+          throw providerFailure('invalid_credentials');
+        }
+        if (result.success !== true) {
+          throw new UserProviderError('The reCAPTCHA challenge could not be verified.');
+        }
+        return true;
+      }, auditContext);
     },
   };
+}
+
+function runDirectly(_integrationId, operation) {
+  return operation({ signal: new AbortController().signal });
 }
 
 module.exports = { createRecaptcha };

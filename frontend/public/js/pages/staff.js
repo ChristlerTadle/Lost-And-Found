@@ -143,7 +143,7 @@ function claimRows(claims) {
 }
 
 async function staffClaimPage(id) {
-  const { claim } = await request(`/staff/claims/${encodeURIComponent(id)}`);
+  const { claim, pickupDefaults = {} } = await request(`/staff/claims/${encodeURIComponent(id)}`);
   const claimant = claim.claimant;
   const item = claim.item || {};
   return `<main class="container staff-workspace"><header class="page-header"><div><h1>Verify Item Ownership</h1>
@@ -160,11 +160,68 @@ async function staffClaimPage(id) {
           <h3>Private identifying details from report</h3><p>${h(item.identifying_details)}</p></section></div>
       ${claim.status === 'pending' && (hasPermission('approve_claim')
         || hasPermission('reject_claim')) ? `<div class="staff-verification"><p>Compare the claimant’s statements with the private report details and the physical item before deciding.</p>
-        <div class="staff-decision-actions">${hasPermission('approve_claim') ? formAction('review-claim', claim.id, 'Approve ownership', 'primary', { decision: 'approved' }) : ''}
-          ${hasPermission('reject_claim') ? formAction('review-claim', claim.id, 'Reject claim', 'danger', { decision: 'rejected' }) : ''}</div></div>`
+        ${hasPermission('approve_claim') && hasPermission('schedule_pickup')
+          ? `<form class="form-grid pickup-schedule-form" data-form="approve-claim" data-id="${h(claim.id)}">
+              <h3>Schedule an item pickup (optional)</h3><div class="form-row">
+                <div class="field"><label for="pickup-date">Pickup date</label><input class="input" id="pickup-date" type="date" name="pickup_date" required></div>
+                <div class="field"><label for="pickup-time">Pickup time</label><input class="input" id="pickup-time" type="time" name="pickup_time" required></div></div>
+              <div class="field"><label for="pickup-location">Pickup location</label><input class="input" id="pickup-location" name="pickup_location" maxlength="256" value="${h(pickupDefaults.office_location || '')}"></div>
+              <p class="muted">Pickup hours: ${h(pickupDefaults.pickup_open_time || '08:00')}–${h(pickupDefaults.pickup_close_time || '17:00')} (${h(pickupDefaults.time_zone || 'Asia/Manila')}), ${h(pickupDefaults.pickup_days || 'Monday, Tuesday, Wednesday, Thursday, Friday, Saturday')}.</p>
+              <button class="button button-primary" type="submit">Approve and schedule pickup</button>
+            </form>
+            <div class="pickup-schedule-alternatives"><p class="muted">Or decide without scheduling:</p><div class="staff-decision-actions">
+              ${formAction('review-claim', claim.id, 'Approve without pickup time', 'outline', { decision: 'approved' })}
+              ${hasPermission('reject_claim') ? formAction('review-claim', claim.id, 'Reject claim', 'danger', { decision: 'rejected' }) : ''}
+            </div></div>`
+          : `<div class="staff-decision-actions">
+              ${hasPermission('approve_claim') ? formAction('review-claim', claim.id, 'Approve ownership', 'primary', { decision: 'approved' }) : ''}
+              ${hasPermission('reject_claim') ? formAction('review-claim', claim.id, 'Reject claim', 'danger', { decision: 'rejected' }) : ''}
+            </div>`}</div>`
         : claim.status === 'approved' && item.status === 'claimed' && hasPermission('mark_item_returned')
           ? `<div class="staff-verification"><p>Confirm that the verified owner has received the item before recording its return.</p>${formAction('mark-returned', claim.id, 'Mark item as returned', 'primary')}</div>` : ''}
+      ${claim.status === 'approved' && claim.pickup_at ? `<section class="staff-verification pickup-status">
+        <h3>Pickup appointment</h3><p>${h(formatPickup(claim.pickup_at, claim.pickup_time_zone))} · ${h(claim.pickup_location)}</p>
+        ${claim.calendar_sync_status === 'failed' ? `<p class="claim-outcome">Calendar not synced</p>${hasPermission('schedule_pickup') ? formAction('retry-calendar-sync', claim.id, 'Retry sync', 'outline') : ''}` : ''}
+        ${hasPermission('schedule_pickup') && item.status === 'claimed' && !item.deleted_at ? `<form class="form-grid pickup-schedule-form" data-form="reschedule-pickup" data-id="${h(claim.id)}">
+          <h3>Reschedule pickup</h3><div class="form-row">
+            <div class="field"><label for="reschedule-pickup-date">Pickup date</label><input class="input" id="reschedule-pickup-date" type="date" name="pickup_date" required value="${h(localPickupDate(claim))}"></div>
+            <div class="field"><label for="reschedule-pickup-time">Pickup time</label><input class="input" id="reschedule-pickup-time" type="time" name="pickup_time" required value="${h(localPickupTime(claim))}"></div></div>
+          <div class="field"><label for="reschedule-pickup-location">Pickup location</label><input class="input" id="reschedule-pickup-location" name="pickup_location" maxlength="256" required value="${h(claim.pickup_location)}"></div>
+          <button class="button button-outline" type="submit">Save new pickup time</button></form>` : ''}
+      </section>` : ''}
     </section></main>`;
+}
+
+function formatPickup(value, timeZone = 'Asia/Manila') {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'short',
+    timeZone,
+  }).format(new Date(value));
+}
+
+function localPickupFields(claim) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', {
+    timeZone: claim.pickup_time_zone || 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(claim.pickup_at)).filter(({ type }) => type !== 'literal')
+    .map(({ type, value }) => [type, value]));
+  return parts;
+}
+
+function localPickupDate(claim) {
+  const parts = localPickupFields(claim);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function localPickupTime(claim) {
+  const parts = localPickupFields(claim);
+  return `${parts.hour}:${parts.minute}`;
 }
 
 function staffPageLink(permission, page, label) {

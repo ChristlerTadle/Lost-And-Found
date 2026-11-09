@@ -231,7 +231,21 @@ function claimTable(claims) {
     <p>${h(claim.claim_details)}</p>${claim.status === 'approved' && claim.item_status === 'claimed'
       ? '<p class="claim-outcome">Your claim was approved. Please collect your item from Lost and Found staff.</p>'
       : claim.status === 'approved' && claim.item_status === 'returned' ? '<p class="claim-outcome">Returned to you by staff.</p>' : ''}
+    ${claim.status === 'approved' && claim.pickup_at ? `<section class="claim-pickup-details">
+      <h4>Pickup appointment</h4><p>${h(formatClaimPickup(claim.pickup_at, claim.pickup_time_zone))}</p>
+      <p>Location: ${h(claim.pickup_location)}</p>
+      <div class="nav-actions">${claim.calendar_url ? `<a class="button button-outline" href="${h(claim.calendar_url)}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>` : ''}
+        <a class="button button-outline" href="${h(API)}/claims/${encodeURIComponent(claim.id)}/calendar.ics" download>Download .ics</a>
+      </div></section>` : ''}
     </div>${badge(claim.status)}</article>`).join('')}</div></section>`;
+}
+
+function formatClaimPickup(value, timeZone = 'Asia/Manila') {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'short',
+    timeZone,
+  }).format(new Date(value));
 }
 
 async function profilePage() {
@@ -267,7 +281,8 @@ async function notificationsPage() {
     return `<article class="notification${isUnread ? ' unread' : ''}">
       <span class="notification-icon ${h(notice.type)}">${icon(notice.type === 'status' || notice.type === 'verification' ? 'check' : notice.type === 'claim' ? 'clipboard' : 'file', 17)}</span>
       <div class="notification-content"><div class="notification-heading"><h2>${h(notice.title)}</h2></div>
-        <p>${h(notice.message)}</p>${notice.href ? `<a class="link-sm" href="${h(frontendHref(notice.href))}">View update</a>` : ''}
+        <p>${h(notice.message)}</p>${notice.calendar_url ? `<a class="link-sm" href="${h(notice.calendar_url)}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>` : ''}
+        ${notice.href ? `<a class="link-sm" href="${h(frontendHref(notice.href))}">View update</a>` : ''}
       </div>
       <div class="notification-meta"><time>${formattedDate}</time>
         ${isUnread ? `<form class="front-action-form notification-mark-read" data-action="read-notice" data-id="${h(notice.id)}" data-values="{}"><button class="notification-read" type="submit">Mark read</button></form>` : ''}

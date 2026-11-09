@@ -17,7 +17,10 @@ async function homePage() {
 
 function loginPage(message = '') {
   const registering = param('tab') === 'register';
-  const errorMessage = message || (new URLSearchParams(location.search).has('authError') ? 'Google sign-in could not be completed.' : '');
+  const authError = new URLSearchParams(location.search).get('authError');
+  const errorMessage = message || (authError === 'google-unavailable'
+    ? 'Google sign-in is temporarily unavailable. Please use email and password.'
+    : authError ? 'Google sign-in could not be completed.' : '');
   const accessForm = (isRegister) => `<div class="card card-pad-lg"><form class="form-grid" data-form="${isRegister ? 'register' : 'login'}">
     ${isRegister ? field('Full name', 'full_name', 'text', '', true, 'autocomplete="name"') : ''}
     ${field('Email address', 'email', 'email', '', true, 'autocomplete="email"')}

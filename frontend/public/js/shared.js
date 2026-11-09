@@ -1,6 +1,6 @@
 const API = window.API_BASE;
 const app = document.querySelector('#app');
-const sessionInfo = { user: null, rolePermissions: [], categories: [], locations: [], unreadNotifications: 0, googleAuth: { active: false }, recaptcha: { active: false } };
+const sessionInfo = { user: null, rolePermissions: [], categories: [], locations: [], unreadNotifications: 0, csrfToken: '', googleAuth: { active: false }, recaptcha: { active: false } };
 
 const h = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -26,6 +26,10 @@ const optionsFrom = (values, placeholder = 'All') => [['', placeholder], ...valu
 async function request(path, options = {}) {
   const headers = { ...options.headers };
   if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(String(options.method || 'GET').toUpperCase())
+    && sessionInfo.csrfToken && !headers['X-CSRF-Token']) {
+    headers['X-CSRF-Token'] = sessionInfo.csrfToken;
+  }
   const response = await fetch(`${API}${path}`, {
     credentials: 'include',
     ...options,
@@ -34,7 +38,9 @@ async function request(path, options = {}) {
   const data = response.status === 204 ? {} : await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) sessionInfo.user = null;
-    throw new Error(data.error || `Request failed (${response.status}).`);
+    const error = new Error(data.error || `Request failed (${response.status}).`);
+    error.fieldErrors = data.fieldErrors;
+    throw error;
   }
   return data;
 }

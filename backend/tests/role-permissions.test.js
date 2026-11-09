@@ -46,6 +46,9 @@ test('role permission dependencies expand parents and reject unknown keys for a 
   assert.deepEqual(normalizeRolePermissions('staff', ['approve_claim']), [
     'view_claims', 'verify_item_ownership', 'approve_claim',
   ]);
+  assert.deepEqual(normalizeRolePermissions('staff', ['schedule_pickup']), [
+    'view_claims', 'verify_item_ownership', 'approve_claim', 'schedule_pickup',
+  ]);
   assert.deepEqual(normalizeRolePermissions('user', ['filter_items']), [
     'view_items', 'search_items', 'filter_items',
   ]);
@@ -82,6 +85,10 @@ test('route permission map has unique method/path entries and records both dynam
     method === 'GET' && path === '/items' && note?.includes('multiple permissions')));
   assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, note }) =>
     method === 'PATCH' && path === '/staff/claims/:id' && note?.includes('approve_claim')));
+  assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
+    method === 'PATCH' && path === '/staff/claims/:id/pickup' && permission === 'schedule_pickup'));
+  assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
+    method === 'POST' && path === '/staff/claims/:id/calendar-sync' && permission === 'schedule_pickup'));
 });
 
 test('notifications are suppressed for roles without receive_notifications', async () => {

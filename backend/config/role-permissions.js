@@ -21,6 +21,7 @@ const ROLE_PERMISSIONS = [
   { key: 'view_claims', label: 'View claims', group: 'Claims', role: 'staff', requires: [] },
   { key: 'verify_item_ownership', label: 'Verify item ownership', group: 'Claims', role: 'staff', requires: ['view_claims'] },
   { key: 'approve_claim', label: 'Approve claim', group: 'Claims', role: 'staff', requires: ['verify_item_ownership'] },
+  { key: 'schedule_pickup', label: 'Schedule pickup', group: 'Claims', role: 'staff', requires: ['approve_claim'] },
   { key: 'reject_claim', label: 'Reject claim', group: 'Claims', role: 'staff', requires: ['verify_item_ownership'] },
   { key: 'view_records', label: 'View records', group: 'Records and dashboard', role: 'staff', requires: [] },
   { key: 'view_staff_dashboard', label: 'View staff dashboard', group: 'Records and dashboard', role: 'staff', requires: [] },
@@ -108,6 +109,7 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'GET', path: '/claims/available/:id', roles: ['user'], permission: 'submit_claim' },
   { method: 'POST', path: '/claims', roles: ['user'], permission: 'submit_claim' },
   { method: 'GET', path: '/claims/mine', roles: ['user'], permission: 'view_claim_status' },
+  { method: 'GET', path: '/claims/:id/calendar.ics', roles: ['user'], permission: 'view_claim_status' },
   { method: 'GET', path: '/profile', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'view_profile', staff: 'view_profile' } },
   { method: 'PATCH', path: '/profile', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'edit_profile', staff: 'edit_profile' } },
   { method: 'GET', path: '/notifications', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
@@ -140,12 +142,17 @@ const ROLE_PERMISSION_ROUTE_MAP = [
     method: 'PATCH', path: '/staff/claims/:id', roles: ['staff'],
     permission: (req) => {
       if (req.body?.action === 'returned') return 'mark_item_returned';
-      if (req.body?.action === 'review' && req.body?.decision === 'approved') return 'approve_claim';
+      if (req.body?.action === 'review' && req.body?.decision === 'approved') {
+        return req.body?.pickup_date || req.body?.pickup_time
+          ? ['approve_claim', 'schedule_pickup'] : 'approve_claim';
+      }
       if (req.body?.action === 'review' && req.body?.decision === 'rejected') return 'reject_claim';
       return null;
     },
-    note: 'Decision resolves to approve_claim or reject_claim; returned action uses mark_item_returned. The role configuration normalizes and enforces each permission’s parent dependency chain.',
+    note: 'Decision resolves to approve_claim or reject_claim; supplied pickup times additionally require schedule_pickup; returned uses mark_item_returned.',
   },
+  { method: 'PATCH', path: '/staff/claims/:id/pickup', roles: ['staff'], permission: 'schedule_pickup' },
+  { method: 'POST', path: '/staff/claims/:id/calendar-sync', roles: ['staff'], permission: 'schedule_pickup' },
 ];
 
 module.exports = {

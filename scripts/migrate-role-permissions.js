@@ -4,7 +4,7 @@ const { PERMISSIONS_BY_ROLE } = require('../backend/config/role-permissions');
 const LEGACY_STAFF_PERMISSIONS = [
   'view_lost_reports', 'review_lost_report', 'view_found_items', 'verify_found_item',
   'update_item_status', 'mark_item_returned', 'view_claims', 'verify_item_ownership',
-  'approve_claim', 'reject_claim', 'view_records', 'view_staff_dashboard',
+  'approve_claim', 'schedule_pickup', 'reject_claim', 'view_records', 'view_staff_dashboard',
 ];
 
 async function seedRole(database, role, permissions) {

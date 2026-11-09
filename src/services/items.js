@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+const { formatPickupDateTime, googleCalendarUrl } = require('./calendar-links');
 
 const activeStatuses = ['lost', 'found'];
 const activeFoundItemStatuses = ['found', 'stored'];
@@ -10,6 +11,20 @@ function createItemService(database, notificationService) {
   const claims = database.collection('item_claims');
   const users = database.collection('users');
   const activeItems = (filter = {}) => ({ ...filter, deleted_at: { $exists: false } });
+  async function enrichCalendarClaim(document) {
+    if (!document) return null;
+    const [item, claimant] = await Promise.all([
+      items.findOne({ _id: document.item_id }),
+      users.findOne({ _id: document.user_id }, { projection: { email: 1 } }),
+    ]);
+    return {
+      ...documentToRecord(document),
+      user_id: String(document.user_id),
+      item_status: item?.status || null,
+      item_deleted: Boolean(item?.deleted_at),
+      claimant: claimant ? { email: claimant.email } : null,
+    };
+  }
   const activeItemIds = async () => (await items.find(activeItems(), {
     projection: { _id: 1 },
   }).toArray()).map(({ _id }) => _id);
@@ -594,7 +609,7 @@ function createItemService(database, notificationService) {
       return this.enrichStaffClaim(document, null, session);
     },
 
-    async reviewClaim(claimId, staffId, decision, session = undefined) {
+    async reviewClaim(claimId, staffId, decision, session = undefined, pickup = null) {
       const options = session ? { session } : undefined;
       if (!['approved', 'rejected'].includes(decision)) throw new Error('Choose approve or reject for this claim.');
       const now = new Date().toISOString();
@@ -627,9 +642,24 @@ function createItemService(database, notificationService) {
         );
         if (!result.matchedCount) throw new Error('This item is no longer available to approve another claim.');
       }
+      const claimChanges = {
+        status: decision,
+        reviewed_by: staffId,
+        reviewed_at: now,
+        updated_at: now,
+      };
+      if (decision === 'approved') {
+        claimChanges.calendar_sync_status = pickup ? 'pending' : 'skipped';
+        if (pickup) {
+          claimChanges.pickup_at = pickup.pickup_at;
+          claimChanges.pickup_location = pickup.pickup_location;
+          claimChanges.pickup_time_zone = pickup.pickup_time_zone;
+          claimChanges.calendar_event_id = pickup.calendar_event_id;
+        }
+      }
       const result = await claims.updateOne(
         { _id: claimId, status: 'pending' },
-        { $set: { status: decision, reviewed_by: staffId, reviewed_at: now, updated_at: now } },
+        { $set: claimChanges },
         options,
       );
       if (!result.matchedCount) {
@@ -662,13 +692,17 @@ function createItemService(database, notificationService) {
         );
       }
       const claim = await this.findStaffClaim(claimId, session);
+      const pickupDetails = claim.pickup_at
+        ? ` Pickup: ${formatPickupDateTime(claim)} at ${claim.pickup_location}.`
+        : '';
       const notifications = [
         notificationService.create(claim.user_id, {
           type: 'claim',
           title: `Claim ${decision}`,
           message: decision === 'approved'
-            ? `Your claim for "${claim.item_name}" was approved. Please collect your item from Lost and Found staff. Staff will mark it as returned after you receive it.`
-            : `Your claim for "${claim.item_name}" was rejected.`,
+            ? `Your claim for "${claim.item_name}" was approved. Please collect your item from Lost and Found staff. Staff will mark it as returned after you receive it.${pickupDetails}`
+            : `Your claim for "${claim.item_name}" was rejected.${claim.pickup_at ? ' The scheduled pickup has been cancelled.' : ''}`,
+          ...(decision === 'approved' && claim.pickup_at ? { calendar_url: googleCalendarUrl(claim) } : {}),
           href: `/index.php?page=claims&highlight=claim-${claim.id}`,
         }, options),
       ];
@@ -688,6 +722,74 @@ function createItemService(database, notificationService) {
       }
       await Promise.all(notifications);
       return claim;
+    },
+
+    async updateClaimCalendarStatus(claimId, status, eventId) {
+      if (!['synced', 'pending', 'failed', 'skipped'].includes(status)) {
+        throw new Error('Choose a valid calendar sync status.');
+      }
+      const update = {
+        $set: {
+          calendar_sync_status: status,
+          updated_at: new Date().toISOString(),
+        },
+      };
+      if (eventId) update.$set.calendar_event_id = eventId;
+      const result = await claims.updateOne({ _id: String(claimId) }, update);
+      if (!result.matchedCount) throw new Error('Claim was not found while updating Calendar sync status.');
+    },
+
+    async findCalendarClaim(claimId) {
+      return enrichCalendarClaim(await claims.findOne({ _id: String(claimId) }));
+    },
+
+    async findCalendarClaimByItem(itemId) {
+      const document = await claims.findOne({
+        item_id: String(itemId),
+        status: 'approved',
+        pickup_at: { $exists: true },
+      });
+      return enrichCalendarClaim(document);
+    },
+
+    async findCalendarClaimForUser(userId, claimId) {
+      const document = await claims.findOne({
+        _id: String(claimId),
+        user_id: String(userId),
+        status: 'approved',
+        pickup_at: { $exists: true },
+      }, {
+        projection: {
+          _id: 1,
+          pickup_at: 1,
+          pickup_location: 1,
+          pickup_time_zone: 1,
+        },
+      });
+      return document ? documentToRecord(document) : null;
+    },
+
+    async updateClaimPickup(claimId, pickup) {
+      const claim = await claims.findOne({ _id: String(claimId), status: 'approved' });
+      if (!claim) throw new Error('Only an approved claim can be rescheduled.');
+      const item = await items.findOne(activeItems({
+        _id: claim.item_id,
+        status: 'claimed',
+        claimed_claim_id: claim._id,
+      }));
+      if (!item) throw new Error('This approved claim is not attached to an item awaiting return.');
+      const result = await claims.updateOne(
+        { _id: claim._id, status: 'approved' },
+        { $set: {
+          pickup_at: pickup.pickup_at,
+          pickup_location: pickup.pickup_location,
+          pickup_time_zone: pickup.pickup_time_zone,
+          calendar_sync_status: 'pending',
+          updated_at: new Date().toISOString(),
+        } },
+      );
+      if (!result.matchedCount) throw new Error('The claim changed before its pickup could be updated.');
+      return this.findCalendarClaim(claimId);
     },
 
     async markItemReturned(claimId, staffId, session = undefined) {
@@ -734,7 +836,7 @@ function createItemService(database, notificationService) {
     async enrichStaffClaim(document, knownItemDocument = null, session = undefined) {
       const options = session ? { session } : undefined;
       const [itemDocument, claimant] = await Promise.all([
-        knownItemDocument || items.findOne(activeItems({ _id: document.item_id }), options),
+        knownItemDocument || items.findOne({ _id: document.item_id }, options),
         users.findOne({ _id: document.user_id }, {
           projection: { full_name: 1, email: 1, student_id: 1, phone: 1 },
           ...(session ? { session } : {}),
@@ -759,7 +861,7 @@ function createItemService(database, notificationService) {
 
     async enrichExistingStaffClaims(documents) {
       const records = await Promise.all(documents.map(async (document) => {
-        const itemDocument = await items.findOne(activeItems({ _id: document.item_id }));
+        const itemDocument = await items.findOne({ _id: document.item_id });
         if (!itemDocument) {
           console.warn(`Skipping claim ${document._id} because item ${document.item_id} was not found.`);
           return null;

@@ -1,7 +1,8 @@
 const path = require('node:path');
 const { requestAuditContext } = require('../../src/services/audit-log');
+const { deterministicEventId } = require('../../src/services/calendar-links');
 
-function createStaffController({ items, audit }) {
+function createStaffController({ items, audit, googleCalendar }) {
   return {
     getStaffDashboard: async (req, res) => {
       return res.json(await items.findStaffDashboardSummary(req.rolePermissions));
@@ -62,7 +63,10 @@ function createStaffController({ items, audit }) {
     },
 
     getStaffClaimsById: async (req, res) => {
-      return res.json({ claim: await items.findStaffClaim(req.params.id) });
+      return res.json({
+        claim: await items.findStaffClaim(req.params.id),
+        pickupDefaults: await googleCalendar.getPickupFormDefaults(),
+      });
     },
 
     patchStaffClaimsById: async (req, res) => {
@@ -70,6 +74,14 @@ function createStaffController({ items, audit }) {
       let claim;
       if (req.body.action === 'review') {
         const decision = String(req.body.decision || '');
+        let pickup = null;
+        if (decision === 'approved' && (req.body.pickup_date || req.body.pickup_time)) {
+          requireSchedulePermission(req);
+          pickup = {
+            ...await googleCalendar.validatePickup(req.body),
+            calendar_event_id: deterministicEventId(req.params.id),
+          };
+        }
         const action = decision === 'approved' ? 'claim.approve' : 'claim.reject';
         claim = await audit.runAction([
           requestAuditContext(req, 'ownership.verify', {
@@ -82,9 +94,18 @@ function createStaffController({ items, audit }) {
             target_type: 'claim',
             target_id: req.params.id,
             old_value: { status: 'pending' },
-            new_value: { status: decision },
+            new_value: { status: decision, pickup_scheduled: Boolean(pickup) },
           }),
-        ], (session) => items.reviewClaim(req.params.id, user.id, decision, session));
+        ], (session) => items.reviewClaim(req.params.id, user.id, decision, session, pickup));
+        const context = requestAuditContext(req, null);
+        if (decision === 'approved' && pickup) {
+          await googleCalendar.syncApprovedClaim(claim, context);
+          await googleCalendar.sendApprovalEmail(claim, context);
+          claim = await items.findStaffClaim(req.params.id);
+        } else if (decision === 'rejected' && claim.pickup_at) {
+          await googleCalendar.cleanupClaim(claim, context, { notify: true });
+          claim = await items.findStaffClaim(req.params.id);
+        }
       } else if (req.body.action === 'returned') {
         const currentClaim = await items.findStaffClaim(req.params.id);
         claim = await audit.runAction(requestAuditContext(req, 'item.mark_returned', {
@@ -93,6 +114,8 @@ function createStaffController({ items, audit }) {
           old_value: { status: currentClaim.item.status },
           new_value: { status: 'returned' },
         }), (session) => items.markItemReturned(req.params.id, user.id, session));
+        await googleCalendar.cleanupClaim(claim, requestAuditContext(req, null));
+        claim = await items.findStaffClaim(req.params.id);
       } else {
         const error = new Error('Choose a valid claim action.');
         error.status = 400;
@@ -100,7 +123,35 @@ function createStaffController({ items, audit }) {
       }
       return res.json({ claim });
     },
+
+    patchStaffClaimsByIdPickup: async (req, res) => {
+      requireSchedulePermission(req);
+      const pickup = await googleCalendar.validatePickup(req.body);
+      let claim = await items.updateClaimPickup(req.params.id, pickup);
+      const context = requestAuditContext(req, null);
+      await googleCalendar.syncApprovedClaim(claim, context);
+      await googleCalendar.notifyRescheduled(claim, context);
+      claim = await items.findStaffClaim(req.params.id);
+      return res.json({ claim });
+    },
+
+    postStaffClaimsByIdCalendarSync: async (req, res) => {
+      requireSchedulePermission(req);
+      const result = await googleCalendar.retryClaim(
+        req.params.id,
+        requestAuditContext(req, null),
+      );
+      return res.json({ status: result.status });
+    },
   };
+}
+
+function requireSchedulePermission(req) {
+  if (!req.rolePermissions?.includes('schedule_pickup')) {
+    const error = new Error('You do not have permission to schedule or sync pickups.');
+    error.status = 403;
+    throw error;
+  }
 }
 
 function staffListItem(item) {

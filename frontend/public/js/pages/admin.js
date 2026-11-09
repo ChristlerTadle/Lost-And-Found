@@ -15,7 +15,7 @@ async function adminDashboard() {
     ['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records'],
     ['settings', 'Settings', 'Sign-in integrations', 'admin-settings'],
   ];
-  return `<main class="container admin-overview">${pageHeader('Admin Dashboard', 'System overview — Bukidnon State University Lost &amp; Found')}
+  return `<main class="container admin-overview">${pageHeader('Admin Dashboard', 'System overview — Bukidnon State University Lost & Found')}
     <section class="admin-overview-stats" aria-label="System statistics">
       ${adminStat('user', 'users', 'Total users', users.totalUsers, `${users.activeUsers} active`)}
       ${adminStat('clipboard', 'items', 'Total items', summary.totalItems, `${summary.lostItems} lost, ${summary.foundItems} recovered`)}
@@ -221,17 +221,54 @@ async function adminInventory() {
 }
 
 async function adminSettings() {
-  const { integrations, csrfToken } = await request('/admin/settings');
+  const access = await request('/admin/settings/access');
+  if (!access.accessReady) {
+    return `<main class="container admin-dashboard admin-settings">
+      ${pageHeader('Settings', 'Manage optional sign-in integrations for the system.', buttonLink('admin-dashboard', 'Back to dashboard', 'button-secondary'))}
+      <section class="card integration-pin-gate"><h2>Integration Settings are locked</h2>
+        <p>${h(access.accessError)}</p><p>Configure the required server environment values, then restart the API.</p></section>
+    </main>`;
+  }
+  if (!access.unlocked) {
+    return `<main class="container admin-dashboard admin-settings">
+      ${pageHeader('Settings', 'Manage optional sign-in integrations for the system.', buttonLink('admin-dashboard', 'Back to dashboard', 'button-secondary'))}
+      <p class="integration-settings-note">Enter the server-configured PIN to view integration settings.</p>
+      <dialog class="integration-pin-dialog" data-integration-pin-dialog aria-labelledby="integration-pin-title">
+        <form data-form="integration-pin" data-csrf-token="${h(access.csrfToken)}">
+          <h2 id="integration-pin-title">Unlock Integration Settings</h2>
+          <p>Enter the server-configured PIN to continue.</p>
+          <div class="field"><label for="integration-settings-pin">PIN</label>
+            <input class="input" id="integration-settings-pin" name="pin" type="password" autocomplete="current-password" required></div>
+          <small class="integration-pin-error" data-integration-pin-error role="alert"></small>
+          <div class="integration-pin-actions">
+            <a class="button button-secondary" href="/?page=admin-dashboard">Back</a>
+            <button class="button button-primary" type="submit">Unlock</button>
+          </div>
+        </form>
+      </dialog>
+    </main>`;
+  }
+  const { integrations } = await request('/admin/settings');
+  const csrfToken = access.csrfToken;
   const descriptions = {
     google_auth: 'Allow users to sign in or create an account using a verified Google account.',
     recaptcha: 'Require users to complete a reCAPTCHA challenge before signing in or creating an account.',
     smtp: 'Send password reset messages using this SMTP server.',
+    google_calendar: 'Schedule item pickups on one shared organization calendar. Share only the dedicated pickup calendar with the service account.',
   };
-  const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}">
+  const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}"
+    data-using-default="${integration.usingDefault}" data-has-default="${integration.hasDefault}"
+    data-failing="${integration.status === 'Failing'}">
     <div class="integration-setting-main">
       <div class="integration-setting-copy"><div class="integration-setting-heading"><h2>${h(integration.label)}</h2></div>
         <p>${h(descriptions[integration.id] || '')}</p>
-        <p class="integration-config-status">Status: <span class="badge ${integration.active ? 'badge-active' : integration.configured ? 'badge-cancelled' : 'badge-pending'}" data-integration-status>${h(integration.status)}</span></p>
+        <p class="integration-config-status">Status: <span class="badge ${integration.status === 'Failing' ? 'badge-failing' : integration.active ? 'badge-active' : integration.configured ? 'badge-cancelled' : 'badge-pending'}" data-integration-status>${h(integration.status)}</span></p>
+        <p class="integration-health-status" data-integration-health ${integration.status === 'Failing' ? '' : 'hidden'}>
+          ${integration.status === 'Failing' && integration.health?.last_error_at ? `Last failure: ${h(new Date(integration.health.last_error_at).toLocaleString())} · ` : ''}
+          ${integration.status === 'Failing' ? h(integration.health?.last_error_message || '') : ''}
+          ${integration.status === 'Failing' && integration.health?.consecutive_failures ? ` (${integration.health.consecutive_failures} consecutive)` : ''}
+        </p>
+        <p class="integration-default-status">Default: <span data-default-status>${integration.usingDefault ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved'}</span></p>
         <p class="integration-missing-fields" data-integration-missing>${integration.missingFields.length
           ? `Missing: ${integration.missingFields.map((name) => {
             const field = integration.fields.find((entry) => entry.name === name);
@@ -241,6 +278,8 @@ async function adminSettings() {
       <div class="integration-setting-actions">
         <button class="button button-outline" type="button" data-action="integration-toggle" data-enabled="${integration.enabled}">
           ${integration.enabled ? 'Disable' : 'Enable'}</button>
+        ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test saved SMTP</button>' : ''}
+        ${integration.id === 'google_calendar' ? '<button class="button button-outline" type="button" data-action="calendar-test">Test Connection</button>' : ''}
       </div>
     </div>
     <details class="integration-fields-disclosure">
@@ -249,23 +288,46 @@ async function adminSettings() {
         <label for="integration-${h(integration.id)}-${h(field.name)}">${h(field.label)}${field.required ? ' <span aria-hidden="true">*</span>' : ''}</label>
         ${field.type === 'checkbox'
           ? `<input id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="checkbox" ${field.value ? 'checked' : ''}>`
-          : `<input class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="${h(field.secret ? 'password' : field.type)}"
-            value="${field.secret ? '' : h(field.value)}" placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
-            ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? 'inputmode="numeric"' : ''} autocomplete="off">`}
+          : field.type === 'textarea'
+            ? `<textarea class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" rows="4"
+              placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
+              ${field.required ? 'data-required="true" required' : ''} autocomplete="off"></textarea>`
+            : `<input class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="${h(field.secret ? 'password' : field.type)}"
+              value="${field.secret ? '' : h(field.value)}" placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
+              ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? 'inputmode="numeric"' : ''} autocomplete="off">`}
         <small class="integration-field-error" data-field-error="${h(field.name)}" role="alert"></small>
       </div>`).join('')}</div>
-      ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test Connection</button>' : ''}
     </details>
+    <div class="integration-default-actions">
+      <button class="button button-outline" type="button" data-action="set-integration-default">Set current as default</button>
+      <button class="button button-outline" type="button" data-action="restore-integration-default" ${integration.hasDefault && !integration.usingDefault ? '' : 'disabled'}>
+        Restore default</button>
+    </div>
     <div class="integration-card-actions" hidden>
       <button class="button button-primary" type="button" data-action="save-integration">Save Changes</button>
       <button class="button button-outline" type="button" data-action="cancel-integration">Cancel</button>
     </div>
   </section>`).join('');
   return `<main class="container admin-dashboard admin-settings" data-csrf-token="${h(csrfToken)}">
-    ${pageHeader('Settings', 'Manage optional sign-in integrations for the system.')}
+    ${pageHeader('Settings', 'Manage system integrations and pickup scheduling.', buttonLink('admin-dashboard', 'Back to dashboard', 'button-secondary'))}
+    ${access.verificationEmailConfigured ? '' : `<p class="integration-settings-note integration-verification-warning">${h(access.verificationEmailError)} Credential changes are unavailable until it is configured.</p>`}
     <form data-form="integration-settings" novalidate>${cards}
-      <p class="integration-settings-note">Save Changes and Cancel appear at the bottom of a card after you edit a field or toggle. Secret values remain masked; leave a secret field empty to keep its saved value.</p>
+      <p class="integration-settings-note">Changes stay pending until you save that card. Credential changes require an emailed verification code. Secret values remain masked; leave a secret field empty to keep its saved value.</p>
     </form>
+    <dialog class="integration-code-dialog" data-integration-code-dialog aria-labelledby="integration-code-title">
+      <form data-form="integration-code" novalidate>
+        <h2 id="integration-code-title">Verify credential changes</h2>
+        <p>Enter the 6-digit code sent to the configured administrator email.</p>
+        <div class="field"><label for="integration-verification-code">Verification code</label>
+          <input class="input" id="integration-verification-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></div>
+        <small class="integration-code-error" data-integration-code-error role="alert"></small>
+        <div class="integration-card-actions">
+          <button class="button button-primary" type="submit" data-action="verify-integration-code">Verify and save</button>
+          <button class="button button-outline" type="button" data-action="resend-integration-code">Resend</button>
+          <button class="button button-secondary" type="button" data-action="cancel-integration-code">Cancel</button>
+        </div>
+      </form>
+    </dialog>
   </main>`;
 }
 
@@ -291,8 +353,15 @@ async function adminSystemRecords() {
     'claim.reject', 'ownership.verify', 'item.status_update', 'item.mark_returned',
     'auth.login', 'auth.login_failed', 'access.denied',
     'integration.enable', 'integration.disable', 'integration.update',
+    'integration.unlock', 'integration.unlock_failed', 'integration.unlock_locked',
+    'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
+    'integration.set_default', 'integration.failure',
+    'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
   ];
-  const rows = records.map((record) => `<tr>
+  const rows = records.map((record) => {
+    const result = ['integration.unlock_failed', 'integration.code_failed'].includes(record.action)
+      ? 'failed' : record.action === 'integration.unlock_locked' ? 'denied' : record.result;
+    return `<tr>
     <td data-label="Date"><time class="audit-date" datetime="${h(record.created_at)}">
       <span>${h(new Date(record.created_at).toLocaleDateString())}</span>
       <small>${h(new Date(record.created_at).toLocaleTimeString())}</small>
@@ -303,7 +372,7 @@ async function adminSystemRecords() {
         <code>${h(record.actor_role ? record.actor_id || 'ID unavailable' : 'No account ID')}</code>
       </div>
     </td>
-    <td class="audit-action" data-label="Action / result"><div class="audit-cell-content"><strong>${h(record.action)}</strong><span class="audit-result audit-result-${h(record.result)}">${h(record.result)}</span></div></td>
+    <td class="audit-action" data-label="Action / result"><div class="audit-cell-content"><strong>${h(record.action)}</strong><span class="audit-result audit-result-${h(result)}">${h(result)}</span></div></td>
     <td class="audit-target" data-label="Target"><div class="audit-cell-content"><span>${h(record.target_type || 'No target')}</span>
       ${record.target_id ? `<code>${h(record.target_id)}</code>` : ''}
     </div>
@@ -312,7 +381,8 @@ async function adminSystemRecords() {
       ...(record.old_value ? { old: record.old_value } : {}),
       ...(record.new_value ? { new: record.new_value } : {}),
       ...(record.ip_address ? { ip_address: record.ip_address } : {}),
-    }, null, 2))}</pre></details></td></tr>`);
+    }, null, 2))}</pre></details></td></tr>`;
+  });
   const pageLink = (target) => {
     const params = new URLSearchParams(filters);
     params.delete('page');

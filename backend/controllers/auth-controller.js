@@ -1,6 +1,8 @@
+const { randomBytes } = require('node:crypto');
 const { categories, locations } = require('../../src/data');
 const { optionalUser, startSession, saveSession, destroySession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
+const { IntegrationError } = require('../../src/services/integration-calls');
 
 function createAuthController({ auth, rolePermissions, email, googleOAuth, recaptcha, integrationSettings, notifications, frontendOrigin, audit }) {
   const startGoogleAuth = async (req, res) => {
@@ -21,6 +23,10 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
   return {
     getAuthMe: async (req, res) => {
         const user = await optionalUser(req);
+      if (!req.session.csrfToken) {
+        req.session.csrfToken = randomBytes(32).toString('base64url');
+        await saveSession(req);
+      }
       const permissions = user && user.role_name !== 'admin'
         ? await rolePermissions.findRolePermissions(user.role_name) : [];
       const unreadNotifications = user && (user.role_name === 'admin'
@@ -45,6 +51,7 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
           unreadNotifications,
         googleAuth,
         recaptcha: recaptchaStatus,
+        csrfToken: req.session.csrfToken,
         categories,
         locations,
       });
@@ -90,13 +97,15 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
     },
 
     postAuthForgotpassword: async (req, res) => {
-        await auth.requestPasswordReset(req.body.email, async (emailAddress, token) => {
+      void auth.requestPasswordReset(req.body.email, async (emailAddress, token) => {
         if (process.env.NODE_ENV === 'production' && new URL(frontendOrigin).protocol !== 'https:') {
           throw new Error('FRONTEND_ORIGIN must use HTTPS in production.');
         }
         const resetUrl = new URL('/?page=reset-password', frontendOrigin);
         resetUrl.searchParams.set('token', token);
-        return email.sendPasswordReset(emailAddress, resetUrl.toString());
+        return email.sendPasswordReset(emailAddress, resetUrl.toString(), requestAuditContext(req, null));
+      }).catch((error) => {
+        if (!(error instanceof IntegrationError)) console.error('Password reset request failed.');
       });
       return res.json({ message: 'If an active account uses that email, reset instructions have been sent.' });
     },
@@ -127,7 +136,7 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
           code: req.query.code,
           codeVerifier: pending.codeVerifier,
           nonce: pending.nonce,
-        });
+        }, requestAuditContext(req, null));
         const user = await auth.authenticateGoogle(profile);
         await startSession(req, user);
         if (['admin', 'staff'].includes(user.role_name)) {
@@ -147,8 +156,8 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
           target_id: error.accountId || null,
           result: 'failed',
         }));
-        console.error('Google sign-in failed.');
-        return res.redirect(`${frontendOrigin}/?authError=google`);
+        if (!(error instanceof IntegrationError)) console.error('Google sign-in could not be completed.');
+        return res.redirect(`${frontendOrigin}/?authError=${error instanceof IntegrationError ? 'google-unavailable' : 'google'}`);
       }
     },
   };
@@ -157,7 +166,11 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
 async function verifyRecaptcha(req, recaptcha, integrationSettings) {
   const integration = await integrationSettings.getIntegration('recaptcha');
   if (!integration.enabled) return;
-  await recaptcha.verifyResponse(req.body?.['g-recaptcha-response'], req.ip);
+  await recaptcha.verifyResponse(
+    req.body?.['g-recaptcha-response'],
+    req.ip,
+    requestAuditContext(req, null),
+  );
 }
 
 async function logAuthEvent(audit, event) {

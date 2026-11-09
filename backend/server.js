@@ -7,8 +7,11 @@ const { connectDatabase, closeDatabase, getMongoClient } = require('../src/db');
 const { createAuthService } = require('../src/services/auth');
 const { createGoogleOAuth } = require('../src/services/google-oauth');
 const { createIntegrationSettings } = require('../src/services/integration-settings');
+const { createIntegrationCaller } = require('../src/services/integration-calls');
+const { createIntegrationSecurity } = require('../src/services/integration-security');
 const { createRecaptcha } = require('../src/services/recaptcha');
 const { createEmailService } = require('../src/services/email');
+const { createGoogleCalendar } = require('../src/services/google-calendar');
 const { createItemService } = require('../src/services/items');
 const { createNotificationService } = require('../src/services/notifications');
 const { createRolePermissionService } = require('../src/services/role-permissions');
@@ -20,23 +23,47 @@ const port = Number(process.env.API_PORT || 3001);
 const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 
 async function start() {
-  parseEncryptionKey(config.integrationEncryptionKey);
+  const integrationEncryptionKey = parseEncryptionKey(config.integrationEncryptionKey);
   const database = await connectDatabase();
   const notificationService = createNotificationService(database);
   const integrationSettings = createIntegrationSettings(database, {
     encryptionKey: config.integrationEncryptionKey,
   });
+  const integrationSecurity = createIntegrationSecurity(database, {
+    pin: config.integrationSettingsPin,
+    email: config.integrationSettingsEmail,
+    smtp: config.integrationBootstrapSmtp,
+    hashKey: integrationEncryptionKey,
+    codeRequestLimit: config.integrationCodeRequestLimit,
+    codeRequestWindowMs: config.integrationCodeRequestWindowMs,
+    codeResendMs: config.integrationCodeResendMs,
+  });
+  const audit = createAuditLogService(database, getMongoClient());
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
   await integrationSettings.validateStoredSecrets();
+  const items = createItemService(database, notificationService);
+  const email = createEmailService(integrationSettings.getIntegration, undefined, callIntegration);
+  const googleCalendar = createGoogleCalendar({
+    integrationSettings,
+    items,
+    notifications: notificationService,
+    email,
+    audit,
+    callIntegration,
+  });
   const services = {
     auth: createAuthService(database),
-    googleOAuth: createGoogleOAuth(integrationSettings.getIntegration),
-    recaptcha: createRecaptcha(integrationSettings.getIntegration),
+    googleOAuth: createGoogleOAuth(integrationSettings.getIntegration, callIntegration),
+    recaptcha: createRecaptcha(integrationSettings.getIntegration, globalThis.fetch, callIntegration),
     integrationSettings,
-    email: createEmailService(integrationSettings.getIntegration),
-    items: createItemService(database, notificationService),
+    integrationSecurity,
+    callIntegration,
+    email,
+    googleCalendar,
+    items,
     notifications: notificationService,
     rolePermissions: createRolePermissionService(database),
-    audit: createAuditLogService(database, getMongoClient()),
+    audit,
   };
   const app = express();
   app.locals.services = services;

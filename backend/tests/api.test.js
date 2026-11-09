@@ -15,6 +15,7 @@ const {
 } = require('../config/role-permissions');
 const { createAuthRoutes } = require('../routes/auth.routes');
 const { createHealthRoutes } = require('../routes/health.routes');
+const { IntegrationError } = require('../../src/services/integration-calls');
 
 const user = { id: 'test-user', full_name: 'Test User', role_name: 'user', status: 'active' };
 const staff = { id: 'test-staff', full_name: 'Test Staff', role_name: 'staff', status: 'active' };
@@ -29,6 +30,7 @@ const permissionsByRole = new Map([
 const auditEvents = [];
 let recaptchaEnabled = false;
 let googleEnabled = false;
+let integrationSaveCount = 0;
 const testSessions = new Map();
 const services = {
   auth: {
@@ -111,7 +113,20 @@ const services = {
           settings: { site_key: 'test-site-key' },
         };
       }
-      return { configured: false, enabled: false, active: false, settings: {} };
+      return {
+        configured: true,
+        enabled: true,
+        active: true,
+        settings: {
+          host: 'smtp.example.test',
+          port: '587',
+          secure: false,
+          user: 'mailer@example.test',
+          password: 'saved-password',
+          sender_email: 'mailer@example.test',
+          sender_name: 'Test Mailer',
+        },
+      };
     },
     async getAdminIntegrations() {
       return {
@@ -128,7 +143,65 @@ const services = {
       auditEvents.push({ action: 'integration.update', input, context });
       return { integrations: {}, changed: Object.keys(input) };
     },
+    async prepareIntegrationSave(input) {
+      const card = input.google_auth;
+      const credentialChanged = card?.fields?.client_id === 'new-client-id';
+      return {
+        updates: credentialChanged || card?.enabled === false ? [{ id: 'google_auth' }] : [],
+        changed: credentialChanged ? ['google_auth'] : [],
+        credentialChanges: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
+        changes: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
+        payloadHash: credentialChanged ? 'credential-payload-hash' : 'payload-hash',
+      };
+    },
+    async applyIntegrationSave(plan) {
+      integrationSaveCount += 1;
+      return { integrations: await this.getAdminIntegrations(), changed: plan.changed };
+    },
+    getIntegrationLabel(id) { return id; },
+    async setIntegrationDefault() { return { integrations: {} }; },
+    async getDefaultRestorePreview() { return { id: 'google_auth', changedFields: [], values: {} }; },
+    async restoreIntegrationDefault() { return { integrations: {}, changed: [], restored: false }; },
     async validateIntegrationFields() { return {}; },
+  },
+  integrationSecurity: {
+    configuration() {
+      return {
+        accessReady: true,
+        accessError: '',
+        verificationEmailConfigured: true,
+        verificationEmailError: '',
+      };
+    },
+    touchSession(session, adminId) {
+      const state = session.integrationSettingsAccess;
+      if (!state || state.adminId !== String(adminId) || Date.now() - state.lastActivityAt >= 600_000) {
+        delete session.integrationSettingsAccess;
+        return false;
+      }
+      state.lastActivityAt = Date.now();
+      return true;
+    },
+    async unlock({ adminId, candidate, session, audit, auditContext }) {
+      if (candidate !== '123456') {
+        const error = new Error('PIN could not be verified. Try again later.');
+        error.status = 403;
+        throw error;
+      }
+      session.integrationSettingsAccess = { adminId: String(adminId), lastActivityAt: Date.now() };
+      await audit.logAction({ ...auditContext, action: 'integration.unlock' });
+    },
+    async sendCode() { return { expiresInSeconds: 600, resendInSeconds: 60 }; },
+    async verifyCode({ candidate }) {
+      if (candidate !== '654321') {
+        const error = new Error('The verification code is invalid or expired.');
+        error.status = 400;
+        throw error;
+      }
+      return true;
+    },
+    async cancelCode() {},
+    async sendBootstrapEmail() {},
   },
   items: {
     async search() {
@@ -187,6 +260,8 @@ app.use((req, _res, next) => {
   const sessionKey = req.get('x-test-user') || 'anonymous';
   if (!testSessions.has(sessionKey)) testSessions.set(sessionKey, {});
   const session = testSessions.get(sessionKey);
+  req.sessionID = `${sessionKey}-session`;
+  session.csrfToken = 'csrf-test-token';
   session.user = accounts.get(sessionKey) || null;
   req.session = Object.assign(session, {
     destroy(callback) { callback(); },
@@ -359,11 +434,32 @@ test('list resolution, chained staff decisions, and default denial use role perm
     headers: {
       'content-type': 'application/json',
       'x-test-user': staff.id,
+      origin: 'http://localhost:5173',
+      'x-csrf-token': 'csrf-test-token',
     },
     body: JSON.stringify({ action: 'review', decision: 'approved' }),
   });
     assert.equal(claimDecision.status, 403);
     assert.equal(auditEvents.at(-1).new_value.required_permission, 'approve_claim');
+
+  permissionsByRole.set('staff', saved.filter((permission) => permission !== 'schedule_pickup'));
+  const pickupDecision = await fetch(`${baseUrl}/staff/claims/claim-1`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-test-user': staff.id,
+      origin: 'http://localhost:5173',
+      'x-csrf-token': 'csrf-test-token',
+    },
+    body: JSON.stringify({
+      action: 'review',
+      decision: 'approved',
+      pickup_date: '2030-01-07',
+      pickup_time: '10:00',
+    }),
+  });
+  assert.equal(pickupDecision.status, 403);
+  assert.equal(auditEvents.at(-1).new_value.required_permission, 'schedule_pickup');
   } finally {
     permissionsByRole.set('staff', saved);
   }
@@ -400,26 +496,81 @@ test('System Records is admin-only and protected when opened directly by URL', a
   assert.equal(adminResponse.status, 200);
 });
 
-test('integration settings routes are admin-only and save requires the session CSRF token', async () => {
+test('integration settings routes require admin role, CSRF, and a live PIN unlock', async () => {
   for (const account of [user, staff]) {
-    const response = await fetch(`${baseUrl}/admin/settings`, {
-      headers: { 'x-test-user': account.id },
-    });
-    assert.equal(response.status, 403);
-    const saveResponse = await fetch(`${baseUrl}/admin/settings`, {
-      method: 'PUT',
-      headers: {
-        'x-test-user': account.id,
-        Origin: 'http://localhost:5173',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ integrations: {} }),
-    });
-    assert.equal(saveResponse.status, 403);
+    for (const [path, method] of [
+      ['/admin/settings/access', 'GET'],
+      ['/admin/settings', 'GET'],
+      ['/admin/settings', 'PUT'],
+      ['/admin/settings/unlock', 'POST'],
+      ['/admin/settings/lock', 'POST'],
+      ['/admin/settings/code/verify', 'POST'],
+      ['/admin/settings/code/resend', 'POST'],
+      ['/admin/settings/code/cancel', 'POST'],
+      ['/admin/settings/smtp/test', 'POST'],
+      ['/admin/settings/google_auth/default', 'POST'],
+      ['/admin/settings/google_auth/restore-default', 'POST'],
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: {
+          'x-test-user': account.id,
+          Origin: 'http://localhost:5173',
+          'Content-Type': 'application/json',
+        },
+        body: method === 'GET' ? undefined : JSON.stringify({ integrations: {} }),
+      });
+      assert.equal(response.status, 403, `${method} ${path} should be admin-only`);
+    }
   }
 
   const anonymousResponse = await fetch(`${baseUrl}/admin/settings`);
   assert.equal(anonymousResponse.status, 401);
+
+  const accessResponse = await fetch(`${baseUrl}/admin/settings/access`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(accessResponse.status, 200);
+  const access = await accessResponse.json();
+  assert.equal(access.unlocked, false);
+
+  const lockedSettings = await fetch(`${baseUrl}/admin/settings`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(lockedSettings.status, 403);
+  for (const [path, method] of [
+    ['/admin/settings', 'PUT'],
+    ['/admin/settings/code/verify', 'POST'],
+    ['/admin/settings/code/resend', 'POST'],
+    ['/admin/settings/code/cancel', 'POST'],
+    ['/admin/settings/smtp/test', 'POST'],
+    ['/admin/settings/google_auth/default', 'POST'],
+    ['/admin/settings/google_auth/restore-default', 'POST'],
+  ]) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        'x-test-user': admin.id,
+        Origin: 'http://localhost:5173',
+        'Content-Type': 'application/json',
+        'x-csrf-token': access.csrfToken,
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 403, `${method} ${path} should require unlock`);
+  }
+
+  const unlockResponse = await fetch(`${baseUrl}/admin/settings/unlock`, {
+    method: 'POST',
+    headers: {
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'Content-Type': 'application/json',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify({ pin: '123456' }),
+  });
+  assert.equal(unlockResponse.status, 200);
 
   const settingsResponse = await fetch(`${baseUrl}/admin/settings`, {
     headers: { 'x-test-user': admin.id },
@@ -434,11 +585,62 @@ test('integration settings routes are admin-only and save requires the session C
       'Content-Type': 'application/json',
       'x-test-user': admin.id,
       Origin: 'http://localhost:5173',
-      'x-csrf-token': settings.csrfToken,
+      'x-csrf-token': access.csrfToken,
     },
-    body: JSON.stringify({ fields: {} }),
+    body: JSON.stringify({}),
   });
   assert.equal(smtpTestResponse.status, 200);
+
+  const savesBeforeCredentialCode = integrationSaveCount;
+  const credentialPayload = {
+    integrations: {
+      google_auth: {
+        enabled: true,
+        fields: { client_id: 'new-client-id' },
+      },
+    },
+  };
+  const credentialSave = await fetch(`${baseUrl}/admin/settings`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify(credentialPayload),
+  });
+  const codeRequest = await credentialSave.json();
+  assert.equal(credentialSave.status, 200);
+  assert.equal(codeRequest.verificationRequired, true);
+  assert.equal(JSON.stringify(codeRequest).includes('654321'), false);
+  assert.equal(integrationSaveCount, savesBeforeCredentialCode);
+
+  const invalidCode = await fetch(`${baseUrl}/admin/settings/code/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify({ ...credentialPayload, code: '000000' }),
+  });
+  assert.equal(invalidCode.status, 400);
+  assert.equal(integrationSaveCount, savesBeforeCredentialCode);
+
+  const verifiedCredentialSave = await fetch(`${baseUrl}/admin/settings/code/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify({ ...credentialPayload, code: '654321' }),
+  });
+  assert.equal(verifiedCredentialSave.status, 200);
+  assert.equal(integrationSaveCount, savesBeforeCredentialCode + 1);
 
   const staffSmtpTestResponse = await fetch(`${baseUrl}/admin/settings/smtp/test`, {
     method: 'POST',
@@ -463,13 +665,42 @@ test('integration settings routes are admin-only and save requires the session C
   });
   assert.equal(deniedSave.status, 403);
 
+  const session = testSessions.get(admin.id);
+  session.integrationSettingsAccess.lastActivityAt = Date.now() - 600_001;
+  const expiredSettings = await fetch(`${baseUrl}/admin/settings`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(expiredSettings.status, 403);
+
+  const expiredSave = await fetch(`${baseUrl}/admin/settings`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify({ integrations: {} }),
+  });
+  assert.equal(expiredSave.status, 403);
+
+  await fetch(`${baseUrl}/admin/settings/unlock`, {
+    method: 'POST',
+    headers: {
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'Content-Type': 'application/json',
+      'x-csrf-token': access.csrfToken,
+    },
+    body: JSON.stringify({ pin: '123456' }),
+  });
   const saveResponse = await fetch(`${baseUrl}/admin/settings`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
       'x-test-user': admin.id,
       Origin: 'http://localhost:5173',
-      'x-csrf-token': settings.csrfToken,
+      'x-csrf-token': access.csrfToken,
     },
     body: JSON.stringify({ integrations: { google_auth: { enabled: false, fields: {} } } }),
   });
@@ -598,6 +829,43 @@ test('local password login remains available when Google sign-in is disabled', a
   assert.equal((await response.json()).user.role_name, 'admin');
 });
 
+test('password reset returns the same generic response for unknown addresses and SMTP failures', async () => {
+  const originalRequestPasswordReset = services.auth.requestPasswordReset;
+  const originalSendPasswordReset = services.email.sendPasswordReset;
+  let deliverySettled = Promise.resolve();
+  services.auth.requestPasswordReset = async (email, sendEmail) => {
+    if (email === 'known@example.test') {
+      const delivery = sendEmail(email, 'test-reset-token');
+      deliverySettled = delivery.then(() => undefined, () => undefined);
+      await delivery;
+    }
+  };
+  services.email.sendPasswordReset = async () => {
+    throw new IntegrationError('smtp', 'invalid_credentials');
+  };
+
+  try {
+    const request = (email) => fetch(`${baseUrl}/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const unknownResponse = await request('unknown@example.test');
+    const unknownBody = await unknownResponse.json();
+    const knownResponse = await request('known@example.test');
+    const knownBody = await knownResponse.json();
+    await deliverySettled;
+
+    assert.equal(unknownResponse.status, 200);
+    assert.equal(knownResponse.status, unknownResponse.status);
+    assert.deepEqual(knownBody, unknownBody);
+    assert.equal(knownBody.message, 'If an active account uses that email, reset instructions have been sent.');
+  } finally {
+    services.auth.requestPasswordReset = originalRequestPasswordReset;
+    services.email.sendPasswordReset = originalSendPasswordReset;
+  }
+});
+
 test('enabled reCAPTCHA is verified before password authentication', async () => {
   recaptchaEnabled = true;
   try {
@@ -660,6 +928,37 @@ test('Google OAuth start returns its redirect URL after successful reCAPTCHA ver
   } finally {
     googleEnabled = originalGoogleEnabled;
     recaptchaEnabled = false;
+  }
+});
+
+test('a user-cancelled Google sign-in does not invoke provider verification', async () => {
+  const session = testSessions.get('anonymous') || {};
+  const previous = session.googleOAuth;
+  session.googleOAuth = {
+    state: 'cancelled-state',
+    codeVerifier: 'verifier',
+    nonce: 'nonce',
+  };
+  testSessions.set('anonymous', session);
+  let verificationCalls = 0;
+  const originalVerification = services.googleOAuth.verifyAuthorizationResponse;
+  services.googleOAuth.verifyAuthorizationResponse = async () => {
+    verificationCalls += 1;
+    throw new Error('Should not verify a user-cancelled authorization.');
+  };
+
+  try {
+    const response = await fetch(
+      `${baseUrl}/auth/google/callback?error=access_denied&state=cancelled-state`,
+      { redirect: 'manual' },
+    );
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), 'http://localhost:5173/?authError=google');
+    assert.equal(verificationCalls, 0);
+  } finally {
+    services.googleOAuth.verifyAuthorizationResponse = originalVerification;
+    if (previous === undefined) delete session.googleOAuth;
+    else session.googleOAuth = previous;
   }
 });
 

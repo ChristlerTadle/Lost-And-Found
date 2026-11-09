@@ -1,22 +1,67 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { createIntegrationCaller, IntegrationError } = require('../../src/services/integration-calls');
 const { createRecaptcha } = require('../../src/services/recaptcha');
 
-test('reCAPTCHA reads current credentials and sends the secret, response, and client IP to Google', async () => {
+function createHealthHarness(options = {}) {
+  const health = new Map();
+  const auditEvents = [];
+  const failures = [];
+  const logs = [];
+  const integrationSettings = {
+    async recordIntegrationFailure(id, failure) {
+      failures.push({ id, ...failure });
+      health.set(id, { ...failure, consecutive_failures: (health.get(id)?.consecutive_failures || 0) + 1 });
+    },
+    async recordIntegrationSuccess(id) {
+      health.delete(id);
+    },
+    async claimIntegrationFailureAudit() {
+      if (options.allowAudit === false) return false;
+      return true;
+    },
+  };
+  const audit = { async logAction(event) { auditEvents.push(event); } };
+  const callIntegration = createIntegrationCaller({
+    integrationSettings,
+    audit,
+    timeoutMs: options.timeoutMs,
+  });
+  return {
+    callIntegration,
+    health,
+    failures,
+    auditEvents,
+    logs,
+    captureLogs() {
+      const originalError = console.error;
+      console.error = (...values) => logs.push(values.join(' '));
+      return () => { console.error = originalError; };
+    },
+  };
+}
+
+function configuredIntegration(overrides = {}) {
+  return {
+    configured: true,
+    enabled: true,
+    active: true,
+    settings: { secret_key: 'private-secret', ...overrides },
+  };
+}
+
+test('reCAPTCHA sends the current secret, challenge, client IP, and timeout signal to Google', async () => {
   let request;
   let calls = 0;
+  const harness = createHealthHarness();
   const recaptcha = createRecaptcha(async (id) => {
     calls += 1;
     assert.equal(id, 'recaptcha');
-    return {
-      active: true,
-      enabled: true,
-      settings: { secret_key: `private-secret-${calls}` },
-    };
+    return configuredIntegration({ secret_key: `private-secret-${calls}` });
   }, async (url, options) => {
     request = { url, options };
     return { ok: true, async json() { return { success: true }; } };
-  });
+  }, harness.callIntegration);
 
   await recaptcha.verifyResponse('challenge-response', '192.0.2.1');
   await recaptcha.verifyResponse('second-response');
@@ -29,42 +74,101 @@ test('reCAPTCHA reads current credentials and sends the secret, response, and cl
     secret: 'private-secret-2',
     response: 'second-response',
   });
+  assert.ok(request.options.signal instanceof AbortSignal);
+  assert.equal(harness.failures.length, 0);
 });
 
-test('reCAPTCHA rejects missing or invalid challenge responses and skips when disabled', async () => {
+test('disabled reCAPTCHA skips and invalid or expired challenge tokens do not mark health failing', async () => {
   let enabled = false;
+  const harness = createHealthHarness();
   const recaptcha = createRecaptcha(async () => ({
-    configured: true,
+    ...configuredIntegration(),
+    configured: enabled,
     enabled,
     active: enabled,
-    settings: { secret_key: 'private-secret' },
-  }), async () => ({ ok: true, async json() { return { success: false }; } }));
+  }), async () => ({
+    ok: true,
+    async json() { return { success: false, 'error-codes': ['timeout-or-duplicate'] }; },
+  }), harness.callIntegration);
 
-  await assert.rejects(recaptcha.verifyResponse('challenge-response'), {
-    message: 'reCAPTCHA is disabled.',
-    status: 503,
-  });
+  assert.equal(await recaptcha.verifyResponse('challenge-response'), false);
   enabled = true;
   await assert.rejects(recaptcha.verifyResponse(''), {
     message: 'Complete the reCAPTCHA challenge.',
     status: 400,
   });
-  await assert.rejects(recaptcha.verifyResponse('invalid-response'), {
-    message: 'The reCAPTCHA challenge could not be verified. Please try again.',
-    status: 400,
-  });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(recaptcha.verifyResponse(`invalid-response-${attempt}`), {
+      message: 'The reCAPTCHA challenge could not be verified.',
+      status: 400,
+    });
+  }
+  assert.equal(harness.failures.length, 0);
+  assert.equal(harness.auditEvents.length, 0);
+  assert.equal(harness.health.has('recaptcha'), false);
 });
 
-test('reCAPTCHA fails closed when Google verification is unavailable', async () => {
-  const recaptcha = createRecaptcha(async () => ({
-    configured: true,
-    enabled: true,
-    active: true,
-    settings: { secret_key: 'private-secret' },
-  }), async () => { throw new Error('network error'); });
+test('missing and rejected reCAPTCHA secrets fail closed with sanitized health and audit data', async () => {
+  const harness = createHealthHarness();
+  const restoreLogs = harness.captureLogs();
+  try {
+    const missingSecret = createRecaptcha(async () => ({
+      ...configuredIntegration({ secret_key: '' }),
+      configured: false,
+    }), undefined, harness.callIntegration);
+    await assert.rejects(missingSecret.verifyResponse('challenge-response'), (error) => (
+      error instanceof IntegrationError
+      && error.status === 503
+      && error.message === 'Verification is temporarily unavailable. Please try again later.'
+    ));
 
-  await assert.rejects(recaptcha.verifyResponse('challenge-response'), {
-    message: 'Unable to verify reCAPTCHA right now. Please try again.',
-    status: 503,
-  });
+    const rejectedSecret = createRecaptcha(async () => configuredIntegration(), async () => ({
+      ok: true,
+      async json() {
+        return { success: false, 'error-codes': ['invalid-input-secret', 'private-secret'] };
+      },
+    }), harness.callIntegration);
+    await assert.rejects(rejectedSecret.verifyResponse('challenge-response'), IntegrationError);
+  } finally {
+    restoreLogs();
+  }
+
+  assert.equal(harness.failures.length, 2);
+  assert.equal(harness.health.get('recaptcha').code, 'invalid_credentials');
+  assert.equal(harness.auditEvents.length, 2);
+  assert.ok(harness.auditEvents.every(({ action, new_value, target_id }) => (
+    action === 'integration.failure'
+    && target_id === 'recaptcha'
+    && Object.keys(new_value).join(',') === 'code'
+  )));
+  const logged = JSON.stringify(harness.logs);
+  assert.equal(logged.includes('private-secret'), false);
+  assert.equal(logged.includes('invalid-input-secret'), false);
+});
+
+test('reCAPTCHA network errors and timeouts return safe errors and record failure health', async () => {
+  const harness = createHealthHarness({ timeoutMs: 10 });
+  const restoreLogs = harness.captureLogs();
+  try {
+    const networkFailure = createRecaptcha(async () => configuredIntegration(), async () => {
+      const error = new Error('network error with private-secret');
+      error.code = 'ECONNRESET';
+      throw error;
+    }, harness.callIntegration);
+    await assert.rejects(networkFailure.verifyResponse('challenge-response'), (error) => (
+      error instanceof IntegrationError && error.status === 503
+    ));
+
+    const timeout = createRecaptcha(async () => configuredIntegration(), async () => new Promise(() => {}), harness.callIntegration);
+    await assert.rejects(timeout.verifyResponse('challenge-response'), (error) => (
+      error instanceof IntegrationError
+      && error.message === 'Verification is temporarily unavailable. Please try again later.'
+    ));
+  } finally {
+    restoreLogs();
+  }
+
+  assert.deepEqual(harness.failures.map(({ code }) => code), ['network', 'timeout']);
+  assert.equal(harness.auditEvents.length, 2);
+  assert.equal(JSON.stringify(harness.logs).includes('private-secret'), false);
 });
