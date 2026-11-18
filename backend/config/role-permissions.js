@@ -109,7 +109,16 @@ function resolvePermissionKeys(mapping, req, items) {
 const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'GET', path: '/admin/dashboard', roles: ['admin'], permission: 'view_admin_dashboard' },
   { method: 'GET', path: '/admin/users', roles: ['admin'], permission: 'view_users' },
-  { method: 'POST', path: '/admin/users', roles: ['admin'], permission: 'add_user' },
+  {
+    method: 'POST', path: '/admin/users', roles: ['admin'],
+    permission: (req) => {
+      const permissions = ['add_user'];
+      if (req.body?.role_name === 'staff' || req.body?.permissions !== undefined) {
+        permissions.push('manage_permissions');
+      }
+      return permissions;
+    },
+  },
   {
     method: 'PATCH', path: '/admin/users/:id', roles: ['admin'],
     permission: (req) => ['disable', 'enable'].includes(req.body?.action) ? 'disable_user' : 'edit_user',

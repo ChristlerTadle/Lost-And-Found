@@ -142,7 +142,6 @@ function shell(content, page) {
           ...(hasPermission('view_all_items') ? [['admin-items', 'All Items', 'file']] : []),
           ...(hasPermission('view_all_claims') ? [['admin-claims', 'All Claims', 'clipboard']] : []),
           ...(hasPermission('generate_inventory_report') ? [['admin-inventory', 'Inventory Report', 'clipboard']] : []),
-          ...(hasPermission('add_user') ? [['admin-add-user', 'Add User', 'user']] : []),
           ...(hasPermission('manage_integrations') ? [['admin-settings', 'Settings', 'settings']] : []),
           ...(hasPermission('view_admin_dashboard') ? [['admin-security', 'Security', 'shield']] : []),
         ])

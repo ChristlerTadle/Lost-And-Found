@@ -2,7 +2,7 @@ import * as shared from './js/shared.js';
 import { homePage, loginPage, authForm } from './js/pages/public.js';
 import { dashboardPage, browsePage, itemPage, reportPage, reportsPage, editReportPage, claimPage, claimsPage, profilePage, notificationsPage } from './js/pages/user.js';
 import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItemPage, staffClaims, staffClaimPage } from './js/pages/staff.js';
-import { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
+import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
 const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, setSessionInfo } = shared;
@@ -55,7 +55,7 @@ async function renderPage(page) {
     'dashboard', 'report', 'report-found', 'reports', 'edit-report', 'claims', 'claim', 'profile',
     'notifications', 'staff-dashboard', 'staff-records', 'staff-lost-reports', 'staff-found-items',
     'staff-stored-items', 'staff-returned-items', 'staff-item', 'staff-claims', 'staff-claim',
-    'admin-dashboard', 'admin-users', 'admin-add-user', 'admin-edit-user', 'admin-role-permissions', 'admin-items',
+    'admin-dashboard', 'admin-users', 'admin-edit-user', 'admin-role-permissions', 'admin-items',
     'admin-edit-item', 'admin-claims', 'admin-inventory', 'admin-settings', 'admin-system-records',
     'admin-security',
   ]);
@@ -63,6 +63,10 @@ async function renderPage(page) {
   if (sessionInfo.adminMfaReauthRequired) return loginPage('Administrator MFA is now required. Sign in again to verify your account.');
   if (page === 'admin-role-permissions') {
     location.replace('/?page=admin-users&tab=role-defaults');
+    return '<main class="loading" aria-live="polite">Redirecting to User Management…</main>';
+  }
+  if (page === 'admin-add-user') {
+    location.replace('/?page=admin-users&create=1');
     return '<main class="loading" aria-live="polite">Redirecting to User Management…</main>';
   }
   if (user?.role_name === 'admin' && sessionInfo.adminMfaSetupRequired && page !== 'admin-security') {
@@ -93,7 +97,6 @@ async function renderPage(page) {
     'staff-claims': 'view_claims',
     'staff-claim': 'view_claims',
     'admin-dashboard': 'view_admin_dashboard',
-    'admin-add-user': 'add_user',
     'admin-items': 'view_all_items',
     'admin-claims': 'view_all_claims',
     'admin-inventory': 'generate_inventory_report',
@@ -156,7 +159,6 @@ async function renderPage(page) {
     case 'staff-no-access': return staffPermissionHome();
     case 'admin-dashboard': return adminDashboard();
     case 'admin-users': return adminUsers();
-    case 'admin-add-user': return adminAddUser();
     case 'admin-edit-user': return adminEditUser(param('id'));
     case 'admin-items': return adminItems();
     case 'admin-edit-item': return adminEditItem(param('id'));
@@ -202,6 +204,8 @@ function bindForms() {
   app.querySelector('[data-action="role-permission-role"]')?.addEventListener('change', changeRolePermissionRole);
   const accountEditForm = app.querySelector('form[data-form="admin-edit-user"]');
   if (accountEditForm) bindAccountPermissionForm(accountEditForm);
+  const accountCreateForm = app.querySelector('form[data-form="admin-add-user"]');
+  if (accountCreateForm) bindAccountPermissionForm(accountCreateForm);
   app.querySelector('[data-action="account-role"]')?.addEventListener('change', changeAccountRole);
   app.querySelector('[data-action="reset-account-permissions"]')?.addEventListener('click', resetAccountPermissions);
   const profileForm = app.querySelector('#profile-form');
@@ -327,7 +331,15 @@ async function onFormSubmit(event) {
         break;
       case 'profile': await request('/profile', jsonPatch(values)); break;
       case 'staff-status': await request(`/staff/items/${encodeURIComponent(form.dataset.id)}/status`, jsonPatch(values)); break;
-      case 'admin-add-user': await request('/admin/users', jsonPost(values)); navigate('admin-users'); return;
+      case 'admin-add-user': {
+        const formData = new FormData(form);
+        const permissions = formData.getAll('permissions');
+        const valuesToSave = Object.fromEntries([...formData.entries()].filter(([key]) => key !== 'permissions'));
+        if (form.dataset.managePermissions === 'true') valuesToSave.permissions = permissions;
+        await request('/admin/users', jsonPost(valuesToSave));
+        navigate('admin-users');
+        return;
+      }
       case 'admin-edit-user': {
         const formData = new FormData(form);
         const permissions = formData.getAll('permissions');
@@ -1349,6 +1361,9 @@ function isFormDirty(form) {
   if (form.dataset.form === 'admin-edit-user') {
     return form.dataset.savedAccountForm !== accountFormSnapshot(form);
   }
+  if (form.dataset.form === 'admin-add-user') {
+    return form.dataset.savedAccountForm !== accountFormSnapshot(form);
+  }
   return false;
 }
 
@@ -1366,7 +1381,7 @@ function bindDiscardNavigation() {
       [...app.querySelectorAll('form[data-form]')].forEach((form) => {
         if (form.dataset.form === 'admin-role-permissions') {
           form.dataset.savedPermissions = JSON.stringify(currentRolePermissionSelection(form));
-        } else if (form.dataset.form === 'admin-edit-user') {
+        } else if (['admin-edit-user', 'admin-add-user'].includes(form.dataset.form)) {
           form.dataset.savedAccountForm = accountFormSnapshot(form);
         }
       });

@@ -17,7 +17,21 @@ function createAuthService(database) {
     },
 
     async createAdminUser(input, options = {}) {
-      return createPasswordAccount(users, input, options.session);
+      const roleName = options.roleName || 'user';
+      if (!['user', 'staff'].includes(roleName)) {
+        const error = new Error('Choose a valid account role.');
+        error.status = 400;
+        throw error;
+      }
+      return createPasswordAccount(users, input, options.session, roleName);
+    },
+
+    async deleteAdminUser(userId, options = {}) {
+      const result = await users.deleteOne(
+        { _id: String(userId) },
+        options.session ? { session: options.session } : undefined,
+      );
+      return result.deletedCount === 1;
     },
 
     async login(emailInput, password) {
@@ -302,7 +316,7 @@ function nullable(value) {
   return text || null;
 }
 
-async function createPasswordAccount(users, input, session = undefined) {
+async function createPasswordAccount(users, input, session = undefined, roleName = 'user') {
   const email = String(input.email || '').trim().toLowerCase();
   const password = String(input.password || '');
   const fullName = String(input.full_name || '').trim();
@@ -321,7 +335,7 @@ async function createPasswordAccount(users, input, session = undefined) {
     student_id: nullable(input.student_id),
     employee_id: null,
     phone: nullable(input.phone),
-    role_name: 'user',
+    role_name: roleName,
     status: 'active',
     created_at: now,
     updated_at: now,

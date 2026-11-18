@@ -35,17 +35,50 @@ function createAdminController({
     },
 
     postAdminUsers: async (req, res) => {
+      const roleName = String(req.body.role_name || 'user').trim();
+      if (!['user', 'staff'].includes(roleName)) {
+        const error = new Error('Choose User or Staff for a new account.');
+        error.status = 400;
+        throw error;
+      }
+      const hasSubmittedPermissions = req.body.permissions !== undefined;
+      const canManagePermissions = req.rolePermissions?.includes('manage_permissions');
+      if ((roleName === 'staff' || hasSubmittedPermissions) && !canManagePermissions) {
+        const error = new Error('Creating a Staff account or setting account permissions requires manage_permissions.');
+        error.status = 403;
+        throw error;
+      }
+      const permissions = hasSubmittedPermissions
+        ? await rolePermissions.prepareAccountPermissions(roleName, req.body)
+        : await rolePermissions.findRolePermissions(roleName);
       const newValues = safeUserValues({
         ...req.body,
-        role_name: 'user',
+        role_name: roleName,
         status: 'active',
       });
+      if (hasSubmittedPermissions) newValues.permission_keys = permissions;
       const created = await audit.runAction(requestAuditContext(req, 'user.create', {
         target_type: 'user',
         target_id: (result) => result.id,
         new_value: newValues,
       }), async (session) => {
-        return auth.createAdminUser(req.body, { session });
+        const account = await auth.createAdminUser(req.body, { session, roleName });
+        if (hasSubmittedPermissions) {
+          try {
+            await rolePermissions.replaceAccountPermissions(
+              account.id,
+              roleName,
+              permissions,
+              session,
+            );
+          } catch {
+            if (!session) await rollbackCreatedAccount(auth, rolePermissions, account.id);
+            const safeError = new Error('Account could not be created. Please try again.');
+            safeError.status = 503;
+            throw safeError;
+          }
+        }
+        return account;
       });
       return res.status(201).json({ user: created });
     },
@@ -836,6 +869,26 @@ async function findAccount(auth, id) {
     throw error;
   }
   return account;
+}
+
+async function rollbackCreatedAccount(auth, rolePermissions, accountId) {
+  const failures = [];
+  try {
+    await rolePermissions.resetAccountPermissions(accountId);
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await auth.deleteAdminUser(accountId);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length) {
+    console.error('Unable to fully roll back admin account creation:', failures[0]);
+    const error = new Error('Account creation failed and cleanup could not be completed. Contact the system administrator.');
+    error.status = 500;
+    throw error;
+  }
 }
 
 function safeUserValues(user) {

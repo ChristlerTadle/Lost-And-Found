@@ -24,6 +24,9 @@ const admin = { id: 'test-admin', full_name: 'Test Admin', role_name: 'admin', s
 const disabledUser = { id: 'disabled-user', full_name: 'Disabled User', role_name: 'user', status: 'disabled' };
 const accounts = new Map([user, staff, secondStaff, admin, disabledUser].map((account) => [account.id, account]));
 const roleChangeCalls = [];
+const accountOverrides = new Map();
+let createdAccountSequence = 0;
+let failAccountPermissionSave = false;
 const permissionsByRole = new Map([
   ['user', PERMISSIONS_BY_ROLE.user.map(({ key }) => key)],
   ['staff', PERMISSIONS_BY_ROLE.staff.map(({ key }) => key)],
@@ -43,6 +46,21 @@ const services = {
     async findActiveSessionUser(id) {
       const account = accounts.get(id);
       return account?.status === 'active' ? account : null;
+    },
+    async createAdminUser(input, { roleName = 'user' } = {}) {
+      createdAccountSequence += 1;
+      const account = {
+        id: `created-user-${createdAccountSequence}`,
+        full_name: input.full_name,
+        email: input.email,
+        role_name: roleName,
+        status: 'active',
+      };
+      accounts.set(account.id, account);
+      return account;
+    },
+    async deleteAdminUser(id) {
+      return accounts.delete(id);
     },
     async findAccountsForStaffAssignment() {
       return [...accounts.values()];
@@ -75,8 +93,9 @@ const services = {
     async findRolePermissions(role) {
       return [...(permissionsByRole.get(role) || [])];
     },
-    async findEffectivePermissions(_userId, role) {
-      return [...(permissionsByRole.get(role) || [])];
+    async findEffectivePermissions(userId, role) {
+      const disabled = new Set(accountOverrides.get(userId) || []);
+      return (permissionsByRole.get(role) || []).filter((permission) => !disabled.has(permission));
     },
     async getRoleSettings(role) {
       return {
@@ -89,6 +108,24 @@ const services = {
     },
     preparePermissions(role, input) {
       return normalizeRolePermissions(role, input.permissions);
+    },
+    async prepareAccountPermissions(role, input) {
+      const normalized = normalizeRolePermissions(role, input.permissions);
+      if (normalized.some((permission) => !permissionsByRole.get(role)?.includes(permission))) {
+        const error = new Error('The role has turned off a permission.');
+        error.status = 403;
+        throw error;
+      }
+      return normalized;
+    },
+    async replaceAccountPermissions(userId, role, permissions) {
+      if (failAccountPermissionSave) throw new Error('Simulated permission save failure.');
+      const disabled = (permissionsByRole.get(role) || []).filter((permission) => !permissions.includes(permission));
+      accountOverrides.set(userId, disabled);
+      return { role, permissions };
+    },
+    async resetAccountPermissions(userId) {
+      accountOverrides.delete(userId);
     },
     async replaceRolePermissions(role, permissions) {
       const old = permissionsByRole.get(role) || [];
@@ -519,6 +556,145 @@ test('role permissions are admin-only and admin bypass does not alter user-only 
   assert.equal(allowed.status, 200);
   assert.equal((await fetch(`${baseUrl}/items`, { headers: { 'x-test-user': admin.id } })).status, 200);
   assert.equal((await fetch(`${baseUrl}/items/mine`, { headers: { 'x-test-user': admin.id } })).status, 403);
+});
+
+test('creating a Staff account requires add_user and manage_permissions', async () => {
+  const savedAdminPermissions = [...permissionsByRole.get('admin')];
+  const createdIds = [];
+  permissionsByRole.set('admin', ['view_users', 'add_user']);
+  try {
+    const userResponse = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user': admin.id,
+        origin: 'http://localhost:5173',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({
+        full_name: 'New User',
+        email: 'new-user@example.test',
+        password: 'secure-password',
+        role_name: 'user',
+      }),
+    });
+    assert.equal(userResponse.status, 201);
+    const userResult = await userResponse.json();
+    assert.equal(userResult.user.role_name, 'user');
+    createdIds.push(userResult.user.id);
+
+    const staffResponse = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user': admin.id,
+        origin: 'http://localhost:5173',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({
+        full_name: 'New Staff',
+        email: 'new-staff@example.test',
+        password: 'secure-password',
+        role_name: 'staff',
+      }),
+    });
+    assert.equal(staffResponse.status, 403);
+
+    const customPermissionsResponse = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user': admin.id,
+        origin: 'http://localhost:5173',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({
+        full_name: 'Custom User',
+        email: 'custom-user@example.test',
+        password: 'secure-password',
+        role_name: 'user',
+        permissions: [],
+      }),
+    });
+    assert.equal(customPermissionsResponse.status, 403);
+
+    const adminRoleResponse = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user': admin.id,
+        origin: 'http://localhost:5173',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({
+        full_name: 'Invalid Admin',
+        email: 'invalid-admin@example.test',
+        password: 'secure-password',
+        role_name: 'admin',
+      }),
+    });
+    assert.equal(adminRoleResponse.status, 400);
+    assert.equal(accounts.size, 6);
+  } finally {
+    for (const id of createdIds) accounts.delete(id);
+    permissionsByRole.set('admin', savedAdminPermissions);
+  }
+});
+
+test('Staff account creation saves only the validated checklist and rolls back on save failure', async () => {
+  const createdIds = [];
+  const headers = {
+    'content-type': 'application/json',
+    'x-test-user': admin.id,
+    origin: 'http://localhost:5173',
+    'x-csrf-token': 'csrf-test-token',
+  };
+  try {
+    const response = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        full_name: 'Staff Account',
+        email: 'staff-account@example.test',
+        password: 'secure-password',
+        role_name: 'staff',
+        permissions: ['view_claims'],
+      }),
+    });
+    assert.equal(response.status, 201);
+    const result = await response.json();
+    assert.equal(result.user.role_name, 'staff');
+    createdIds.push(result.user.id);
+    assert.deepEqual(await services.rolePermissions.findEffectivePermissions(result.user.id, 'staff'), ['view_claims']);
+    const createAudit = auditEvents.findLast((event) => event.action === 'user.create'
+      && event.new_value?.email === 'staff-account@example.test');
+    assert.equal(createAudit.new_value.role_name, 'staff');
+    assert.deepEqual(createAudit.new_value.permission_keys, ['view_claims']);
+    assert.equal(JSON.stringify(createAudit).includes('secure-password'), false);
+
+    const beforeFailure = accounts.size;
+    failAccountPermissionSave = true;
+    const failed = await fetch(`${baseUrl}/admin/users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        full_name: 'Failed Staff',
+        email: 'failed-staff@example.test',
+        password: 'secure-password',
+        role_name: 'staff',
+        permissions: ['view_claims'],
+      }),
+    });
+    assert.equal(failed.status, 503);
+    assert.deepEqual(await failed.json(), { error: 'Account could not be created. Please try again.' });
+    assert.equal(accounts.size, beforeFailure);
+  } finally {
+    failAccountPermissionSave = false;
+    for (const id of createdIds) {
+      accounts.delete(id);
+      accountOverrides.delete(id);
+    }
+  }
 });
 
 test('admin account edits pass role changes through the shared role-change service', async () => {

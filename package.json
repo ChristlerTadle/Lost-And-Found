@@ -13,7 +13,7 @@
     "migrate:general-audit-log": "node scripts/migrate-general-audit-log.js",
     "migrate:integrations": "node scripts/migrate-integration-settings.js",
     "seed:admin": "node scripts/seed-admin.js",
-    "test": "node --test backend/tests/api.test.js backend/tests/role-permissions.test.js backend/tests/staff-permission-preflight.test.js backend/tests/staff-permission-migration.test.js backend/tests/audit-log.test.js backend/tests/audit-actions.test.js backend/tests/audit-migration.test.js backend/tests/recaptcha.test.js backend/tests/integration-settings.test.js backend/tests/integration-security.test.js backend/tests/integration-validation.test.js backend/tests/google-calendar.test.js backend/tests/admin-mfa.test.js",
+    "test": "node --test backend/tests/api.test.js backend/tests/admin-user-creation.test.js backend/tests/role-permissions.test.js backend/tests/staff-permission-preflight.test.js backend/tests/staff-permission-migration.test.js backend/tests/audit-log.test.js backend/tests/audit-actions.test.js backend/tests/audit-migration.test.js backend/tests/recaptcha.test.js backend/tests/integration-settings.test.js backend/tests/integration-security.test.js backend/tests/integration-validation.test.js backend/tests/google-calendar.test.js backend/tests/admin-mfa.test.js",
     "test:found-submit": "node scripts/test-found-submit.js",
     "test:notifications": "node scripts/test-notifications.js",
     "test:password-reset": "node scripts/test-password-reset.js",

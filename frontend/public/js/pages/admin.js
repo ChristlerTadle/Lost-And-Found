@@ -13,7 +13,6 @@ async function adminDashboard() {
     ...(hasPermission('view_all_items') ? [['clipboard', 'All Items', `${summary.totalItems} items`, 'admin-items']] : []),
     ...(hasPermission('view_all_claims') ? [['file', 'All Claims', `${summary.totalClaims} total · ${summary.pendingClaims} pending`, 'admin-claims']] : []),
     ...(hasPermission('generate_inventory_report') ? [['file', 'Inventory Report', `${summary.storedItems} in custody`, 'admin-inventory']] : []),
-    ...(hasPermission('add_user') ? [['user', 'Add User', 'Create an account', 'admin-add-user']] : []),
     ...(hasPermission('view_system_records') ? [['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records']] : []),
     ...(hasPermission('manage_integrations') ? [['settings', 'Settings', 'Sign-in integrations', 'admin-settings']] : []),
     ...(hasPermission('view_admin_dashboard') ? [['shield', 'Security', 'Set up an authenticator', 'admin-security']] : []),
@@ -48,8 +47,10 @@ async function adminDashboard() {
 
 async function adminUsers() {
   const activeTab = param('tab') === 'role-defaults' && canManagePermissions() ? 'role-defaults' : 'accounts';
+  const creatingAccount = activeTab === 'accounts' && param('create') === '1' && canAddUsers();
   const users = activeTab === 'accounts' && canViewUsers() ? (await request('/admin/users')).users : [];
-  const roles = activeTab === 'role-defaults' ? (await request('/admin/role-permissions')).roles : null;
+  const needsRoleSettings = activeTab === 'role-defaults' || (creatingAccount && canManagePermissions());
+  const roles = needsRoleSettings ? (await request('/admin/role-permissions')).roles : null;
   const rows = users.map((account) => `<tr><td class="item-name">${h(account.full_name)}</td><td>${h(account.email)}</td>
     <td><span class="badge badge-${account.role_name === 'staff' ? 'active' : account.role_name === 'admin' ? 'claimed' : 'pending'}">${roleName(account.role_name)}</span></td>
     <td><span class="badge badge-${account.status === 'active' ? 'active' : 'cancelled'}">${account.status === 'active' ? 'Active' : 'Disabled'}</span></td>
@@ -62,23 +63,34 @@ async function adminUsers() {
     ${canManagePermissions() ? `<a class="button ${activeTab === 'role-defaults' ? 'button-primary' : 'button-secondary'}" href="/?page=admin-users&amp;tab=role-defaults">Role defaults</a>` : ''}
   </nav>`;
   const roleDefaults = activeTab === 'role-defaults' ? renderRoleDefaults(roles, param('role')) : '';
-  const accountsPanel = activeTab === 'accounts' ? `<section class="card admin-accounts"><div class="admin-accounts-heading"><h2>User accounts</h2><span>${users.length} accounts</span></div>
+  const createForm = creatingAccount ? renderAdminCreateUser(roles, canManagePermissions()) : '';
+  const accountsPanel = activeTab === 'accounts' ? `${createForm}<section class="card admin-accounts"><div class="admin-accounts-heading"><h2>User accounts</h2><span>${users.length} accounts</span></div>
       ${users.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="right">Actions</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`
         : '<p class="empty">There are no accounts to manage.</p>'}
     </section>` : roleDefaults;
   return `<main class="container admin-dashboard">${pageHeader('User Management', 'Edit an account to change its role and what it can do. Use Role defaults to turn a function on or off for every account of a role. Role changes apply on the account’s next request, and disabled accounts are signed out then.',
-    canAddUsers() ? buttonLink('admin-add-user', 'Add User', 'button-primary') : '')}
+    canAddUsers() ? `<a class="button ${creatingAccount ? 'button-secondary' : 'button-primary'}" href="/?page=admin-users${creatingAccount ? '' : '&amp;create=1'}">${creatingAccount ? 'Close form' : 'Add account'}</a>` : '')}
     ${tabLinks}${accountsPanel}</main>`;
 }
 
-function adminAddUser() {
-  return `<main class="container admin-dashboard admin-add-user"><a class="back-link" href="/?page=admin-users">&larr; Back to User Management</a>
-    ${pageHeader('Add User', 'Create an active account. Use Edit to manage the account’s role and permissions.')}
-    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-add-user">${field('Full name', 'full_name', 'text', '', true)}
+function renderAdminCreateUser(roles, canManage) {
+  const roleOptions = roles?.filter(({ role }) => ['user', 'staff'].includes(role)) || [];
+  return `<form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-add-user"
+    data-current-role="user" data-manage-permissions="${canManage}">
+    <h2 class="field full">Create account</h2>${field('Full name', 'full_name', 'text', '', true)}
     ${field('Email address', 'email', 'email', '', true)}${field('Student ID', 'student_id')}
     ${field('Phone number', 'phone', 'tel')}<div class="field"><label for="password">Temporary password</label>
       <input class="input" id="password" name="password" type="password" required minlength="8"><small class="admin-password-hint">Use at least 8 characters.</small></div>
-    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Create user account</button></div></form></main>`;
+    ${canManage ? `<div class="field"><label for="new-account-role">Role</label>
+      <select class="select" id="new-account-role" name="role_name" data-action="account-role">
+        <option value="user" selected>User</option><option value="staff">Staff</option>
+      </select></div>
+      <section class="admin-account-permissions"><p class="muted">Choose account-only permissions. Role defaults always take precedence.</p>
+        ${roleOptions.map((entry) => renderPermissionChecklist(entry.role, entry.permissions, entry.role === 'user')).join('')}
+      </section>`
+      : `<input type="hidden" name="role_name" value="user"><p class="muted field full">New accounts are created as Users. Creating a Staff account requires permission to manage permissions.</p>`}
+    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a>
+      <button class="button button-primary" type="submit">Create account</button></div></form>`;
 }
 
 function renderRoleDefaults(roles, requestedRole = '') {
@@ -536,4 +548,4 @@ async function adminSystemRecords() {
   </main>`;
 }
 
-export { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };
+export { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };
