@@ -132,7 +132,7 @@ function shell(content, page) {
     const navigation = user.role_name === 'admin'
       ? (sessionInfo.adminMfaSetupRequired
         ? [['admin-security', 'Security', 'shield']]
-        : [['admin-dashboard', 'Dashboard', 'home'], ['admin-users', 'User Management', 'user'], ['admin-role-permissions', 'Role Permissions', 'shield'], ['admin-system-records', 'System Records', 'file'], ['admin-items', 'All Items', 'file'],
+        : [['admin-dashboard', 'Dashboard', 'home'], ['admin-users', 'User Management', 'user'], ['admin-system-records', 'System Records', 'file'], ['admin-items', 'All Items', 'file'],
           ['admin-claims', 'All Claims', 'clipboard'], ['admin-inventory', 'Inventory Report', 'clipboard'],
           ['admin-add-user', 'Add User', 'user'], ['admin-settings', 'Settings', 'settings'], ['admin-security', 'Security', 'shield'], ['items', 'Browse Items', 'file'],
           ['notifications', 'Notifications', 'bell'], ['profile', 'Profile', 'user']])

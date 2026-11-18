@@ -110,7 +110,10 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'GET', path: '/admin/dashboard', roles: ['admin'], permission: 'view_admin_dashboard' },
   { method: 'GET', path: '/admin/users', roles: ['admin'], permission: 'view_users' },
   { method: 'POST', path: '/admin/users', roles: ['admin'], permission: 'add_user' },
-  { method: 'PATCH', path: '/admin/users/:id', roles: ['admin'], permission: 'edit_user' },
+  {
+    method: 'PATCH', path: '/admin/users/:id', roles: ['admin'],
+    permission: (req) => ['disable', 'enable'].includes(req.body?.action) ? 'disable_user' : 'edit_user',
+  },
   { method: 'GET', path: '/admin/users/:id/permissions', roles: ['admin'], permission: 'manage_permissions' },
   { method: 'PUT', path: '/admin/users/:id/permissions', roles: ['admin'], permission: 'manage_permissions' },
   { method: 'DELETE', path: '/admin/users/:id/permissions', roles: ['admin'], permission: 'manage_permissions' },

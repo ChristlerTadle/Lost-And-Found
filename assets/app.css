@@ -593,10 +593,16 @@ svg { flex-shrink: 0; }
 .admin-accounts { overflow: hidden; }
 .admin-accounts-heading { align-items: center; display: flex; justify-content: space-between; padding: 18px 20px; }
 .admin-accounts-heading > span, .admin-assigned-label { color: var(--muted); font-size: 12px; }
-.admin-account-actions { align-items: center; display: grid; gap: 8px; grid-template-columns: 90px 140px 90px; justify-content: end; }
+.admin-account-actions { align-items: center; display: grid; gap: 8px; grid-template-columns: repeat(2, 100px); justify-content: end; }
 .admin-account-actions form { display: grid; }
 .admin-account-actions .button { font-size: 12px; min-height: 32px; padding: 7px 10px; width: 100%; }
 .admin-edit-user { max-width: 768px; }
+.user-management-tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+.admin-account-permissions { grid-column: 1 / -1; }
+.admin-account-permission-role[hidden] { display: none; }
+.admin-account-permission-role h2 { font-size: 17px; margin: 12px 0; }
+.admin-account-permission-role .role-permission-groups { margin-bottom: 14px; }
+.role-permission-option.permission-disabled { color: var(--faint); }
 .admin-role-permissions { max-width: 900px; }
 .role-permission-selector { align-items: flex-end; display: flex; gap: 12px; margin-bottom: 16px; padding: 18px; }
 .role-permission-selector .field { flex: 1; margin: 0; }

@@ -4,6 +4,7 @@ const {
   PERMISSIONS_BY_ROLE,
   ROLE_PERMISSION_ROUTE_MAP,
   normalizeRolePermissions,
+  resolvePermissionKeys,
 } = require('../config/role-permissions');
 const { createRolePermissionService } = require('../../src/services/role-permissions');
 const { createNotificationService } = require('../../src/services/notifications');
@@ -151,6 +152,14 @@ test('route permission map has unique method/path entries and records both dynam
     method === 'PATCH' && path === '/staff/claims/:id/pickup' && permission === 'schedule_pickup'));
   assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
     method === 'POST' && path === '/staff/claims/:id/calendar-sync' && permission === 'schedule_pickup'));
+});
+
+test('admin account status actions require disable_user while edits require edit_user', () => {
+  const mapping = ROLE_PERMISSION_ROUTE_MAP.find(({ method, path }) =>
+    method === 'PATCH' && path === '/admin/users/:id');
+  assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'disable' } }), 'disable_user');
+  assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'enable' } }), 'disable_user');
+  assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'edit' } }), 'edit_user');
 });
 
 test('notifications are suppressed for roles without receive_notifications', async () => {

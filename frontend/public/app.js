@@ -2,7 +2,7 @@ import * as shared from './js/shared.js';
 import { homePage, loginPage, authForm } from './js/pages/public.js';
 import { dashboardPage, browsePage, itemPage, reportPage, reportsPage, editReportPage, claimPage, claimsPage, profilePage, notificationsPage } from './js/pages/user.js';
 import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItemPage, staffClaims, staffClaimPage } from './js/pages/staff.js';
-import { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminRolePermissions, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
+import { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
 const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, setSessionInfo } = shared;
@@ -28,6 +28,19 @@ async function render() {
         element.classList.add('notification-highlight');
         requestAnimationFrame(() => element.scrollIntoView({ block: 'center', behavior: 'smooth' }));
       }
+      if (page === 'admin-users' && param('tab') !== 'role-defaults'
+        && !sessionInfo.rolePermissions.includes('view_users')) {
+        return `<main class="container">${alert('You do not have permission to view user accounts.', true)}</main>`;
+      }
+      if (page === 'admin-edit-user' && !sessionInfo.rolePermissions.includes('edit_user')
+        && !sessionInfo.rolePermissions.includes('manage_permissions')) {
+        return `<main class="container">${alert('You do not have permission to edit this account.', true)}</main>`;
+      }
+      if (page === 'admin-users' && param('tab') === 'role-defaults'
+        && !sessionInfo.rolePermissions.includes('manage_permissions')) {
+        location.replace('/?page=admin-users');
+        return `<main class="container">${alert('You do not have permission to manage role defaults.', true)}</main>`;
+      }
     }
   } catch (error) {
     const page = param('page') || 'home';
@@ -48,6 +61,10 @@ async function renderPage(page) {
   ]);
   if (sessionInfo.pendingAdminMfa) return adminMfaVerifyPage();
   if (sessionInfo.adminMfaReauthRequired) return loginPage('Administrator MFA is now required. Sign in again to verify your account.');
+  if (page === 'admin-role-permissions') {
+    location.replace('/?page=admin-users&tab=role-defaults');
+    return '<main class="loading" aria-live="polite">Redirecting to User Management…</main>';
+  }
   if (user?.role_name === 'admin' && sessionInfo.adminMfaSetupRequired && page !== 'admin-security') {
     return adminSecurityPage();
   }
@@ -116,7 +133,6 @@ async function renderPage(page) {
     case 'admin-users': return adminUsers();
     case 'admin-add-user': return adminAddUser();
     case 'admin-edit-user': return adminEditUser(param('id'));
-    case 'admin-role-permissions': return adminRolePermissions();
     case 'admin-items': return adminItems();
     case 'admin-edit-item': return adminEditItem(param('id'));
     case 'admin-claims': return adminClaims();
@@ -159,6 +175,10 @@ function bindForms() {
   app.querySelectorAll('form[data-form="admin-role-permissions"]').forEach(bindRolePermissionCheckboxes);
   app.querySelector('[data-action="cancel-role-permissions"]')?.addEventListener('click', cancelRolePermissionChanges);
   app.querySelector('[data-action="role-permission-role"]')?.addEventListener('change', changeRolePermissionRole);
+  const accountEditForm = app.querySelector('form[data-form="admin-edit-user"]');
+  if (accountEditForm) bindAccountPermissionForm(accountEditForm);
+  app.querySelector('[data-action="account-role"]')?.addEventListener('change', changeAccountRole);
+  app.querySelector('[data-action="reset-account-permissions"]')?.addEventListener('click', resetAccountPermissions);
   const profileForm = app.querySelector('#profile-form');
   const profileEdit = app.querySelector('[data-action="edit-profile"]');
   const profileCancel = app.querySelector('[data-action="cancel-profile"]');
@@ -282,7 +302,31 @@ async function onFormSubmit(event) {
       case 'profile': await request('/profile', jsonPatch(values)); break;
       case 'staff-status': await request(`/staff/items/${encodeURIComponent(form.dataset.id)}/status`, jsonPatch(values)); break;
       case 'admin-add-user': await request('/admin/users', jsonPost(values)); navigate('admin-users'); return;
-      case 'admin-edit-user': await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, jsonPatch({ ...values, action: 'edit' })); navigate('admin-users'); return;
+      case 'admin-edit-user': {
+        const formData = new FormData(form);
+        const permissions = formData.getAll('permissions');
+        const role = String(formData.get('role_name') || form.dataset.currentRole);
+        const changedRole = role !== form.dataset.currentRole;
+        if (changedRole && !confirm(`Change ${form.dataset.fullName} from ${accountRoleName(form.dataset.currentRole)} to ${accountRoleName(role)}? Their individual permission changes for the old role will be reset, and the ${accountRoleName(role)} role's settings apply.`)) {
+          if (submit) submit.disabled = false;
+          return;
+        }
+        const valuesToSave = Object.fromEntries([...formData.entries()].filter(([key]) => key !== 'permissions'));
+        if (changedRole || sessionInfo.rolePermissions.includes('edit_user')) {
+          await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, jsonPatch({
+            ...valuesToSave,
+            action: 'edit',
+            ...(sessionInfo.rolePermissions.includes('manage_permissions') ? { permissions } : {}),
+          }));
+        } else {
+          await request(`/admin/users/${encodeURIComponent(form.dataset.id)}/permissions`, {
+            method: 'PUT',
+            body: JSON.stringify({ permissions }),
+          });
+        }
+        navigate('admin-users');
+        return;
+      }
       case 'admin-role-permissions': {
         const formData = new FormData(form);
         const permissions = formData.getAll('permissions');
@@ -1186,7 +1230,75 @@ function changeRolePermissionRole(event) {
     selector.value = form.dataset.role;
     return;
   }
-  location.href = `/?page=admin-role-permissions&role=${encodeURIComponent(selector.value)}`;
+  location.href = `/?page=admin-users&tab=role-defaults&role=${encodeURIComponent(selector.value)}`;
+}
+
+function bindAccountPermissionForm(form) {
+  const setActiveRole = (role) => {
+    form.querySelectorAll('[data-role-panel]').forEach((panel) => {
+      const active = panel.dataset.rolePanel === role;
+      panel.hidden = !active;
+      panel.querySelectorAll('input[name="permissions"]').forEach((checkbox) => {
+        checkbox.disabled = !active || checkbox.dataset.roleEnabled !== 'true';
+      });
+    });
+  };
+  const setParents = (checkbox, panel) => {
+    const config = JSON.parse(panel.querySelector('[data-dependencies]')?.dataset.dependencies || '{}');
+    for (const parent of config[checkbox.value] || []) {
+      const parentInput = [...panel.querySelectorAll('input[name="permissions"]')].find((input) => input.value === parent);
+      if (parentInput && !parentInput.disabled) parentInput.checked = true;
+      if (parentInput) setParents(parentInput, panel);
+    }
+  };
+  const clearChildren = (checkbox, panel) => {
+    const config = JSON.parse(panel.querySelector('[data-dependencies]')?.dataset.dependencies || '{}');
+    for (const [child, parents] of Object.entries(config)) {
+      if (!parents.includes(checkbox.value)) continue;
+      const childInput = [...panel.querySelectorAll('input[name="permissions"]')].find((input) => input.value === child);
+      if (childInput && !childInput.disabled) childInput.checked = false;
+      if (childInput) clearChildren(childInput, panel);
+    }
+  };
+  form.querySelectorAll('[data-role-panel] input[name="permissions"]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const panel = checkbox.closest('[data-role-panel]');
+      if (checkbox.checked) setParents(checkbox, panel);
+      else clearChildren(checkbox, panel);
+    });
+  });
+  form.querySelector('[data-action="account-role"]')?.addEventListener('change', (event) => {
+    setActiveRole(event.currentTarget.value);
+  });
+  setActiveRole(form.querySelector('[data-action="account-role"]')?.value || form.dataset.currentRole);
+}
+
+function changeAccountRole(event) {
+  const form = event.currentTarget.form;
+  const panel = form?.querySelector(`[data-role-panel="${event.currentTarget.value}"]`);
+  const reset = form?.querySelector('[data-action="reset-account-permissions"]');
+  if (panel) {
+    panel.querySelectorAll('input[name="permissions"]').forEach((input) => {
+      input.checked = input.dataset.roleEnabled === 'true';
+    });
+  }
+  if (reset) reset.disabled = event.currentTarget.value !== form.dataset.currentRole;
+}
+
+function accountRoleName(role) {
+  return ({ user: 'User', staff: 'Staff', admin: 'Admin' })[role] || 'Unknown';
+}
+
+async function resetAccountPermissions(event) {
+  const button = event.currentTarget;
+  if (!confirm('Reset this account to its role defaults?')) return;
+  try {
+    await request(`/admin/users/${encodeURIComponent(button.dataset.id)}/permissions`, { method: 'DELETE' });
+    await render();
+    showNotice('Account permissions reset to role defaults.');
+  } catch (error) {
+    showNotice(error.message, true);
+  }
 }
 
 render();

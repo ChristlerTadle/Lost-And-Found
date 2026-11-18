@@ -11,7 +11,6 @@ async function adminDashboard() {
     ['file', 'All Claims', `${summary.totalClaims} total · ${summary.pendingClaims} pending`, 'admin-claims'],
     ['file', 'Inventory Report', `${summary.storedItems} in custody`, 'admin-inventory'],
     ['user', 'Add User', 'Create an account', 'admin-add-user'],
-    ['shield', 'Role Permissions', 'Manage User and Staff access', 'admin-role-permissions'],
     ['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records'],
     ['settings', 'Settings', 'Sign-in integrations', 'admin-settings'],
     ['shield', 'Security', 'Set up an authenticator', 'admin-security'],
@@ -45,23 +44,28 @@ async function adminDashboard() {
 }
 
 async function adminUsers() {
-  const { users } = await request('/admin/users');
+  const activeTab = param('tab') === 'role-defaults' && canManagePermissions() ? 'role-defaults' : 'accounts';
+  const users = activeTab === 'accounts' && canViewUsers() ? (await request('/admin/users')).users : [];
+  const roles = activeTab === 'role-defaults' ? (await request('/admin/role-permissions')).roles : null;
   const rows = users.map((account) => `<tr><td class="item-name">${h(account.full_name)}</td><td>${h(account.email)}</td>
-    <td><span class="badge badge-${account.role_name === 'staff' ? 'active' : 'pending'}">${account.role_name === 'staff' ? 'Staff' : 'User'}</span></td>
+    <td><span class="badge badge-${account.role_name === 'staff' ? 'active' : account.role_name === 'admin' ? 'claimed' : 'pending'}">${roleName(account.role_name)}</span></td>
     <td><span class="badge badge-${account.status === 'active' ? 'active' : 'cancelled'}">${account.status === 'active' ? 'Active' : 'Disabled'}</span></td>
     <td class="right"><div class="admin-account-actions">
-      ${account.status === 'active' ? `<a class="button button-outline" href="/?page=admin-edit-user&amp;id=${encodeURIComponent(account.id)}">Edit</a>
-        ${formAction('admin-user', account.id, account.role_name === 'user' ? 'Assign staff' : 'Revert to user', 'secondary',
-          { action: account.role_name === 'user' ? 'assign_staff' : 'revert_staff' })}
-        ${formAction('admin-user', account.id, 'Disable', 'danger', { action: 'disable' })}`
-        : formAction('admin-user', account.id, 'Re-enable', 'secondary', { action: 'enable' })}</div></td></tr>`);
-  return `<main class="container admin-dashboard">${pageHeader('User Management', 'Manage accounts, staff access, and account status.',
-    buttonLink('admin-add-user', 'Add User', 'button-primary'))}
-    <section class="card admin-access-notice"><h2>Manage account access</h2><p>Assign or remove staff access, disable accounts, or re-enable them if they were disabled by mistake. Role changes apply on the account’s next request, and disabled accounts are signed out then. Admin accounts are managed separately.</p></section>
-    <section class="card admin-accounts"><div class="admin-accounts-heading"><h2>User accounts</h2><span>${users.length} accounts</span></div>
+      ${canEditUsers() ? `<a class="button button-outline" href="/?page=admin-edit-user&amp;id=${encodeURIComponent(account.id)}">Edit</a>` : ''}
+      ${canDisableUsers() ? formAction('admin-user', account.id, account.status === 'active' ? 'Disable' : 'Enable', account.status === 'active' ? 'danger' : 'secondary',
+        { action: account.status === 'active' ? 'disable' : 'enable' }) : ''}</div></td></tr>`);
+  const tabLinks = `<nav class="user-management-tabs" aria-label="User Management sections">
+    ${canViewUsers() ? `<a class="button ${activeTab === 'accounts' ? 'button-primary' : 'button-secondary'}" href="/?page=admin-users">Accounts</a>` : ''}
+    ${canManagePermissions() ? `<a class="button ${activeTab === 'role-defaults' ? 'button-primary' : 'button-secondary'}" href="/?page=admin-users&amp;tab=role-defaults">Role defaults</a>` : ''}
+  </nav>`;
+  const roleDefaults = activeTab === 'role-defaults' ? renderRoleDefaults(roles, param('role')) : '';
+  const accountsPanel = activeTab === 'accounts' ? `<section class="card admin-accounts"><div class="admin-accounts-heading"><h2>User accounts</h2><span>${users.length} accounts</span></div>
       ${users.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="right">Actions</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`
-        : '<p class="empty">There are no user or staff accounts to manage.</p>'}
-    </section></main>`;
+        : '<p class="empty">There are no accounts to manage.</p>'}
+    </section>` : roleDefaults;
+  return `<main class="container admin-dashboard">${pageHeader('User Management', 'Edit an account to change its role and what it can do. Use Role defaults to turn a function on or off for every account of a role. Role changes apply on the account’s next request, and disabled accounts are signed out then.',
+    canAddUsers() ? buttonLink('admin-add-user', 'Add User', 'button-primary') : '')}
+    ${tabLinks}${accountsPanel}</main>`;
 }
 
 function adminAddUser() {
@@ -74,26 +78,24 @@ function adminAddUser() {
     <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Create user account</button></div></form></main>`;
 }
 
-async function adminRolePermissions() {
-  const { roles } = await request('/admin/role-permissions');
-  const selectedRole = param('role') === 'staff' ? 'staff' : 'user';
+function renderRoleDefaults(roles, requestedRole = '') {
+  const selectedRole = ['staff', 'admin'].includes(requestedRole) ? requestedRole : 'user';
   const selected = roles.find((entry) => entry.role === selectedRole);
   const permissions = selected.permissions;
   const groups = [...new Set(permissions.map(({ group }) => group))];
   const enabled = permissions.filter(({ enabled: isEnabled }) => isEnabled).map(({ key }) => key);
-  return `<main class="container admin-dashboard admin-role-permissions">${pageHeader(
-    'Role Permissions',
-    'Changes apply to every account with the selected role immediately.',
-  )}
+  return `<section class="admin-role-defaults">
+    <header class="page-header"><div><h2>Role defaults</h2><p>Changes apply to every account with the selected role immediately.</p></div></header>
     <div class="card role-permission-selector"><div class="field"><label for="role-permission-role">Role</label>
       <select class="select" id="role-permission-role" data-action="role-permission-role">
         <option value="user" ${selectedRole === 'user' ? 'selected' : ''}>User</option>
         <option value="staff" ${selectedRole === 'staff' ? 'selected' : ''}>Staff</option>
-      </select></div><p class="muted">Admin permissions are fixed and cannot be changed.</p></div>
+        <option value="admin" ${selectedRole === 'admin' ? 'selected' : ''}>Admin</option>
+      </select></div></div>
     <form class="card role-permission-form" data-form="admin-role-permissions" data-role="${selectedRole}"
       data-saved-permissions="${h(JSON.stringify(enabled))}"
       data-dependencies="${h(JSON.stringify(Object.fromEntries(permissions.map(({ key, requires }) => [key, requires]))))}">
-      <h2>${selectedRole === 'user' ? 'User' : 'Staff'} checklist</h2>
+      <h2>${roleName(selectedRole)} checklist</h2>
       <p class="role-permission-warning">Turning off a permission disables that feature for every ${selectedRole} account.</p>
       <div class="role-permission-groups">${groups.map((group) => `<fieldset class="role-permission-group"><legend>${h(group)}</legend>
         ${permissions.filter((permission) => permission.group === group).map((permission) => `<label class="role-permission-option">
@@ -104,18 +106,94 @@ async function adminRolePermissions() {
       <div class="form-actions"><button class="button button-secondary" type="button" data-action="cancel-role-permissions">Cancel</button>
         <button class="button button-primary" type="submit" disabled>Save Changes</button></div>
     </form>
-  </main>`;
+  </section>`;
 }
 
 async function adminEditUser(id) {
   const { users } = await request('/admin/users');
   const user = users.find((account) => account.id === id);
   if (!user) throw new Error('User account was not found.');
+  const canManage = canManagePermissions() && user.id !== sessionInfo.user?.id;
+  const canChangeRole = canManage && canEditUsers() && user.role_name !== 'admin' && user.id !== sessionInfo.user?.id;
+  const [accountSettings, roleSettings] = canManage
+    ? await Promise.all([
+      request(`/admin/users/${encodeURIComponent(id)}/permissions`),
+      request('/admin/role-permissions'),
+    ])
+    : [null, null];
+  const rolePanels = canManage ? roleSettings.roles.map((entry) => {
+    const accountRole = entry.role === user.role_name;
+    const currentPermissions = accountRole ? accountSettings.permissions : entry.permissions;
+    return renderPermissionChecklist(entry.role, currentPermissions, accountRole);
+  }).join('') : '';
   return `<main class="container admin-dashboard admin-edit-user">${pageHeader('Edit user')}
-    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}">
-    ${field('Full name', 'full_name', 'text', user.full_name, true)}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
-    ${field('Student ID', 'student_id', 'text', user.student_id || '')}${field('Phone number', 'phone', 'tel', user.phone || '')}
-    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save changes</button></div></form></main>`;
+    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}" data-current-role="${h(user.role_name)}" data-full-name="${h(user.full_name)}">
+    ${field('Full name', 'full_name', 'text', user.full_name, true, canEditUsers() ? '' : 'readonly')}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
+    ${field('Student ID', 'student_id', 'text', user.student_id || '', false, canEditUsers() ? '' : 'readonly')}${field('Phone number', 'phone', 'tel', user.phone || '', false, canEditUsers() ? '' : 'readonly')}
+    <div class="field"><label>Account status</label><p>${h(user.status === 'active' ? 'Active' : 'Disabled')}</p></div>
+    ${user.role_name === 'admin'
+      ? `<div class="field"><label>Role</label><p>Admin</p><input type="hidden" name="role_name" value="admin"></div>`
+      : `<div class="field"><label for="account-role">Role</label><select class="select" id="account-role" name="role_name" data-action="account-role" ${canChangeRole ? '' : 'disabled'}>
+        <option value="user" ${user.role_name === 'user' ? 'selected' : ''}>User</option>
+        <option value="staff" ${user.role_name === 'staff' ? 'selected' : ''}>Staff</option>
+      </select></div>`}
+    ${canManage ? `<section class="admin-account-permissions" data-current-role="${h(user.role_name)}">
+      <p class="muted">Changes here apply to this account only. The role setting always wins.</p>
+      ${rolePanels}
+      <button class="button button-secondary" type="button" data-action="reset-account-permissions" data-id="${h(id)}">Reset to role defaults</button>
+    </section>` : '<p class="muted">You do not have permission to manage this account’s permissions.</p>'}
+    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save Changes</button></div></form></main>`;
+}
+
+function renderPermissionChecklist(role, permissions, currentRole) {
+  const groups = [...new Set(permissions.map(({ group }) => group))];
+  const saved = permissions.filter(({ enabled }) => enabled).map(({ key }) => key);
+  const dependencies = Object.fromEntries(permissions.map(({ key, requires }) => [key, requires]));
+  return `<div class="admin-account-permission-role" data-role-panel="${role}" ${currentRole ? '' : 'hidden'}>
+    <h2>${roleName(role)} permissions</h2>
+    <div class="role-permission-groups">${groups.map((group) => `<fieldset class="role-permission-group"><legend>${h(group)}</legend>
+      ${permissions.filter((permission) => permission.group === group).map((permission) => {
+        const roleEnabled = permission.role_enabled === undefined ? permission.enabled : permission.role_enabled;
+        const dependenciesEnabled = permission.requires.every((key) => (
+          permissions.find((entry) => entry.key === key)?.role_enabled
+            ?? permissions.find((entry) => entry.key === key)?.enabled
+        ));
+        const available = roleEnabled && dependenciesEnabled;
+        const checked = roleEnabled && permission.enabled;
+        return `<label class="role-permission-option${roleEnabled ? '' : ' permission-disabled'}">
+          <input type="checkbox" name="permissions" value="${h(permission.key)}" data-role-enabled="${available}" ${checked ? 'checked' : ''} ${available && currentRole ? '' : 'disabled'}>
+          <span><strong>${h(permission.label)}</strong>${roleEnabled
+            ? permission.requires.length ? `<small>Requires: ${h(permission.requires.map((key) => permissions.find((entry) => entry.key === key)?.label || key).join(', '))}</small>` : ''
+            : `<small>Turned off for all ${roleName(role)} accounts</small>`}</span>
+        </label>`;
+      }).join('')}
+    </fieldset>`).join('')}</div>
+    <input type="hidden" data-saved-permissions="${h(JSON.stringify(saved))}" data-dependencies="${h(JSON.stringify(dependencies))}">
+  </div>`;
+}
+
+function roleName(role) {
+  return ({ user: 'User', staff: 'Staff', admin: 'Admin' })[role] || 'Unknown';
+}
+
+function canManagePermissions() {
+  return sessionInfo.rolePermissions.includes('manage_permissions');
+}
+
+function canViewUsers() {
+  return sessionInfo.rolePermissions.includes('view_users');
+}
+
+function canEditUsers() {
+  return sessionInfo.rolePermissions.includes('edit_user');
+}
+
+function canAddUsers() {
+  return sessionInfo.rolePermissions.includes('add_user');
+}
+
+function canDisableUsers() {
+  return sessionInfo.rolePermissions.includes('disable_user');
 }
 
 async function adminItems() {
@@ -444,4 +522,4 @@ async function adminSystemRecords() {
   </main>`;
 }
 
-export { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminRolePermissions, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };
+export { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };
