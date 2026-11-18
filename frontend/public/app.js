@@ -3,9 +3,11 @@ import { homePage, loginPage, authForm } from './js/pages/public.js';
 import { dashboardPage, browsePage, itemPage, reportPage, reportsPage, editReportPage, claimPage, claimsPage, profilePage, notificationsPage } from './js/pages/user.js';
 import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItemPage, staffClaims, staffClaimPage } from './js/pages/staff.js';
 import { adminDashboard, adminUsers, adminAddUser, adminEditUser, adminRolePermissions, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
+import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
 const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, setSessionInfo } = shared;
 let pendingIntegrationCard = null;
+let pendingIntegrationRestore = null;
 let integrationCodeResendTimer;
 
 async function render() {
@@ -42,7 +44,13 @@ async function renderPage(page) {
     'staff-stored-items', 'staff-returned-items', 'staff-item', 'staff-claims', 'staff-claim',
     'admin-dashboard', 'admin-users', 'admin-add-user', 'admin-edit-user', 'admin-role-permissions', 'admin-items',
     'admin-edit-item', 'admin-claims', 'admin-inventory', 'admin-settings', 'admin-system-records',
+    'admin-security',
   ]);
+  if (sessionInfo.pendingAdminMfa) return adminMfaVerifyPage();
+  if (sessionInfo.adminMfaReauthRequired) return loginPage('Administrator MFA is now required. Sign in again to verify your account.');
+  if (user?.role_name === 'admin' && sessionInfo.adminMfaSetupRequired && page !== 'admin-security') {
+    return adminSecurityPage();
+  }
   if (privatePages.has(page) && !user) return loginPage('Sign in to continue.');
   if (page.startsWith('admin-') && user?.role_name !== 'admin') {
     location.replace(user ? '/?page=dashboard' : '/?page=login');
@@ -115,6 +123,7 @@ async function renderPage(page) {
     case 'admin-inventory': return adminInventory();
     case 'admin-settings': return adminSettings();
     case 'admin-system-records': return adminSystemRecords();
+    case 'admin-security': return adminSecurityPage();
     default: return `<main class="page">${pageHeader('Page not found')}<a class="button" href="/">Go home</a></main>`;
   }
 }
@@ -130,8 +139,11 @@ function bindForms() {
   app.querySelectorAll('[data-action="cancel-integration"]').forEach((button) => button.addEventListener('click', cancelIntegrationChanges));
   app.querySelectorAll('[data-action="set-integration-default"]').forEach((button) => button.addEventListener('click', setIntegrationDefault));
   app.querySelectorAll('[data-action="restore-integration-default"]').forEach((button) => button.addEventListener('click', restoreIntegrationDefault));
+  app.querySelectorAll('[data-action="integration-test"]').forEach((button) => button.addEventListener('click', testIntegrationConnection));
   app.querySelectorAll('[data-action="smtp-test"]').forEach((button) => button.addEventListener('click', testSmtpConnection));
   app.querySelectorAll('[data-action="calendar-test"]').forEach((button) => button.addEventListener('click', testCalendarConnection));
+  app.querySelectorAll('[data-action="admin-mfa-test"]').forEach((button) => button.addEventListener('click', testAdminMfa));
+  app.querySelectorAll('[data-action="admin-mfa-enrollment-start"]').forEach((button) => button.addEventListener('click', startAdminMfaEnrollment));
   app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
   app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
   app.querySelectorAll('[data-integration-code-dialog]').forEach((dialog) => {
@@ -189,6 +201,28 @@ async function onFormSubmit(event) {
       case 'integration-settings': return;
       case 'integration-pin': await unlockIntegrationSettings(form); return;
       case 'integration-code': await verifyIntegrationCode(form); return;
+      case 'admin-mfa-verify': {
+        const result = await request('/auth/mfa/verify', jsonPost(values));
+        sessionInfo.pendingAdminMfa = false;
+        sessionInfo.user = result.user;
+        navigate('admin-dashboard');
+        return;
+      }
+      case 'admin-mfa-enrollment-confirm': {
+        const result = await request('/admin/mfa/enrollment/confirm', jsonPost(values));
+        sessionInfo.adminMfaSetupRequired = false;
+        form.reset();
+        showAdminMfaRecoveryCodes(result.recoveryCodes);
+        showNotice('Authenticator set up. Save your recovery codes now.');
+        return;
+      }
+      case 'admin-mfa-recovery': {
+        const result = await request('/admin/mfa/recovery/regenerate', jsonPost(values));
+        form.reset();
+        showAdminMfaRecoveryCodes(result.recoveryCodes);
+        showNotice('New recovery codes generated. Previous codes no longer work.');
+        return;
+      }
       case 'login':
       case 'register': {
         if (sessionInfo.recaptcha?.active) {
@@ -198,7 +232,18 @@ async function onFormSubmit(event) {
         }
         const path = form.dataset.form === 'register' ? '/auth/register' : '/auth/login';
         const result = await request(path, jsonPost(values));
+        if (result.mfaRequired) {
+          sessionInfo.pendingAdminMfa = true;
+          sessionInfo.user = null;
+          navigate('admin-mfa-verify');
+          return;
+        }
         sessionInfo.user = result.user;
+        sessionInfo.adminMfaSetupRequired = Boolean(result.adminMfaSetupRequired);
+        if (result.adminMfaSetupRequired) {
+          navigate('admin-security');
+          return;
+        }
         const destination = result.user.role_name === 'admin' ? 'admin-dashboard'
           : result.user.role_name === 'staff' ? 'staff-dashboard' : 'dashboard';
         navigate(destination);
@@ -265,6 +310,10 @@ async function onFormSubmit(event) {
     }
     await render();
   } catch (error) {
+    if (form.dataset.form === 'admin-mfa-verify' && error.status === 401) {
+      navigate('login');
+      return;
+    }
     showNotice(error.message, true);
     if (sessionInfo.recaptcha?.active && ['login', 'register'].includes(form.dataset.form)) {
       const widget = form.querySelector('.g-recaptcha');
@@ -439,8 +488,10 @@ function updateIntegrationSaveState(form) {
     const changed = JSON.stringify(integrationCardPayload(card)) !== card.dataset.savedState;
     card.querySelector('.integration-card-actions').hidden = !changed;
     card.querySelector('[data-action="set-integration-default"]').disabled = changed;
+    card.querySelector('[data-action="integration-test"]')?.toggleAttribute('disabled', changed);
     card.querySelector('[data-action="smtp-test"]')?.toggleAttribute('disabled', changed);
     card.querySelector('[data-action="calendar-test"]')?.toggleAttribute('disabled', changed);
+    card.querySelector('[data-action="admin-mfa-test"]')?.toggleAttribute('disabled', changed);
     updateIntegrationCardStatus(card);
   }
 }
@@ -555,6 +606,28 @@ async function verifyIntegrationCode(form) {
   submit.disabled = true;
   error.textContent = '';
   try {
+    if (pendingIntegrationRestore) {
+      const integrationId = pendingIntegrationRestore;
+      const result = await request('/admin/settings/code/verify', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
+        body: JSON.stringify({
+          code: form.querySelector('[name="code"]').value,
+          restoreDefault: integrationId,
+        }),
+      });
+      pendingIntegrationCard = null;
+      pendingIntegrationRestore = null;
+      closeIntegrationCodeDialog();
+      applySavedIntegration(card, result.integrations[integrationId]);
+      await refreshAdminMfaGate();
+      showNotice(result.warning
+        ? `Default restored. ${result.warning}`
+        : result.noticeSent
+          ? 'Default restored and SU_EMAIL notified.'
+          : `${result.integrations[integrationId].label} default settings restored.`);
+      return;
+    }
     const result = await request('/admin/settings/code/verify', {
       method: 'POST',
       headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
@@ -566,12 +639,14 @@ async function verifyIntegrationCode(form) {
     pendingIntegrationCard = null;
     closeIntegrationCodeDialog();
     applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    if (card.dataset.integration === 'admin_mfa') await refreshAdminMfaGate();
     showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
   } catch (requestError) {
     error.textContent = requestError.message;
     form.querySelector('[name="code"]').value = '';
     if (requestError.message.includes('pending settings changed')) {
       pendingIntegrationCard = null;
+      pendingIntegrationRestore = null;
       closeIntegrationCodeDialog();
     }
   } finally {
@@ -586,6 +661,16 @@ async function resendIntegrationCode(event) {
   if (!card) return;
   button.disabled = true;
   try {
+    if (pendingIntegrationRestore) {
+      const result = await request('/admin/settings/code/resend', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
+        body: JSON.stringify({ restoreDefault: pendingIntegrationRestore }),
+      });
+      startIntegrationCodeResendTimer(dialog, result.resendInSeconds);
+      showNotice('A new verification code was sent.');
+      return;
+    }
     const result = await request('/admin/settings/code/resend', {
       method: 'POST',
       headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
@@ -615,6 +700,7 @@ async function cancelIntegrationCode(event) {
     }
   }
   pendingIntegrationCard = null;
+  pendingIntegrationRestore = null;
   dialog.close();
   clearInterval(integrationCodeResendTimer);
 }
@@ -658,7 +744,15 @@ async function restoreIntegrationDefault(event) {
       headers: { 'X-CSRF-Token': settingsCsrf(form) },
       body: JSON.stringify({}),
     });
+    if (result.verificationRequired) {
+      pendingIntegrationCard = card;
+      pendingIntegrationRestore = result.restoreDefault;
+      openIntegrationCodeDialog(form, result.resendInSeconds);
+      showNotice('A verification code was sent to approve the security-settings change.');
+      return;
+    }
     applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    if (card.dataset.integration === 'admin_mfa') await refreshAdminMfaGate();
     if (result.warning) showNotice(`Default restored. ${result.warning}`, true);
     else showNotice(result.noticeSent ? 'Default restored and SU_EMAIL notified.' : 'Default settings are already active.');
   } catch (error) {
@@ -680,6 +774,8 @@ function toggleIntegration(event) {
       : 'Sign-in and registration will no longer require a reCAPTCHA challenge.';
     if (!confirm(`Disable ${name}? ${impact}`)) return;
   }
+  if (wasEnabled && integrationId === 'admin_mfa'
+    && !confirm('Disable administrator MFA? This removes the second sign-in step for all administrators.')) return;
   button.dataset.enabled = String(!wasEnabled);
   button.textContent = wasEnabled ? 'Enable' : 'Disable';
   updateIntegrationSaveState(button.closest('form'));
@@ -705,6 +801,7 @@ async function saveIntegrationSettings(event) {
       return;
     }
     applySavedIntegration(card, result.integrations[card.dataset.integration]);
+    if (card.dataset.integration === 'admin_mfa') await refreshAdminMfaGate();
     showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
   } catch (error) {
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
@@ -738,6 +835,19 @@ function applySavedIntegration(card, integration) {
   card.dataset.savedState = JSON.stringify(integrationCardPayload(card));
   clearIntegrationErrors(card);
   updateIntegrationSaveState(card.closest('form'));
+}
+
+async function refreshAdminMfaGate() {
+  setSessionInfo(await request('/auth/me'));
+  if (sessionInfo.adminMfaSetupRequired) {
+    navigate('admin-security');
+    return true;
+  }
+  if (sessionInfo.adminMfaReauthRequired) {
+    navigate('login');
+    return true;
+  }
+  return false;
 }
 
 function clearIntegrationErrors(card) {
@@ -813,6 +923,46 @@ async function testSmtpConnection(event) {
   }
 }
 
+async function testIntegrationConnection(event) {
+  const button = event.currentTarget;
+  const form = button.closest('form');
+  const card = button.closest('[data-integration]');
+  const integrationId = card.dataset.integration;
+  const connectionTests = {
+    google_auth: {
+      path: '/admin/settings/google-auth/test',
+      label: 'Google sign-in',
+    },
+    recaptcha: {
+      path: '/admin/settings/recaptcha/test',
+      label: 'reCAPTCHA',
+    },
+  };
+  const connectionTest = connectionTests[integrationId];
+  if (!connectionTest) return;
+
+  button.disabled = true;
+  try {
+    const result = await request(connectionTest.path, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
+      body: JSON.stringify({}),
+    });
+    applySavedIntegration(card, result.integrations[integrationId]);
+    showNotice(`${connectionTest.label} connection verified and saved settings are now the default.`);
+  } catch (error) {
+    try {
+      const current = await request('/admin/settings');
+      if (current.integrations?.[integrationId]) applySavedIntegration(card, current.integrations[integrationId]);
+    } catch {
+      console.warn(`${connectionTest.label} health could not be refreshed after the connection test.`);
+    }
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function testCalendarConnection(event) {
   const button = event.currentTarget;
   const form = button.closest('form');
@@ -837,6 +987,55 @@ async function testCalendarConnection(event) {
   } finally {
     button.disabled = false;
   }
+}
+
+async function testAdminMfa(event) {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await request('/admin/settings/admin-mfa/test', jsonPost({}));
+    showNotice('Admin MFA encryption and authenticator self-test passed.');
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function startAdminMfaEnrollment(event) {
+  const button = event.currentTarget;
+  const card = button.closest('.admin-mfa-card');
+  const code = card.querySelector('[name="current_code"]')?.value || '';
+  button.disabled = true;
+  try {
+    const result = await request('/admin/mfa/enrollment/start', jsonPost({ code }));
+    const currentCode = card.querySelector('[name="current_code"]');
+    if (currentCode) currentCode.value = '';
+    card.querySelector('[data-admin-mfa-qr-image]').src = result.qrCode;
+    card.querySelector('[data-admin-mfa-secret]').textContent = result.secret;
+    card.querySelector('[data-admin-mfa-qr]').hidden = false;
+    button.hidden = true;
+    showNotice('Scan the QR code, then confirm with the authenticator app.');
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function showAdminMfaRecoveryCodes(codes) {
+  const section = app.querySelector('[data-admin-mfa-recovery-codes]');
+  const list = section?.querySelector('[data-admin-mfa-recovery-list]');
+  if (!section || !list || !Array.isArray(codes)) return;
+  list.replaceChildren(...codes.map((code) => {
+    const row = document.createElement('li');
+    const value = document.createElement('code');
+    value.textContent = code;
+    row.append(value);
+    return row;
+  }));
+  section.hidden = false;
+  section.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function showNotice(message, isError = false) {

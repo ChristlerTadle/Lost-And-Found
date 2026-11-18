@@ -3,7 +3,7 @@ const { createHash, randomBytes, randomUUID } = require('node:crypto');
 
 function toUser(document) {
   if (!document) return null;
-  const { _id, password_hash, google_sub, ...user } = document;
+  const { _id, password_hash, google_sub, admin_mfa, ...user } = document;
   return { ...user, id: String(_id) };
 }
 

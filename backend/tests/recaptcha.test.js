@@ -78,6 +78,55 @@ test('reCAPTCHA sends the current secret, challenge, client IP, and timeout sign
   assert.equal(harness.failures.length, 0);
 });
 
+test('reCAPTCHA connection test validates the saved secret without a user challenge', async () => {
+  let request;
+  const harness = createHealthHarness();
+  const recaptcha = createRecaptcha(async () => configuredIntegration({
+    site_key: 'public-site-key',
+  }), async (url, options) => {
+    request = { url, options };
+    return {
+      ok: true,
+      async json() {
+        return { success: false, 'error-codes': ['invalid-input-response'] };
+      },
+    };
+  }, harness.callIntegration);
+
+  assert.equal(await recaptcha.testConnection(), true);
+  assert.equal(request.url, 'https://www.google.com/recaptcha/api/siteverify');
+  assert.deepEqual(Object.fromEntries(request.options.body), {
+    secret: 'private-secret',
+    response: 'integration-connection-test',
+  });
+  assert.ok(request.options.signal instanceof AbortSignal);
+  assert.equal(harness.failures.length, 0);
+  assert.equal(harness.health.has('recaptcha'), false);
+});
+
+test('reCAPTCHA connection test records rejected saved secrets as integration failures', async () => {
+  const harness = createHealthHarness();
+  const restoreLogs = harness.captureLogs();
+  try {
+    const recaptcha = createRecaptcha(async () => configuredIntegration(), async () => ({
+      ok: true,
+      async json() {
+        return { success: false, 'error-codes': ['invalid-input-secret'] };
+      },
+    }), harness.callIntegration);
+    await assert.rejects(recaptcha.testConnection(), (error) => (
+      error instanceof IntegrationError && error.status === 503
+    ));
+  } finally {
+    restoreLogs();
+  }
+
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.health.get('recaptcha').code, 'invalid_credentials');
+  assert.equal(harness.auditEvents.length, 1);
+  assert.equal(JSON.stringify(harness.logs).includes('private-secret'), false);
+});
+
 test('disabled reCAPTCHA skips and invalid or expired challenge tokens do not mark health failing', async () => {
   let enabled = false;
   const harness = createHealthHarness();

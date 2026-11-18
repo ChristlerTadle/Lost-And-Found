@@ -146,6 +146,8 @@ async function staffClaimPage(id) {
   const { claim, pickupDefaults = {} } = await request(`/staff/claims/${encodeURIComponent(id)}`);
   const claimant = claim.claimant;
   const item = claim.item || {};
+  const pickupTimeZone = pickupDefaults.time_zone || claim.pickup_time_zone || 'Asia/Manila';
+  const earliestPickupDate = localDateInTimeZone(pickupTimeZone);
   return `<main class="container staff-workspace"><header class="page-header"><div><h1>Verify Item Ownership</h1>
     <p>Compare the claimant’s information with the private details on the item report.</p></div>${buttonLink('staff-claims', 'Back to claims', 'button-secondary')}</header>
     <section class="card staff-review-card"><div class="staff-review-heading"><div><span class="type-banner found">Recovered item claim</span><h2>${h(claim.item_name)}</h2></div>${badge(claim.status)}</div>
@@ -163,7 +165,7 @@ async function staffClaimPage(id) {
         ${hasPermission('approve_claim') && hasPermission('schedule_pickup')
           ? `<form class="form-grid pickup-schedule-form" data-form="approve-claim" data-id="${h(claim.id)}">
               <h3>Schedule an item pickup (optional)</h3><div class="form-row">
-                <div class="field"><label for="pickup-date">Pickup date</label><input class="input" id="pickup-date" type="date" name="pickup_date" required></div>
+                <div class="field"><label for="pickup-date">Pickup date</label><input class="input" id="pickup-date" type="date" name="pickup_date" min="${earliestPickupDate}" required></div>
                 <div class="field"><label for="pickup-time">Pickup time</label><input class="input" id="pickup-time" type="time" name="pickup_time" required></div></div>
               <div class="field"><label for="pickup-location">Pickup location</label><input class="input" id="pickup-location" name="pickup_location" maxlength="256" value="${h(pickupDefaults.office_location || '')}"></div>
               <p class="muted">Pickup hours: ${h(pickupDefaults.pickup_open_time || '08:00')}–${h(pickupDefaults.pickup_close_time || '17:00')} (${h(pickupDefaults.time_zone || 'Asia/Manila')}), ${h(pickupDefaults.pickup_days || 'Monday, Tuesday, Wednesday, Thursday, Friday, Saturday')}.</p>
@@ -184,7 +186,7 @@ async function staffClaimPage(id) {
         ${claim.calendar_sync_status === 'failed' ? `<p class="claim-outcome">Calendar not synced</p>${hasPermission('schedule_pickup') ? formAction('retry-calendar-sync', claim.id, 'Retry sync', 'outline') : ''}` : ''}
         ${hasPermission('schedule_pickup') && item.status === 'claimed' && !item.deleted_at ? `<form class="form-grid pickup-schedule-form" data-form="reschedule-pickup" data-id="${h(claim.id)}">
           <h3>Reschedule pickup</h3><div class="form-row">
-            <div class="field"><label for="reschedule-pickup-date">Pickup date</label><input class="input" id="reschedule-pickup-date" type="date" name="pickup_date" required value="${h(localPickupDate(claim))}"></div>
+            <div class="field"><label for="reschedule-pickup-date">Pickup date</label><input class="input" id="reschedule-pickup-date" type="date" name="pickup_date" min="${earliestPickupDate}" required value="${h(localPickupDate(claim))}"></div>
             <div class="field"><label for="reschedule-pickup-time">Pickup time</label><input class="input" id="reschedule-pickup-time" type="time" name="pickup_time" required value="${h(localPickupTime(claim))}"></div></div>
           <div class="field"><label for="reschedule-pickup-location">Pickup location</label><input class="input" id="reschedule-pickup-location" name="pickup_location" maxlength="256" required value="${h(claim.pickup_location)}"></div>
           <button class="button button-outline" type="submit">Save new pickup time</button></form>` : ''}
@@ -222,6 +224,17 @@ function localPickupDate(claim) {
 function localPickupTime(claim) {
   const parts = localPickupFields(claim);
   return `${parts.hour}:${parts.minute}`;
+}
+
+function localDateInTimeZone(timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date()).filter(({ type }) => type !== 'literal')
+    .map(({ type, value }) => [type, value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function staffPageLink(permission, page, label) {

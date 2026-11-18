@@ -230,6 +230,39 @@ const integrations = {
       })),
     ],
   },
+  admin_mfa: {
+    label: 'Admin MFA',
+    fields: [
+      {
+        name: 'require_for_all_admins',
+        label: 'Require MFA for all administrators',
+        type: 'checkbox',
+        secret: false,
+        required: false,
+        defaultValue: false,
+      },
+      {
+        name: 'issuer',
+        label: 'Authenticator issuer',
+        type: 'text',
+        secret: false,
+        required: true,
+        maxLength: 40,
+        defaultValue: 'Lost and Found System',
+        format: 'text',
+      },
+      {
+        name: 'window',
+        label: 'Code tolerance (steps)',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: 1,
+        defaultValue: '1',
+        format: 'mfa_window',
+      },
+    ],
+  },
 };
 
 module.exports = { integrations };

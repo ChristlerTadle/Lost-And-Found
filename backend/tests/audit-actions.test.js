@@ -226,6 +226,7 @@ test('admin and staff logins are audited, and failed login never records credent
   let nextUser = { id: 'admin-1', role_name: 'admin' };
   const controller = createAuthController({
     audit,
+    adminMfa: { async getLoginAction() { return { action: 'complete' }; } },
     googleOAuth: { enabled: false },
     recaptcha: { configured: false, siteKey: '' },
     integrationSettings: {

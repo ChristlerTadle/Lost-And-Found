@@ -211,7 +211,11 @@ test('credential code is hashed, expires, binds to admin and payload, and is one
 
 test('bootstrap mail failures log a sanitized message without emitting editable integration health events', async () => {
   const harness = createHarness({
-    bootstrapMailError: new Error('535 authentication failed: bootstrap-password'),
+    bootstrapMailError: Object.assign(new Error('535 authentication failed: bootstrap-password'), {
+      code: 'EAUTH',
+      command: 'AUTH PLAIN',
+      responseCode: 535,
+    }),
   });
   const originalError = console.error;
   const logs = [];
@@ -229,7 +233,9 @@ test('bootstrap mail failures log a sanitized message without emitting editable 
     console.error = originalError;
   }
 
-  assert.deepEqual(logs, ['Bootstrap email delivery failed.']);
+  assert.deepEqual(logs, [
+    'Bootstrap email delivery failed. {"code":"EAUTH","command":"AUTH PLAIN","responseCode":535}',
+  ]);
   assert.equal(JSON.stringify(logs).includes('bootstrap-password'), false);
   assert.equal(harness.documents.get('integration_settings_pending_codes').has('failed-mail-session'), false);
   assert.equal(harness.events.some(({ action }) => action === 'integration.failure'), false);

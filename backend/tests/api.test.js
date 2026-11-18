@@ -83,6 +83,7 @@ const services = {
     async createAuthorizationRequest() {
       return { url: 'https://accounts.google.com/o/oauth2/auth?state=test', state: 'test' };
     },
+    async testConnection() { return true; },
   },
   recaptcha: {
     configured: true,
@@ -99,6 +100,7 @@ const services = {
         throw error;
       }
     },
+    async testConnection() { return true; },
   },
   integrationSettings: {
     async getIntegration(id) {
@@ -133,6 +135,8 @@ const services = {
         google_auth: { id: 'google_auth', fields: [{ name: 'client_secret', value: '••••••••cret', secret: true }] },
         recaptcha: { id: 'recaptcha', fields: [] },
         smtp: { id: 'smtp', fields: [] },
+        google_calendar: { id: 'google_calendar', fields: [] },
+        admin_mfa: { id: 'admin_mfa', fields: [] },
       };
     },
     async saveIntegrations(input, audit, context) {
@@ -202,6 +206,17 @@ const services = {
     },
     async cancelCode() {},
     async sendBootstrapEmail() {},
+  },
+  adminMfa: {
+    async getLoginAction() { return { action: 'complete' }; },
+    async canAccessAdminRoutes() { return true; },
+    async getAdminSummary() {
+      return { enabled: false, active: false, enrolledAdmins: 0, totalAdmins: 1 };
+    },
+    async getStatus() {
+      return { enabled: false, requireForAllAdmins: false, enrolled: false };
+    },
+    async selfTest() { return true; },
   },
   items: {
     async search() {
@@ -508,6 +523,8 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
       ['/admin/settings/code/resend', 'POST'],
       ['/admin/settings/code/cancel', 'POST'],
       ['/admin/settings/smtp/test', 'POST'],
+      ['/admin/settings/google-auth/test', 'POST'],
+      ['/admin/settings/recaptcha/test', 'POST'],
       ['/admin/settings/google_auth/default', 'POST'],
       ['/admin/settings/google_auth/restore-default', 'POST'],
     ]) {
@@ -544,6 +561,8 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
     ['/admin/settings/code/resend', 'POST'],
     ['/admin/settings/code/cancel', 'POST'],
     ['/admin/settings/smtp/test', 'POST'],
+    ['/admin/settings/google-auth/test', 'POST'],
+    ['/admin/settings/recaptcha/test', 'POST'],
     ['/admin/settings/google_auth/default', 'POST'],
     ['/admin/settings/google_auth/restore-default', 'POST'],
   ]) {
@@ -590,6 +609,21 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
     body: JSON.stringify({}),
   });
   assert.equal(smtpTestResponse.status, 200);
+
+  for (const path of ['/admin/settings/google-auth/test', '/admin/settings/recaptcha/test']) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-test-user': admin.id,
+        Origin: 'http://localhost:5173',
+        'x-csrf-token': access.csrfToken,
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200, `${path} should test the saved integration`);
+    assert.equal((await response.json()).verified, true);
+  }
 
   const savesBeforeCredentialCode = integrationSaveCount;
   const credentialPayload = {
@@ -724,6 +758,24 @@ test('role permission dependencies expand parents and reject unknown keys', () =
     'view_items', 'search_items', 'filter_items',
   ]);
   assert.throws(() => normalizeRolePermissions('user', ['view_claims']), { status: 400 });
+});
+
+test('admin MFA routes require an admin session and CSRF on writes', async () => {
+  const nonAdmin = await fetch(`${baseUrl}/admin/mfa`, {
+    headers: { 'x-test-user': user.id },
+  });
+  assert.equal(nonAdmin.status, 403);
+
+  const missingCsrf = await fetch(`${baseUrl}/admin/mfa/enrollment/start`, {
+    method: 'POST',
+    headers: {
+      'x-test-user': admin.id,
+      Origin: 'http://localhost:5173',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  assert.equal(missingCsrf.status, 403);
 });
 
 test('admin role permission save is audited and server-normalizes dependencies', async () => {

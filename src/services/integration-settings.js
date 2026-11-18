@@ -18,6 +18,24 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
   const key = parseEncryptionKey(encryptionKey);
   const settings = database.collection('integration_settings');
 
+  function encryptSecret(value) {
+    if (typeof value !== 'string' || !value) throw new Error('A non-empty secret is required.');
+    return encryptValue(value, key);
+  }
+
+  function decryptSecret(value) {
+    return decryptValue(value, key);
+  }
+
+  function selfTestEncryption() {
+    const probe = randomBytes(32).toString('base64url');
+    return decryptValue(encryptValue(probe, key), key) === probe;
+  }
+
+  function hashForRateLimit(value) {
+    return createHmac('sha256', key).update(String(value)).digest('hex');
+  }
+
   async function getIntegration(integrationId) {
     const definition = integrations[integrationId];
     if (!definition) throw new Error('Unknown integration.');
@@ -275,6 +293,12 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         && nextValues.pickup_open_time >= nextValues.pickup_close_time) {
         fieldErrors.pickup_close_time = 'Pickup closing time must be later than opening time.';
       }
+      if (id === 'admin_mfa') {
+        if (current.enabled && !submitted.enabled) credentialFields.push('enabled');
+        if (current.settings.require_for_all_admins && !nextValues.require_for_all_admins) {
+          credentialFields.push('require_for_all_admins');
+        }
+      }
       if (Object.keys(fieldErrors).length) errors[id] = fieldErrors;
 
       const enabledChanged = submitted.enabled !== current.enabled;
@@ -300,7 +324,10 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     const credentialChanges = updates.flatMap(({ id, credentialFields }) => (
       credentialFields.length ? [{ integration: id, fields: credentialFields }] : []
     ));
-    const changes = updates.map(({ id, changedFields }) => ({ integration: id, fields: changedFields }));
+    const changes = updates.map(({ id, changedFields, credentialFields }) => ({
+      integration: id,
+      fields: [...changedFields, ...credentialFields.filter((name) => !changedFields.includes(name))],
+    }));
     const canonical = updates.map(({ id, enabled, values, changedFields }) => ({
       id,
       enabled,
@@ -497,6 +524,10 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     getIntegration,
     getIntegrationLabel,
     getAdminIntegrations,
+    encryptSecret,
+    decryptSecret,
+    selfTestEncryption,
+    hashForRateLimit,
     recordIntegrationFailure,
     recordIntegrationSuccess,
     claimIntegrationFailureAudit,
@@ -578,6 +609,8 @@ function validateField(field, raw) {
   } else if (field.format === 'port'
     && (!/^\d{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 65535)) {
     return { error: 'Enter a port between 1 and 65535.' };
+  } else if (field.format === 'mfa_window' && !/^[01]$/.test(value)) {
+    return { error: 'Choose a tolerance of 0 or 1 time step.' };
   } else if (field.format === 'sender_email'
     && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) {
     return { error: 'Enter a valid sender email address.' };

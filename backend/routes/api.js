@@ -1,5 +1,5 @@
 const express = require('express');
-const { createAuthGuards } = require('../middlewares/session-auth');
+const { createAuthGuards, createAdminMfaSessionGuard } = require('../middlewares/session-auth');
 const { createRolePermissionGuard } = require('../middlewares/role-permissions');
 const { createAuthController } = require('../controllers/auth-controller');
 const { createItemsController } = require('../controllers/items-controller');
@@ -20,6 +20,7 @@ const { createAdminUsersRoutes } = require('./admin/users.routes');
 const { createAdminItemsRoutes } = require('./admin/items.routes');
 const { createAdminClaimsRoutes } = require('./admin/claims.routes');
 const { createAdminSettingsRoutes } = require('./admin/settings.routes');
+const { createAdminMfaRoutes } = require('./admin/mfa.routes');
 const { createAdminSystemRecordsRoutes } = require('./admin/system-records.routes');
 const { createAdminRolePermissionsRoutes } = require('./admin/role-permissions.routes');
 
@@ -45,6 +46,7 @@ function createApiRouter({ services, frontendOrigin }) {
       googleOAuth: services.googleOAuth,
       recaptcha: services.recaptcha,
       integrationSettings: services.integrationSettings,
+      adminMfa: services.adminMfa,
       notifications: services.notifications,
       frontendOrigin,
       audit: services.audit,
@@ -68,14 +70,19 @@ function createApiRouter({ services, frontendOrigin }) {
       notifications: services.notifications,
       integrationSettings: services.integrationSettings,
       integrationSecurity: services.integrationSecurity,
+      adminMfa: services.adminMfa,
+      googleOAuth: services.googleOAuth,
+      recaptcha: services.recaptcha,
       googleCalendar: services.googleCalendar,
       email: services.email,
       audit: services.audit,
     }),
   };
 
+  router.use(createAdminMfaSessionGuard(services.adminMfa));
   router.use('/', createHealthRoutes());
-  router.use('/auth', createAuthRoutes({ controllers }));
+  router.use('/auth', createAuthRoutes({ controllers, frontendOrigin }));
+  router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin }));
   router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin }));
   router.use('/claims', createClaimsRoutes({ controllers, guards }));
   router.use('/profile', createProfileRoutes({ controllers, guards }));

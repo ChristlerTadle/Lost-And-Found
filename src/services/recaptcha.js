@@ -4,6 +4,42 @@ function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch, callInteg
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required to verify reCAPTCHA responses.');
 
   return {
+    async testConnection(auditContext) {
+      const integration = await getIntegration('recaptcha');
+      if (!integration.configured || !integration.settings.secret_key) {
+        const error = new Error('Configure all required saved reCAPTCHA fields before testing.');
+        error.status = 400;
+        throw error;
+      }
+
+      const body = new URLSearchParams({
+        secret: integration.settings.secret_key,
+        response: 'integration-connection-test',
+      });
+      return callIntegration('recaptcha', async ({ signal }) => {
+        const response = await fetchImpl('https://www.google.com/recaptcha/api/siteverify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+          signal,
+        });
+        if (!response.ok) throw providerFailure('provider_error');
+
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw providerFailure('provider_error');
+        }
+        const errors = Array.isArray(result['error-codes']) ? result['error-codes'] : [];
+        if (errors.some((code) => ['invalid-input-secret', 'missing-input-secret'].includes(code))) {
+          throw providerFailure('invalid_credentials');
+        }
+        if (typeof result.success !== 'boolean') throw providerFailure('provider_error');
+        return true;
+      }, auditContext);
+    },
+
     async verifyResponse(token, remoteIp, auditContext) {
       const integration = await getIntegration('recaptcha');
       if (!integration.enabled) return false;

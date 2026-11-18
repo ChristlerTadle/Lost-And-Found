@@ -14,6 +14,7 @@ async function adminDashboard() {
     ['shield', 'Role Permissions', 'Manage User and Staff access', 'admin-role-permissions'],
     ['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records'],
     ['settings', 'Settings', 'Sign-in integrations', 'admin-settings'],
+    ['shield', 'Security', 'Set up an authenticator', 'admin-security'],
   ];
   return `<main class="container admin-overview">${pageHeader('Admin Dashboard', 'System overview — Bukidnon State University Lost & Found')}
     <section class="admin-overview-stats" aria-label="System statistics">
@@ -255,6 +256,7 @@ async function adminSettings() {
     recaptcha: 'Require users to complete a reCAPTCHA challenge before signing in or creating an account.',
     smtp: 'Send password reset messages using this SMTP server.',
     google_calendar: 'Schedule item pickups on one shared organization calendar. Share only the dedicated pickup calendar with the service account.',
+    admin_mfa: 'Require administrator sign-in codes from an authenticator app. Users and Staff are not affected.',
   };
   const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}"
     data-using-default="${integration.usingDefault}" data-has-default="${integration.hasDefault}"
@@ -278,10 +280,14 @@ async function adminSettings() {
       <div class="integration-setting-actions">
         <button class="button button-outline" type="button" data-action="integration-toggle" data-enabled="${integration.enabled}">
           ${integration.enabled ? 'Disable' : 'Enable'}</button>
+        ${integration.id === 'google_auth' || integration.id === 'recaptcha' ? '<button class="button button-outline" type="button" data-action="integration-test">Test Connection</button>' : ''}
         ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test saved SMTP</button>' : ''}
         ${integration.id === 'google_calendar' ? '<button class="button button-outline" type="button" data-action="calendar-test">Test Connection</button>' : ''}
+        ${integration.id === 'admin_mfa' ? '<button class="button button-outline" type="button" data-action="admin-mfa-test">Self-test</button>' : ''}
       </div>
     </div>
+    ${integration.id === 'admin_mfa' ? `<p class="admin-mfa-enrollment-count">${integration.enrollmentSummary?.enrolledAdmins || 0} of ${integration.enrollmentSummary?.totalAdmins || 0} administrators enrolled</p>
+      <p class="admin-mfa-fixed-settings">Authenticator codes: 6 digits · 30-second period · SHA-1 (fixed)</p>` : ''}
     <details class="integration-fields-disclosure">
       <summary class="button button-outline">Change keys / settings</summary>
       <div class="integration-fields">${integration.fields.map((field) => `<div class="field">
@@ -294,7 +300,7 @@ async function adminSettings() {
               ${field.required ? 'data-required="true" required' : ''} autocomplete="off"></textarea>`
             : `<input class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="${h(field.secret ? 'password' : field.type)}"
               value="${field.secret ? '' : h(field.value)}" placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
-              ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? 'inputmode="numeric"' : ''} autocomplete="off">`}
+              ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? `inputmode="numeric" min="${field.name === 'window' && integration.id === 'admin_mfa' ? '0' : ''}" max="${field.name === 'window' && integration.id === 'admin_mfa' ? '1' : ''}" step="${field.name === 'window' && integration.id === 'admin_mfa' ? '1' : ''}"` : ''} autocomplete="off">`}
         <small class="integration-field-error" data-field-error="${h(field.name)}" role="alert"></small>
       </div>`).join('')}</div>
     </details>
@@ -357,6 +363,9 @@ async function adminSystemRecords() {
     'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
     'integration.set_default', 'integration.failure',
     'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
+    'admin.mfa_enroll_start', 'admin.mfa_enrolled', 'admin.mfa_verify_success',
+    'admin.mfa_verify_failed', 'admin.mfa_locked', 'admin.mfa_recovery_used',
+    'admin.mfa_recovery_regenerated', 'admin.mfa_reset',
   ];
   const rows = records.map((record) => {
     const result = ['integration.unlock_failed', 'integration.code_failed'].includes(record.action)

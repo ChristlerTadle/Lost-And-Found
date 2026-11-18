@@ -1,6 +1,6 @@
 const API = window.API_BASE;
 const app = document.querySelector('#app');
-const sessionInfo = { user: null, rolePermissions: [], categories: [], locations: [], unreadNotifications: 0, csrfToken: '', googleAuth: { active: false }, recaptcha: { active: false } };
+const sessionInfo = { user: null, rolePermissions: [], categories: [], locations: [], unreadNotifications: 0, csrfToken: '', googleAuth: { active: false }, recaptcha: { active: false }, pendingAdminMfa: false, adminMfaSetupRequired: false, adminMfaReauthRequired: false };
 
 const h = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -37,8 +37,14 @@ async function request(path, options = {}) {
   });
   const data = response.status === 204 ? {} : await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401) sessionInfo.user = null;
+    if (response.status === 401) {
+      sessionInfo.user = null;
+      sessionInfo.pendingAdminMfa = false;
+      sessionInfo.adminMfaSetupRequired = false;
+      sessionInfo.adminMfaReauthRequired = false;
+    }
     const error = new Error(data.error || `Request failed (${response.status}).`);
+    error.status = response.status;
     error.fieldErrors = data.fieldErrors;
     throw error;
   }
@@ -123,10 +129,12 @@ function shell(content, page) {
   const user = sessionInfo.user;
   if (user) {
     const navigation = user.role_name === 'admin'
-      ? [['admin-dashboard', 'Dashboard', 'home'], ['admin-users', 'User Management', 'user'], ['admin-role-permissions', 'Role Permissions', 'shield'], ['admin-system-records', 'System Records', 'file'], ['admin-items', 'All Items', 'file'],
-        ['admin-claims', 'All Claims', 'clipboard'], ['admin-inventory', 'Inventory Report', 'clipboard'],
-        ['admin-add-user', 'Add User', 'user'], ['admin-settings', 'Settings', 'settings'], ['items', 'Browse Items', 'file'],
-        ['notifications', 'Notifications', 'bell'], ['profile', 'Profile', 'user']]
+      ? (sessionInfo.adminMfaSetupRequired
+        ? [['admin-security', 'Security', 'shield']]
+        : [['admin-dashboard', 'Dashboard', 'home'], ['admin-users', 'User Management', 'user'], ['admin-role-permissions', 'Role Permissions', 'shield'], ['admin-system-records', 'System Records', 'file'], ['admin-items', 'All Items', 'file'],
+          ['admin-claims', 'All Claims', 'clipboard'], ['admin-inventory', 'Inventory Report', 'clipboard'],
+          ['admin-add-user', 'Add User', 'user'], ['admin-settings', 'Settings', 'settings'], ['admin-security', 'Security', 'shield'], ['items', 'Browse Items', 'file'],
+          ['notifications', 'Notifications', 'bell'], ['profile', 'Profile', 'user']])
       : user.role_name === 'staff'
         ? [
           ...(hasPermission('view_staff_dashboard') ? [['staff-dashboard', 'Dashboard', 'home']] : []),

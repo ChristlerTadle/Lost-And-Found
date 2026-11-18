@@ -132,7 +132,7 @@ test('environment migration encrypts secrets, preserves existing toggles, initia
 
   const beforeRerun = state.writeCount;
   const second = await integrations.migrateEnvironmentValues();
-  assert.deepEqual(second.map(({ fieldsMigrated }) => fieldsMigrated), [[], [], [], []]);
+  assert.deepEqual(second.map(({ fieldsMigrated }) => fieldsMigrated), [[], [], [], [], []]);
   assert.equal(state.writeCount, beforeRerun);
   assert.equal((await integrations.getIntegration('google_auth')).enabled, true);
   assert.equal((await integrations.getIntegration('recaptcha')).enabled, false);
@@ -527,4 +527,61 @@ test('Google invalid_grant is user-caused while rejected client credentials upda
   assert.equal(google.health.last_error_code, 'invalid_credentials');
   assert.equal(JSON.stringify(auditEvents).includes('private-secret'), false);
   assert.deepEqual(auditEvents.map(({ new_value }) => new_value), [{ code: 'invalid_credentials' }]);
+});
+
+test('Google OAuth connection test validates saved credentials without completing sign-in', async () => {
+  const state = createDatabase([{ _id: 'google_auth', enabled: true }]);
+  const integrationSettings = createIntegrationSettings(state.database, { encryptionKey: KEY, env: ENV });
+  await integrationSettings.migrateEnvironmentValues();
+  const auditEvents = [];
+  const audit = { async logAction(event) { auditEvents.push(event); } };
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
+  let request;
+  const google = createGoogleOAuth(
+    integrationSettings.getIntegration,
+    callIntegration,
+    async (url, options) => {
+      request = { url, options };
+      return { ok: false, async json() { return { error: 'invalid_grant' }; } };
+    },
+  );
+
+  assert.equal(await google.testConnection(), true);
+  assert.equal(request.url, 'https://oauth2.googleapis.com/token');
+  assert.deepEqual(Object.fromEntries(request.options.body), {
+    client_id: ENV.GOOGLE_CLIENT_ID,
+    client_secret: ENV.GOOGLE_CLIENT_SECRET,
+    code: 'integration-connection-test',
+    code_verifier: 'integration-connection-test',
+    grant_type: 'authorization_code',
+    redirect_uri: ENV.API_GOOGLE_REDIRECT_URI,
+  });
+  assert.ok(request.options.signal instanceof AbortSignal);
+  assert.ok((await integrationSettings.getAdminIntegrations()).google_auth.health.last_success_at);
+  assert.equal(auditEvents.length, 0);
+
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const invalidClient = createGoogleOAuth(
+      integrationSettings.getIntegration,
+      callIntegration,
+      async () => ({
+        ok: false,
+        async json() {
+          return { error: 'invalid_client', error_description: ENV.GOOGLE_CLIENT_SECRET };
+        },
+      }),
+    );
+    await assert.rejects(invalidClient.testConnection(), (error) => (
+      error instanceof IntegrationError && error.status === 503
+    ));
+  } finally {
+    console.error = originalError;
+  }
+
+  const failing = (await integrationSettings.getAdminIntegrations()).google_auth;
+  assert.equal(failing.status, 'Failing');
+  assert.equal(failing.health.last_error_code, 'invalid_credentials');
+  assert.equal(JSON.stringify(auditEvents).includes(ENV.GOOGLE_CLIENT_SECRET), false);
 });

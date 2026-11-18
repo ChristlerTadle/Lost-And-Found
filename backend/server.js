@@ -7,6 +7,7 @@ const { connectDatabase, closeDatabase, getMongoClient } = require('../src/db');
 const { createAuthService } = require('../src/services/auth');
 const { createGoogleOAuth } = require('../src/services/google-oauth');
 const { createIntegrationSettings } = require('../src/services/integration-settings');
+const { createAdminMfa } = require('../src/services/admin-mfa');
 const { createIntegrationCaller } = require('../src/services/integration-calls');
 const { createIntegrationSecurity } = require('../src/services/integration-security');
 const { createRecaptcha } = require('../src/services/recaptcha');
@@ -24,6 +25,14 @@ const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 
 async function start() {
   const integrationEncryptionKey = parseEncryptionKey(config.integrationEncryptionKey);
+  if (config.adminMfaDisabled) {
+    console.warn('WARNING: ADMIN_MFA_DISABLED=true; admin MFA login enforcement is bypassed.');
+  }
+  if (config.adminMfaRateLimitDisabled) {
+    console.warn('WARNING: ADMIN_MFA_RATE_LIMIT_DISABLED=true; admin MFA attempt limits are bypassed for testing.');
+  } else if (config.adminMfaRateLimitBypassRequested) {
+    console.warn('WARNING: ADMIN_MFA_RATE_LIMIT_DISABLED is ignored in production; admin MFA attempt limits remain enabled.');
+  }
   const database = await connectDatabase();
   const notificationService = createNotificationService(database);
   const integrationSettings = createIntegrationSettings(database, {
@@ -37,6 +46,10 @@ async function start() {
     codeRequestLimit: config.integrationCodeRequestLimit,
     codeRequestWindowMs: config.integrationCodeRequestWindowMs,
     codeResendMs: config.integrationCodeResendMs,
+  });
+  const adminMfa = createAdminMfa(database, integrationSettings, {
+    disabled: config.adminMfaDisabled,
+    rateLimitDisabled: config.adminMfaRateLimitDisabled,
   });
   const audit = createAuditLogService(database, getMongoClient());
   const callIntegration = createIntegrationCaller({ integrationSettings, audit });
@@ -57,6 +70,7 @@ async function start() {
     recaptcha: createRecaptcha(integrationSettings.getIntegration, globalThis.fetch, callIntegration),
     integrationSettings,
     integrationSecurity,
+    adminMfa,
     callIntegration,
     email,
     googleCalendar,

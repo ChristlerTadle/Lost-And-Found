@@ -18,7 +18,10 @@ function createAdminSettingsRoutes({ controllers, guards, frontendOrigin, integr
   router.post('/settings/:integrationId/default', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsDefault));
   router.post('/settings/:integrationId/restore-default', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsRestoreDefault));
   router.post('/settings/smtp/test', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsSmtpTest));
+  router.post('/settings/google-auth/test', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsGoogleAuthTest));
+  router.post('/settings/recaptcha/test', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsRecaptchaTest));
   router.post('/settings/google-calendar/test', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsGoogleCalendarTest));
+  router.post('/settings/admin-mfa/test', admin, unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsAdminMfaTest));
   return router;
 }
 

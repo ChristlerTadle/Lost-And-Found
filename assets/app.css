@@ -500,6 +500,26 @@ svg { flex-shrink: 0; }
 .pickup-schedule-form > .button { justify-self: start; }
 .pickup-schedule-alternatives { display: grid; gap: 8px; margin-top: 12px; }
 .pickup-schedule-alternatives > p { font-size: 12px; margin: 0; }
+.admin-mfa-page { max-width: 760px; }
+.admin-mfa-verify-page { max-width: 560px; }
+.admin-mfa-verify-page .page-header { margin-bottom: 16px; }
+.admin-mfa-card { display: grid; gap: 18px; padding: 22px; }
+.admin-mfa-verify-card { gap: 12px; padding: 18px; }
+.admin-mfa-verify-card .form-grid { gap: 12px; }
+.admin-mfa-verify-card .integration-settings-note { font-size: 12px; }
+.admin-mfa-card > .admin-mfa-status { color: var(--muted); line-height: 1.55; }
+.admin-mfa-enrollment, .admin-mfa-recovery { border-top: 1px solid var(--line); display: grid; gap: 12px; padding-top: 18px; }
+.admin-mfa-enrollment h2, .admin-mfa-recovery h2, .admin-mfa-recovery-codes h2 { color: #1f2937; font-size: 16px; }
+.admin-mfa-qr { border-top: 1px solid var(--line); display: grid; gap: 12px; justify-items: start; padding-top: 16px; }
+.admin-mfa-qr > p, .admin-mfa-recovery > p, .admin-mfa-recovery-codes > p { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.admin-mfa-qr img { background: #fff; border: 1px solid var(--line); border-radius: 8px; height: 220px; padding: 8px; width: 220px; }
+.admin-mfa-qr > code { background: #f3f6f3; border-radius: 6px; font-size: 15px; letter-spacing: .08em; overflow-wrap: anywhere; padding: 10px 12px; }
+.admin-mfa-recovery-codes { background: var(--green-soft); border: 1px solid #cfe7d2; border-radius: 10px; display: grid; gap: 10px; padding: 16px; }
+.admin-mfa-recovery-codes ol { columns: 2; font-family: ui-monospace, Consolas, monospace; line-height: 1.8; padding-left: 24px; }
+.admin-mfa-recovery-codes code { font-size: 12px; }
+.admin-mfa-enrollment-count, .admin-mfa-fixed-settings { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 10px; }
+.admin-mfa-fixed-settings { margin-top: 4px; }
+.integration-setting[data-integration="admin_mfa"] .integration-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .admin-dashboard { max-width: 1024px; }
 .admin-overview { max-width: 1120px; }
 .admin-overview-header { margin-bottom: 18px; }
@@ -964,6 +984,8 @@ td.right, th.right { text-align: right; }
   .staff-item-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .staff-review-notes { grid-template-columns: 1fr; }
   .staff-private-details, .staff-claim-comparison { grid-template-columns: 1fr; }
+  .admin-mfa-recovery-codes ol { columns: 1; }
+  .integration-setting[data-integration="admin_mfa"] .integration-fields { grid-template-columns: 1fr; }
   .pickup-schedule-form .form-row { grid-template-columns: 1fr; }
   .pickup-schedule-form > .button { justify-self: stretch; }
   .staff-status-editor { align-items: stretch; flex-direction: column; gap: 14px; }

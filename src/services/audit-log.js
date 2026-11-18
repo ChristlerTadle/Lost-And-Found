@@ -10,6 +10,9 @@ const ACTIONS = new Set([
   'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
   'integration.set_default', 'integration.failure',
   'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
+  'admin.mfa_enroll_start', 'admin.mfa_enrolled', 'admin.mfa_verify_success',
+  'admin.mfa_verify_failed', 'admin.mfa_locked', 'admin.mfa_recovery_used',
+  'admin.mfa_recovery_regenerated', 'admin.mfa_reset',
 ]);
 
 function createAuditLogService(database, client) {

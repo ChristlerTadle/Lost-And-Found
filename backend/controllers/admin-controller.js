@@ -12,6 +12,9 @@ function createAdminController({
   notifications,
   integrationSettings,
   integrationSecurity,
+  adminMfa,
+  googleOAuth,
+  recaptcha,
   googleCalendar,
   email,
   audit,
@@ -224,8 +227,13 @@ function createAdminController({
     },
 
     getAdminSettings: async (req, res) => {
+      const [integrations, enrollmentSummary] = await Promise.all([
+        integrationSettings.getAdminIntegrations(),
+        adminMfa.getAdminSummary(),
+      ]);
+      integrations.admin_mfa.enrollmentSummary = enrollmentSummary;
       return res.json({
-        integrations: await integrationSettings.getAdminIntegrations(),
+        integrations,
       });
     },
 
@@ -248,6 +256,13 @@ function createAdminController({
 
     postAdminSettingsCodeResend: async (req, res) => {
       try {
+        const restore = req.session.pendingAdminMfaRestore;
+        if (restore && req.body?.restoreDefault === restore.integrationId) {
+          const result = await sendIntegrationVerificationCode(
+            req, integrationSecurity, integrationSettings, restore.plan, audit,
+          );
+          return res.json({ verificationRequired: true, restoreDefault: restore.integrationId, ...result });
+        }
         const plan = await integrationSettings.prepareIntegrationSave(
           requireSingleIntegration(req.body?.integrations),
         );
@@ -265,11 +280,31 @@ function createAdminController({
 
     postAdminSettingsCodeCancel: async (req, res) => {
       await integrationSecurity.cancelCode({ adminId: req.user.id, sessionId: req.sessionID });
+      delete req.session.pendingAdminMfaRestore;
+      await saveSession(req);
       return res.json({ cancelled: true });
     },
 
     postAdminSettingsCodeVerify: async (req, res) => {
       try {
+        const restore = req.session.pendingAdminMfaRestore;
+        if (restore && req.body?.restoreDefault === restore.integrationId
+          && restore.adminId === String(req.user.id)) {
+          await integrationSecurity.verifyCode({
+            adminId: req.user.id,
+            sessionId: req.sessionID,
+            candidate: req.body?.code,
+            payloadHash: restore.plan.payloadHash,
+            auditContext: requestAuditContext(req, null),
+            audit,
+            changes: restore.plan.changes,
+          });
+          delete req.session.pendingAdminMfaRestore;
+          await saveSession(req);
+          return res.json(await restoreIntegrationDefaultForRequest(
+            req, restore.integrationId, integrationSettings, integrationSecurity, audit,
+          ));
+        }
         const plan = await integrationSettings.prepareIntegrationSave(
           requireSingleIntegration(req.body?.integrations),
         );
@@ -302,40 +337,29 @@ function createAdminController({
     },
 
     postAdminSettingsRestoreDefault: async (req, res) => {
-      const preview = await integrationSettings.getDefaultRestorePreview(req.params.integrationId);
-      let noticeSent = false;
-      let warning = '';
-      if (preview.changedFields.length) {
-        const state = integrationSecurity.configuration();
-        if (state.verificationEmailConfigured) {
-          const names = integrationSettings.getIntegrationLabel(req.params.integrationId);
-          const requester = req.user.full_name || req.user.email || 'Administrator';
-          const fields = preview.changedFields.join(', ');
-          try {
-            await integrationSecurity.sendBootstrapEmail({
-              subject: 'Integration defaults restored',
-              text: [
-                `${names} default settings were restored.`,
-                `Changed fields: ${fields}`,
-                `Requested by: ${requester}`,
-                `Time: ${new Date().toISOString()}`,
-                `IP: ${req.ip || 'Unavailable'}`,
-              ].join('\n'),
-            });
-            noticeSent = true;
-          } catch {
-            const error = new Error('The default was not restored because its notification could not be sent.');
-            error.status = 503;
-            throw error;
-          }
-        } else {
-          warning = state.verificationEmailError;
+      const { integrationId } = req.params;
+      const preview = await integrationSettings.getDefaultRestorePreview(integrationId);
+      if (integrationId === 'admin_mfa' && preview.changedFields.length) {
+        const current = await integrationSettings.getIntegration(integrationId);
+        const plan = await integrationSettings.prepareIntegrationSave({
+          [integrationId]: { enabled: current.enabled, fields: preview.values },
+        });
+        if (plan.credentialChanges.length) {
+          req.session.pendingAdminMfaRestore = {
+            adminId: String(req.user.id),
+            integrationId,
+            plan,
+          };
+          await saveSession(req);
+          const result = await sendIntegrationVerificationCode(
+            req, integrationSecurity, integrationSettings, plan, audit,
+          );
+          return res.json({ verificationRequired: true, restoreDefault: integrationId, ...result });
         }
       }
-      const result = await integrationSettings.restoreIntegrationDefault(
-        req.params.integrationId, audit, requestAuditContext(req, null),
-      );
-      return res.json({ ...result, noticeSent, warning });
+      return res.json(await restoreIntegrationDefaultForRequest(
+        req, integrationId, integrationSettings, integrationSecurity, audit,
+      ));
     },
 
     postAdminSettingsSmtpTest: async (_req, res) => {
@@ -378,6 +402,103 @@ function createAdminController({
         throw safeError;
       }
     },
+
+    postAdminSettingsGoogleAuthTest: async (req, res) => {
+      try {
+        await googleOAuth.testConnection(requestAuditContext(req, null));
+        const result = await integrationSettings.setIntegrationDefault(
+          'google_auth', audit, requestAuditContext(req, null),
+        );
+        return res.json({ verified: true, ...result });
+      } catch (error) {
+        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
+          ? 'Google sign-in credentials were rejected. Check the client ID, client secret, and callback URL.'
+          : error instanceof IntegrationError
+            ? error.message
+            : error.status === 400
+              ? error.message
+              : 'Google sign-in connection could not be verified. Check the saved credentials and callback URL.';
+        const safeError = new Error(safeMessage);
+        safeError.status = error.status || 503;
+        throw safeError;
+      }
+    },
+
+    postAdminSettingsRecaptchaTest: async (req, res) => {
+      try {
+        await recaptcha.testConnection(requestAuditContext(req, null));
+        const result = await integrationSettings.setIntegrationDefault(
+          'recaptcha', audit, requestAuditContext(req, null),
+        );
+        return res.json({ verified: true, ...result });
+      } catch (error) {
+        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
+          ? 'reCAPTCHA secret key was rejected. Check the saved secret key.'
+          : error instanceof IntegrationError
+            ? error.message
+            : error.status === 400
+              ? error.message
+              : 'reCAPTCHA connection could not be verified. Check the saved secret key and provider availability.';
+        const safeError = new Error(safeMessage);
+        safeError.status = error.status || 503;
+        throw safeError;
+      }
+    },
+
+    postAdminSettingsAdminMfaTest: async (_req, res) => {
+      await adminMfa.selfTest();
+      return res.json({ verified: true });
+    },
+
+    getAdminMfaStatus: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      return res.json(await adminMfa.getStatus(req.user.id));
+    },
+
+    postAdminMfaEnrollmentStart: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const result = await adminMfa.startEnrollment({
+        adminId: req.user.id,
+        ipAddress: req.ip,
+        code: req.body?.code,
+        audit,
+      });
+      return res.json(result);
+    },
+
+    postAdminMfaEnrollmentConfirm: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const result = await adminMfa.confirmEnrollment({
+        adminId: req.user.id,
+        ipAddress: req.ip,
+        code: req.body?.code,
+        audit,
+      });
+      req.session.adminMfaVerified = String(req.user.id);
+      delete req.session.adminMfaSetupRequired;
+      const completedLogin = req.session.adminMfaLoginPending === true;
+      delete req.session.adminMfaLoginPending;
+      await saveSession(req);
+      if (completedLogin) {
+        await audit.logAction(requestAuditContext(req, 'auth.login', {
+          actor_id: req.user.id,
+          actor_role: 'admin',
+          target_type: 'user',
+          target_id: req.user.id,
+        }));
+      }
+      return res.json(result);
+    },
+
+    postAdminMfaRecoveryRegenerate: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      return res.json(await adminMfa.regenerateRecoveryCodes({
+        adminId: req.user.id,
+        ipAddress: req.ip,
+        code: req.body?.code,
+        audit,
+      }));
+    },
   };
 }
 
@@ -397,6 +518,43 @@ async function sendIntegrationVerificationCode(req, integrationSecurity, integra
     auditContext: requestAuditContext(req, null),
     audit,
   });
+}
+
+async function restoreIntegrationDefaultForRequest(req, integrationId, integrationSettings, integrationSecurity, audit) {
+  const preview = await integrationSettings.getDefaultRestorePreview(integrationId);
+  let noticeSent = false;
+  let warning = '';
+  if (preview.changedFields.length) {
+    const state = integrationSecurity.configuration();
+    if (state.verificationEmailConfigured) {
+      const names = integrationSettings.getIntegrationLabel(integrationId);
+      const requester = req.user.full_name || req.user.email || 'Administrator';
+      const fields = preview.changedFields.join(', ');
+      try {
+        await integrationSecurity.sendBootstrapEmail({
+          subject: 'Integration defaults restored',
+          text: [
+            `${names} default settings were restored.`,
+            `Changed fields: ${fields}`,
+            `Requested by: ${requester}`,
+            `Time: ${new Date().toISOString()}`,
+            `IP: ${req.ip || 'Unavailable'}`,
+          ].join('\n'),
+        });
+        noticeSent = true;
+      } catch {
+        const error = new Error('The default was not restored because its notification could not be sent.');
+        error.status = 503;
+        throw error;
+      }
+    } else {
+      warning = state.verificationEmailError;
+    }
+  }
+  const result = await integrationSettings.restoreIntegrationDefault(
+    integrationId, audit, requestAuditContext(req, null),
+  );
+  return { ...result, noticeSent, warning };
 }
 
 function integrationSettingsError(res, error, fallbackMessage) {

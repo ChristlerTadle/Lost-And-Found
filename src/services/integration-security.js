@@ -256,9 +256,20 @@ function createIntegrationSecurity(database, {
       });
       await transporter.sendMail({ from: smtp.from, to, subject, text });
     } catch (error) {
-      console.error('Bootstrap email delivery failed.');
+      const code = safeMailErrorCode(error?.code);
+      const command = safeMailCommand(error?.command);
+      const responseCode = Number.isInteger(error?.responseCode) ? error.responseCode : null;
+      console.error('Bootstrap email delivery failed.', JSON.stringify({ code, command, responseCode }));
       throw error;
     }
+  }
+
+  function safeMailErrorCode(value) {
+    return typeof value === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(value) ? value : null;
+  }
+
+  function safeMailCommand(value) {
+    return typeof value === 'string' && /^[A-Za-z0-9 _-]{1,40}$/.test(value) ? value : null;
   }
 
   function keyedHash(value) {

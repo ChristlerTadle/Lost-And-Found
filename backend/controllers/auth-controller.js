@@ -4,7 +4,7 @@ const { optionalUser, startSession, saveSession, destroySession } = require('../
 const { requestAuditContext } = require('../../src/services/audit-log');
 const { IntegrationError } = require('../../src/services/integration-calls');
 
-function createAuthController({ auth, rolePermissions, email, googleOAuth, recaptcha, integrationSettings, notifications, frontendOrigin, audit }) {
+function createAuthController({ auth, rolePermissions, email, googleOAuth, recaptcha, integrationSettings, adminMfa, notifications, frontendOrigin, audit }) {
   const startGoogleAuth = async (req, res) => {
     await verifyRecaptcha(req, recaptcha, integrationSettings);
     const google = await integrationSettings.getIntegration('google_auth');
@@ -22,10 +22,25 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
 
   return {
     getAuthMe: async (req, res) => {
-        const user = await optionalUser(req);
+      res.set('Cache-Control', 'no-store');
+      const user = await optionalUser(req);
       if (!req.session.csrfToken) {
         req.session.csrfToken = randomBytes(32).toString('base64url');
         await saveSession(req);
+      }
+      const pendingMfa = req.session.pendingAdminMfa;
+      const pendingMfaActive = Boolean(pendingMfa && pendingMfa.expiresAt > Date.now());
+      if (pendingMfa && !pendingMfaActive) {
+        delete req.session.pendingAdminMfa;
+        await saveSession(req);
+      }
+      let adminMfaSetupRequired = false;
+      let adminMfaReauthRequired = false;
+      if (user?.role_name === 'admin') {
+        const action = await adminMfa.getLoginAction(user, req.ip);
+        adminMfaSetupRequired = action.action === 'enroll';
+        adminMfaReauthRequired = action.action === 'verify'
+          && req.session.adminMfaVerified !== String(user.id);
       }
       const permissions = user && user.role_name !== 'admin'
         ? await rolePermissions.findRolePermissions(user.role_name) : [];
@@ -46,7 +61,10 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
           siteKey: recaptchaIntegration.active ? recaptchaIntegration.settings.site_key : '',
         };
         return res.json({
-          user,
+          user: adminMfaReauthRequired ? null : user,
+          pendingAdminMfa: pendingMfaActive,
+          adminMfaSetupRequired,
+          adminMfaReauthRequired,
           rolePermissions: permissions,
           unreadNotifications,
         googleAuth,
@@ -79,21 +97,56 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
         }));
         throw error;
       }
-      await startSession(req, user);
-      if (['admin', 'staff'].includes(user.role_name)) {
-        await logAuthEvent(audit, requestAuditContext(req, 'auth.login', {
-          actor_id: user.id,
-          actor_role: user.role_name,
-          target_type: 'user',
-          target_id: user.id,
-        }));
+      const result = await beginLoginSession(req, user, adminMfa);
+      if (result.mfaRequired || result.adminMfaSetupRequired) {
+        if (result.adminMfaSetupRequired) {
+          req.session.adminMfaLoginPending = true;
+          await saveSession(req);
+        }
+        return res.json(result);
       }
+      await logSuccessfulLogin(audit, req, user);
       return res.json({ user });
     },
 
     postAuthLogout: async (req, res) => {
         await destroySession(req);
       return res.json({ message: 'Signed out.' });
+    },
+
+    postAuthMfaVerify: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const pending = req.session.pendingAdminMfa;
+      if (!pending) {
+        const error = new Error('No administrator verification is pending.');
+        error.status = 401;
+        throw error;
+      }
+      if (!Number.isFinite(pending.expiresAt) || pending.expiresAt <= Date.now()) {
+        await destroySession(req);
+        const error = new Error('This sign-in attempt expired. Sign in again.');
+        error.status = 401;
+        throw error;
+      }
+      const user = await auth.findActiveSessionUser(pending.userId);
+      if (!user || user.role_name !== 'admin') {
+        await destroySession(req);
+        const error = new Error('This sign-in attempt is no longer valid. Sign in again.');
+        error.status = 401;
+        throw error;
+      }
+      await adminMfa.verifyLogin({
+        adminId: user.id,
+        ipAddress: req.ip,
+        code: req.body?.code,
+        audit,
+      });
+      await startSession(req, user);
+      req.session.adminMfaVerified = String(user.id);
+      req.session.csrfToken = randomBytes(32).toString('base64url');
+      await saveSession(req);
+      await logSuccessfulLogin(audit, req, user);
+      return res.json({ user });
     },
 
     postAuthForgotpassword: async (req, res) => {
@@ -138,15 +191,16 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
           nonce: pending.nonce,
         }, requestAuditContext(req, null));
         const user = await auth.authenticateGoogle(profile);
-        await startSession(req, user);
-        if (['admin', 'staff'].includes(user.role_name)) {
-          await logAuthEvent(audit, requestAuditContext(req, 'auth.login', {
-            actor_id: user.id,
-            actor_role: user.role_name,
-            target_type: 'user',
-            target_id: user.id,
-          }));
+        const result = await beginLoginSession(req, user, adminMfa);
+        if (result.adminMfaSetupRequired) {
+          req.session.adminMfaLoginPending = true;
+          await saveSession(req);
         }
+        if (!result.mfaRequired && !result.adminMfaSetupRequired) {
+          await logSuccessfulLogin(audit, req, user);
+        }
+        if (result.mfaRequired) return res.redirect(`${frontendOrigin}/?page=admin-mfa-verify`);
+        if (result.adminMfaSetupRequired) return res.redirect(`${frontendOrigin}/?page=admin-security`);
         return res.redirect(frontendOrigin);
       } catch (error) {
         await logAuthEvent(audit, requestAuditContext(req, 'auth.login_failed', {
@@ -161,6 +215,47 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
       }
     },
   };
+}
+
+async function beginLoginSession(req, user, adminMfa) {
+  const { action } = await adminMfa.getLoginAction(user, req.ip);
+  if (action === 'locked') {
+    const error = new Error('The authentication code could not be verified. Try again later.');
+    error.status = 429;
+    throw error;
+  }
+  if (action === 'verify') {
+    await new Promise((resolve, reject) => {
+      req.session.regenerate((error) => {
+        if (error) return reject(error);
+        req.session.pendingAdminMfa = {
+          userId: String(user.id),
+          attemptId: randomBytes(24).toString('base64url'),
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        };
+        req.session.csrfToken = randomBytes(32).toString('base64url');
+        req.session.save((saveError) => (saveError ? reject(saveError) : resolve()));
+      });
+    });
+    return { mfaRequired: true };
+  }
+  await startSession(req, user);
+  if (action === 'enroll') {
+    req.session.adminMfaSetupRequired = String(user.id);
+    req.session.csrfToken = randomBytes(32).toString('base64url');
+    return { user, adminMfaSetupRequired: true };
+  }
+  return { user };
+}
+
+async function logSuccessfulLogin(audit, req, user) {
+  if (!['admin', 'staff'].includes(user.role_name)) return;
+  await logAuthEvent(audit, requestAuditContext(req, 'auth.login', {
+    actor_id: user.id,
+    actor_role: user.role_name,
+    target_type: 'user',
+    target_id: user.id,
+  }));
 }
 
 async function verifyRecaptcha(req, recaptcha, integrationSettings) {

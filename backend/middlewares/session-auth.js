@@ -63,6 +63,22 @@ function createAuthGuards(auth) {
   return { authenticated, requireRole };
 }
 
+function createAdminMfaSessionGuard(adminMfa) {
+  return asyncRoute(async (req, _res, next) => {
+    const user = await optionalUser(req);
+    if (user?.role_name === 'admin'
+      && !(await adminMfa.canAccessAdminRoutes(user, req.session, req.ip))) {
+      const mfaRoute = req.path === '/admin/mfa' || req.path.startsWith('/admin/mfa/');
+      const sessionRoute = req.path === '/auth' || req.path.startsWith('/auth/');
+      if (mfaRoute || sessionRoute) return next();
+      const error = new Error('Complete administrator MFA setup or verification before accessing this page.');
+      error.status = 403;
+      throw error;
+    }
+    next();
+  });
+}
+
 module.exports = {
   optionalUser,
   currentUser,
@@ -71,4 +87,5 @@ module.exports = {
   saveSession,
   destroySession,
   createAuthGuards,
+  createAdminMfaSessionGuard,
 };

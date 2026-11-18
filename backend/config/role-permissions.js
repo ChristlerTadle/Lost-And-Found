@@ -42,6 +42,7 @@ const ROLE_PERMISSION_EXEMPT_ROUTES = [
   { method: 'GET', path: '/auth/me', reason: 'Session and role-permission bootstrap' },
   { method: 'POST', path: '/auth/register', reason: 'Account registration' },
   { method: 'POST', path: '/auth/login', reason: 'Password login' },
+  { method: 'POST', path: '/auth/mfa/verify', reason: 'Pending administrator MFA verification' },
   { method: 'POST', path: '/auth/logout', reason: 'Session logout' },
   { method: 'POST', path: '/auth/forgot-password', reason: 'Password-reset request' },
   { method: 'GET', path: '/auth/reset-password/:token', reason: 'Password-reset token check' },
