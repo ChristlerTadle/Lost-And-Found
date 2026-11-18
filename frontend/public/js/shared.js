@@ -74,7 +74,7 @@ function roleLabel(role) {
 }
 
 function hasPermission(permission) {
-  return sessionInfo.user?.role_name === 'admin' || sessionInfo.rolePermissions.includes(permission);
+  return sessionInfo.rolePermissions.includes(permission);
 }
 
 function itemStatusLabel(status, itemType = '') {
@@ -132,10 +132,20 @@ function shell(content, page) {
     const navigation = user.role_name === 'admin'
       ? (sessionInfo.adminMfaSetupRequired
         ? [['admin-security', 'Security', 'shield']]
-        : [['admin-dashboard', 'Dashboard', 'home'], ['admin-users', 'User Management', 'user'], ['admin-system-records', 'System Records', 'file'], ['admin-items', 'All Items', 'file'],
-          ['admin-claims', 'All Claims', 'clipboard'], ['admin-inventory', 'Inventory Report', 'clipboard'],
-          ['admin-add-user', 'Add User', 'user'], ['admin-settings', 'Settings', 'settings'], ['admin-security', 'Security', 'shield'], ['items', 'Browse Items', 'file'],
-          ['notifications', 'Notifications', 'bell'], ['profile', 'Profile', 'user']])
+        : [
+          ...(hasPermission('view_admin_dashboard') ? [['admin-dashboard', 'Dashboard', 'home']] : []),
+          ...(hasPermission('view_users') || hasPermission('manage_permissions')
+            ? [['admin-users', 'User Management', 'user', hasPermission('view_users')
+              ? '/?page=admin-users' : '/?page=admin-users&amp;tab=role-defaults']]
+            : []),
+          ...(hasPermission('view_system_records') ? [['admin-system-records', 'System Records', 'file']] : []),
+          ...(hasPermission('view_all_items') ? [['admin-items', 'All Items', 'file']] : []),
+          ...(hasPermission('view_all_claims') ? [['admin-claims', 'All Claims', 'clipboard']] : []),
+          ...(hasPermission('generate_inventory_report') ? [['admin-inventory', 'Inventory Report', 'clipboard']] : []),
+          ...(hasPermission('add_user') ? [['admin-add-user', 'Add User', 'user']] : []),
+          ...(hasPermission('manage_integrations') ? [['admin-settings', 'Settings', 'settings']] : []),
+          ...(hasPermission('view_admin_dashboard') ? [['admin-security', 'Security', 'shield']] : []),
+        ])
       : user.role_name === 'staff'
         ? [
           ...(hasPermission('view_staff_dashboard') ? [['staff-dashboard', 'Dashboard', 'home']] : []),
@@ -160,13 +170,18 @@ function shell(content, page) {
           ...(hasPermission('receive_notifications') ? [['notifications', 'Notifications', 'bell']] : []),
           ...(hasPermission('view_profile') ? [['profile', 'Profile', 'user']] : []),
         ];
-    const nav = navigation.map(([key, label, iconName]) => `<a class="sidebar-link${page === key ? ' active' : ''}" href="/?page=${key}">
+    const nav = navigation.map(([key, label, iconName, href]) => `<a class="sidebar-link${page === key ? ' active' : ''}" href="${href || `/?page=${key}`}">
       ${icon(iconName)}${h(label)}${key === 'notifications' && sessionInfo.unreadNotifications
         ? `<span class="notification-count">${sessionInfo.unreadNotifications > 99 ? '99+' : sessionInfo.unreadNotifications}</span>` : ''}</a>`).join('');
     const initial = h((user.full_name || '?').charAt(0).toUpperCase());
+    const brandHref = user.role_name === 'admin'
+      ? hasPermission('view_admin_dashboard') ? '/?page=admin-dashboard'
+        : hasPermission('view_users') ? '/?page=admin-users'
+          : '/?page=admin-users&amp;tab=role-defaults'
+      : '/?page=dashboard';
     return `<div class="app">
       <aside class="sidebar" id="sidebar">
-        <a class="sidebar-brand" href="/?page=dashboard"><span class="brand-mark">${icon('shield', 22)}</span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a>
+        <a class="sidebar-brand" href="${brandHref}"><span class="brand-mark">${icon('shield', 22)}</span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a>
         <nav class="sidebar-nav"><p class="sidebar-label">Navigation</p>${nav}</nav>
         <div class="sidebar-user"><div class="avatar-sm">${initial}</div><div><p class="sidebar-user-name">${h(user.full_name)}</p><p class="sidebar-user-role">${roleLabel(user.role_name)}</p></div></div>
       </aside>

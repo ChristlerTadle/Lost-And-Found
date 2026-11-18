@@ -1,19 +1,22 @@
 import * as shared from '../shared.js';
-const { API, sessionInfo, h, date, param, link, buttonLink, badge, itemStatusLabel, itemTypeLabel, field, selectField, optionsFrom, request, icon, pageHeader, table, formAction } = shared;
+const { API, sessionInfo, h, date, param, link, buttonLink, badge, itemStatusLabel, itemTypeLabel, field, selectField, optionsFrom, request, icon, pageHeader, table, formAction, hasPermission } = shared;
 
 async function adminDashboard() {
   const { users, summary } = await request('/admin/dashboard');
   const adminStat = (name, style, title, value, note) => `<article class="card admin-overview-stat"><span class="admin-overview-icon ${style}">${icon(name, 17)}</span>
     <div><span class="stat-label">${title}</span><strong>${value}</strong><small>${note}</small></div></article>`;
+  const canViewUsers = hasPermission('view_users');
   const shortcuts = [
-    ['user', 'User Management', `${users.totalUsers} accounts`, 'admin-users'],
-    ['clipboard', 'All Items', `${summary.totalItems} items`, 'admin-items'],
-    ['file', 'All Claims', `${summary.totalClaims} total · ${summary.pendingClaims} pending`, 'admin-claims'],
-    ['file', 'Inventory Report', `${summary.storedItems} in custody`, 'admin-inventory'],
-    ['user', 'Add User', 'Create an account', 'admin-add-user'],
-    ['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records'],
-    ['settings', 'Settings', 'Sign-in integrations', 'admin-settings'],
-    ['shield', 'Security', 'Set up an authenticator', 'admin-security'],
+    ...(hasPermission('view_users') || hasPermission('manage_permissions')
+      ? [['user', canViewUsers ? 'User Management' : 'Role defaults', `${users.totalUsers} accounts`,
+        canViewUsers ? 'admin-users' : 'admin-users&tab=role-defaults']] : []),
+    ...(hasPermission('view_all_items') ? [['clipboard', 'All Items', `${summary.totalItems} items`, 'admin-items']] : []),
+    ...(hasPermission('view_all_claims') ? [['file', 'All Claims', `${summary.totalClaims} total · ${summary.pendingClaims} pending`, 'admin-claims']] : []),
+    ...(hasPermission('generate_inventory_report') ? [['file', 'Inventory Report', `${summary.storedItems} in custody`, 'admin-inventory']] : []),
+    ...(hasPermission('add_user') ? [['user', 'Add User', 'Create an account', 'admin-add-user']] : []),
+    ...(hasPermission('view_system_records') ? [['file', 'System Records', 'Review administrative and staff actions', 'admin-system-records']] : []),
+    ...(hasPermission('manage_integrations') ? [['settings', 'Settings', 'Sign-in integrations', 'admin-settings']] : []),
+    ...(hasPermission('view_admin_dashboard') ? [['shield', 'Security', 'Set up an authenticator', 'admin-security']] : []),
   ];
   return `<main class="container admin-overview">${pageHeader('Admin Dashboard', 'System overview — Bukidnon State University Lost & Found')}
     <section class="admin-overview-stats" aria-label="System statistics">
@@ -51,8 +54,8 @@ async function adminUsers() {
     <td><span class="badge badge-${account.role_name === 'staff' ? 'active' : account.role_name === 'admin' ? 'claimed' : 'pending'}">${roleName(account.role_name)}</span></td>
     <td><span class="badge badge-${account.status === 'active' ? 'active' : 'cancelled'}">${account.status === 'active' ? 'Active' : 'Disabled'}</span></td>
     <td class="right"><div class="admin-account-actions">
-      ${canEditUsers() ? `<a class="button button-outline" href="/?page=admin-edit-user&amp;id=${encodeURIComponent(account.id)}">Edit</a>` : ''}
-      ${canDisableUsers() ? formAction('admin-user', account.id, account.status === 'active' ? 'Disable' : 'Enable', account.status === 'active' ? 'danger' : 'secondary',
+      ${canEditAccount() ? `<a class="button button-outline" href="/?page=admin-edit-user&amp;id=${encodeURIComponent(account.id)}">Edit</a>` : ''}
+      ${canDisableUsers() && account.id !== sessionInfo.user?.id ? formAction('admin-user', account.id, account.status === 'active' ? 'Disable' : 'Enable', account.status === 'active' ? 'danger' : 'secondary',
         { action: account.status === 'active' ? 'disable' : 'enable' }) : ''}</div></td></tr>`);
   const tabLinks = `<nav class="user-management-tabs" aria-label="User Management sections">
     ${canViewUsers() ? `<a class="button ${activeTab === 'accounts' ? 'button-primary' : 'button-secondary'}" href="/?page=admin-users">Accounts</a>` : ''}
@@ -70,7 +73,7 @@ async function adminUsers() {
 
 function adminAddUser() {
   return `<main class="container admin-dashboard admin-add-user"><a class="back-link" href="/?page=admin-users">&larr; Back to User Management</a>
-    ${pageHeader('Add User', 'Create an active account. Staff access can be assigned separately from the admin dashboard.')}
+    ${pageHeader('Add User', 'Create an active account. Use Edit to manage the account’s role and permissions.')}
     <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-add-user">${field('Full name', 'full_name', 'text', '', true)}
     ${field('Email address', 'email', 'email', '', true)}${field('Student ID', 'student_id')}
     ${field('Phone number', 'phone', 'tel')}<div class="field"><label for="password">Temporary password</label>
@@ -84,6 +87,7 @@ function renderRoleDefaults(roles, requestedRole = '') {
   const permissions = selected.permissions;
   const groups = [...new Set(permissions.map(({ group }) => group))];
   const enabled = permissions.filter(({ enabled: isEnabled }) => isEnabled).map(({ key }) => key);
+  const lockedAdminPermissions = new Set(['manage_permissions', 'view_users', 'manage_integrations']);
   return `<section class="admin-role-defaults">
     <header class="page-header"><div><h2>Role defaults</h2><p>Changes apply to every account with the selected role immediately.</p></div></header>
     <div class="card role-permission-selector"><div class="field"><label for="role-permission-role">Role</label>
@@ -92,16 +96,22 @@ function renderRoleDefaults(roles, requestedRole = '') {
         <option value="staff" ${selectedRole === 'staff' ? 'selected' : ''}>Staff</option>
         <option value="admin" ${selectedRole === 'admin' ? 'selected' : ''}>Admin</option>
       </select></div></div>
-    <form class="card role-permission-form" data-form="admin-role-permissions" data-role="${selectedRole}"
+    <form class="card role-permission-form" data-form="admin-role-permissions" data-role="${selectedRole}" data-active-accounts="${selected.active_accounts}"
       data-saved-permissions="${h(JSON.stringify(enabled))}"
       data-dependencies="${h(JSON.stringify(Object.fromEntries(permissions.map(({ key, requires }) => [key, requires]))))}">
       <h2>${roleName(selectedRole)} checklist</h2>
       <p class="role-permission-warning">Turning off a permission disables that feature for every ${selectedRole} account.</p>
       <div class="role-permission-groups">${groups.map((group) => `<fieldset class="role-permission-group"><legend>${h(group)}</legend>
-        ${permissions.filter((permission) => permission.group === group).map((permission) => `<label class="role-permission-option">
-          <input type="checkbox" name="permissions" value="${h(permission.key)}" ${permission.enabled ? 'checked' : ''}>
-          <span><strong>${h(permission.label)}</strong>${permission.requires.length ? `<small>Requires: ${h(permission.requires.map((key) => permissions.find((entry) => entry.key === key)?.label || key).join(', '))}</small>` : ''}</span>
-        </label>`).join('')}
+        ${permissions.filter((permission) => permission.group === group).map((permission) => {
+          const locked = selectedRole === 'admin' && lockedAdminPermissions.has(permission.key);
+          return `<label class="role-permission-option${locked ? ' permission-locked' : ''}">
+            <input type="checkbox" name="permissions" value="${h(permission.key)}" ${permission.enabled || locked ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+            ${locked ? `<input type="hidden" name="permissions" value="${h(permission.key)}">` : ''}
+            <span><strong>${h(permission.label)}</strong>${locked
+              ? '<small>Required so admins cannot be locked out</small>'
+              : permission.requires.length ? `<small>Requires: ${h(permission.requires.map((key) => permissions.find((entry) => entry.key === key)?.label || key).join(', '))}</small>` : ''}</span>
+          </label>`;
+        }).join('')}
       </fieldset>`).join('')}</div>
       <div class="form-actions"><button class="button button-secondary" type="button" data-action="cancel-role-permissions">Cancel</button>
         <button class="button button-primary" type="submit" disabled>Save Changes</button></div>
@@ -164,7 +174,7 @@ function renderPermissionChecklist(role, permissions, currentRole) {
           <input type="checkbox" name="permissions" value="${h(permission.key)}" data-role-enabled="${available}" ${checked ? 'checked' : ''} ${available && currentRole ? '' : 'disabled'}>
           <span><strong>${h(permission.label)}</strong>${roleEnabled
             ? permission.requires.length ? `<small>Requires: ${h(permission.requires.map((key) => permissions.find((entry) => entry.key === key)?.label || key).join(', '))}</small>` : ''
-            : `<small>Turned off for all ${roleName(role)} accounts</small>`}</span>
+            : `<small>Turned off for all ${roleName(role)} accounts. <a href="/?page=admin-users&amp;tab=role-defaults&amp;role=${encodeURIComponent(role)}" data-discard-aware>Role defaults</a></small>`}</span>
         </label>`;
       }).join('')}
     </fieldset>`).join('')}</div>
@@ -186,6 +196,10 @@ function canViewUsers() {
 
 function canEditUsers() {
   return sessionInfo.rolePermissions.includes('edit_user');
+}
+
+function canEditAccount() {
+  return canEditUsers() || canManagePermissions();
 }
 
 function canAddUsers() {

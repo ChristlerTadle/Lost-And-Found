@@ -603,6 +603,8 @@ svg { flex-shrink: 0; }
 .admin-account-permission-role h2 { font-size: 17px; margin: 12px 0; }
 .admin-account-permission-role .role-permission-groups { margin-bottom: 14px; }
 .role-permission-option.permission-disabled { color: var(--faint); }
+.role-permission-option.permission-locked { color: var(--muted); }
+.role-permission-option.permission-disabled a { color: var(--primary); }
 .admin-role-permissions { max-width: 900px; }
 .role-permission-selector { align-items: flex-end; display: flex; gap: 12px; margin-bottom: 16px; padding: 18px; }
 .role-permission-selector .field { flex: 1; margin: 0; }

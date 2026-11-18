@@ -176,7 +176,10 @@ function createAdminController({
     },
 
     getAdminRolePermissions: async (_req, res) => {
-      const roles = await Promise.all(['user', 'staff', 'admin'].map((role) => rolePermissions.getRoleSettings(role)));
+      const roles = await Promise.all(['user', 'staff', 'admin'].map(async (role) => ({
+        ...await rolePermissions.getRoleSettings(role),
+        active_accounts: await auth.countActiveAccountsByRole(role),
+      })));
       return res.json({ roles });
     },
 

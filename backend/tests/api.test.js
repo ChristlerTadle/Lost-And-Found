@@ -43,6 +43,9 @@ const services = {
       const account = accounts.get(id);
       return account?.status === 'active' ? account : null;
     },
+    async countActiveAccountsByRole(role) {
+      return [...accounts.values()].filter((account) => account.role_name === role && account.status === 'active').length;
+    },
     async updateProfile(id, input) {
       assert.equal(id, user.id);
       return { ...user, full_name: input.full_name, phone: input.phone };
@@ -57,6 +60,9 @@ const services = {
   },
   rolePermissions: {
     async findRolePermissions(role) {
+      return [...(permissionsByRole.get(role) || [])];
+    },
+    async findEffectivePermissions(_userId, role) {
       return [...(permissionsByRole.get(role) || [])];
     },
     async getRoleSettings(role) {
@@ -493,6 +499,30 @@ test('role permissions are admin-only and admin bypass does not alter user-only 
   assert.equal(allowed.status, 200);
   assert.equal((await fetch(`${baseUrl}/items`, { headers: { 'x-test-user': admin.id } })).status, 200);
   assert.equal((await fetch(`${baseUrl}/items/mine`, { headers: { 'x-test-user': admin.id } })).status, 403);
+});
+
+test('Admin access to shared item routes uses Admin role permissions', async () => {
+  const saved = [...permissionsByRole.get('admin')];
+  try {
+    permissionsByRole.set('admin', saved.filter((permission) => permission !== 'view_all_items'));
+    const response = await fetch(`${baseUrl}/items`, {
+      headers: { 'x-test-user': admin.id },
+    });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).error, 'This feature is currently disabled by the administrator.');
+  } finally {
+    permissionsByRole.set('admin', saved);
+  }
+});
+
+test('role defaults include active account counts for save confirmations', async () => {
+  const response = await fetch(`${baseUrl}/admin/role-permissions`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(response.status, 200);
+  const { roles } = await response.json();
+  assert.deepEqual(roles.map(({ role }) => role), ['user', 'staff', 'admin']);
+  assert.equal(roles.find(({ role }) => role === 'admin').active_accounts, 1);
 });
 
 test('System Records is admin-only and protected when opened directly by URL', async () => {

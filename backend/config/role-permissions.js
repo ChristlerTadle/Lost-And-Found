@@ -149,6 +149,7 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   {
     method: 'GET', path: '/items', roles: ['user'], allowAdmin: true,
     permission: (req) => {
+      if (req.user?.role_name === 'admin') return 'view_all_items';
       const permissions = ['view_items'];
       if (String(req.query.query || '').trim()) permissions.push('search_items');
       if (['item_type', 'category', 'location', 'status', 'date_from', 'date_to']
@@ -157,8 +158,8 @@ const ROLE_PERMISSION_ROUTE_MAP = [
     },
     note: 'Only route that checks multiple permissions: view_items always; search_items for query; filter_items for filters.',
   },
-  { method: 'GET', path: '/items/:id', roles: ['user'], allowAdmin: true, permission: 'view_items' },
-  { method: 'GET', path: '/items/:id/image', roles: ['user'], allowAdmin: true, permission: 'view_items' },
+  { method: 'GET', path: '/items/:id', roles: ['user'], allowAdmin: true, permission: { user: 'view_items', admin: 'view_all_items' } },
+  { method: 'GET', path: '/items/:id/image', roles: ['user'], allowAdmin: true, permission: { user: 'view_items', admin: 'view_all_items' } },
   {
     method: 'POST', path: '/items', roles: ['user'],
     permission: (req) => req.body?.item_type === 'found' ? 'report_found_item' : 'report_lost_item',
@@ -171,11 +172,11 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'POST', path: '/claims', roles: ['user'], permission: 'submit_claim' },
   { method: 'GET', path: '/claims/mine', roles: ['user'], permission: 'view_claim_status' },
   { method: 'GET', path: '/claims/:id/calendar.ics', roles: ['user'], permission: 'view_claim_status' },
-  { method: 'GET', path: '/profile', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'view_profile', staff: 'view_profile' } },
-  { method: 'PATCH', path: '/profile', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'edit_profile', staff: 'edit_profile' } },
-  { method: 'GET', path: '/notifications', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
-  { method: 'PATCH', path: '/notifications/read-all', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
-  { method: 'PATCH', path: '/notifications/:id/read', roles: ['user', 'staff', 'admin'], allowAdmin: true, permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
+  { method: 'GET', path: '/profile', roles: ['user', 'staff'], permission: { user: 'view_profile', staff: 'view_profile' } },
+  { method: 'PATCH', path: '/profile', roles: ['user', 'staff'], permission: { user: 'edit_profile', staff: 'edit_profile' } },
+  { method: 'GET', path: '/notifications', roles: ['user', 'staff'], permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
+  { method: 'PATCH', path: '/notifications/read-all', roles: ['user', 'staff'], permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
+  { method: 'PATCH', path: '/notifications/:id/read', roles: ['user', 'staff'], permission: { user: 'receive_notifications', staff: 'receive_notifications' } },
   { method: 'GET', path: '/staff/dashboard', roles: ['staff'], permission: 'view_staff_dashboard' },
   { method: 'GET', path: '/staff/records', roles: ['staff'], permission: 'view_records' },
   {
@@ -191,7 +192,8 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   {
     method: 'GET', path: '/staff/items/:id/image', roles: ['staff'], allowAdmin: true,
     permission: async (req, items) => (
-      await items.getStaffItemType(req.params.id) === 'lost' ? 'view_lost_reports' : 'view_found_items'
+      req.user.role_name === 'admin' ? 'view_all_items'
+        : await items.getStaffItemType(req.params.id) === 'lost' ? 'view_lost_reports' : 'view_found_items'
     ),
   },
   { method: 'GET', path: '/staff/returned-items', roles: ['staff'], permission: 'view_found_items' },

@@ -92,8 +92,33 @@ async function renderPage(page) {
     'staff-returned-items': 'view_found_items',
     'staff-claims': 'view_claims',
     'staff-claim': 'view_claims',
+    'admin-dashboard': 'view_admin_dashboard',
+    'admin-add-user': 'add_user',
+    'admin-items': 'view_all_items',
+    'admin-claims': 'view_all_claims',
+    'admin-inventory': 'generate_inventory_report',
+    'admin-settings': 'manage_integrations',
+    'admin-system-records': 'view_system_records',
+    'admin-security': 'view_admin_dashboard',
   };
   const requiredPermission = pagePermissions[page];
+  const canAccessAdminEdit = page === 'admin-edit-user'
+    && (hasPermission('edit_user') || hasPermission('manage_permissions'))
+    && hasPermission('view_users');
+  const canAccessAdminUsers = page === 'admin-users'
+    && (param('tab') === 'role-defaults'
+      ? hasPermission('manage_permissions')
+      : hasPermission('view_users'));
+  const canAccessAdminItemEdit = page === 'admin-edit-item'
+    && hasPermission('view_all_items') && hasPermission('edit_item_records');
+  if (user && page === 'dashboard' && user.role_name === 'admin' && !hasPermission('view_admin_dashboard')) {
+    return `<main class="container">${alert('This feature is currently disabled by the administrator.', true)}</main>`;
+  }
+  if ((user && page === 'admin-users' && !canAccessAdminUsers)
+    || (user && page === 'admin-edit-user' && !canAccessAdminEdit)
+    || (user && page === 'admin-edit-item' && !canAccessAdminItemEdit)) {
+    return `<main class="container">${alert('This feature is currently disabled by the administrator.', true)}</main>`;
+  }
   if (user && requiredPermission && !hasPermission(requiredPermission)) {
     return `<main class="container">${alert('This feature is currently disabled by the administrator.', true)}</main>`;
   }
@@ -208,6 +233,7 @@ function bindForms() {
     menuButton.setAttribute('aria-expanded', 'true');
   });
   overlay?.addEventListener('click', closeMenu);
+  bindDiscardNavigation();
 }
 
 async function onFormSubmit(event) {
@@ -307,6 +333,20 @@ async function onFormSubmit(event) {
         const permissions = formData.getAll('permissions');
         const role = String(formData.get('role_name') || form.dataset.currentRole);
         const changedRole = role !== form.dataset.currentRole;
+        if (!changedRole && sessionInfo.rolePermissions.includes('manage_permissions')) {
+          const currentPanel = form.querySelector(`[data-role-panel="${role}"]`);
+          const saved = new Set(JSON.parse(currentPanel?.querySelector('[data-saved-permissions]')?.dataset.savedPermissions || '[]'));
+          const removed = [...saved].filter((permission) => !permissions.includes(permission));
+          if (removed.length) {
+            const labels = removed.map((permission) => [...currentPanel.querySelectorAll('input[name="permissions"]')]
+              .find((input) => input.value === permission)
+              ?.closest('label')?.querySelector('strong')?.textContent || permission);
+            if (!confirm(`Remove ${labels.join(', ')} from ${form.dataset.fullName}?`)) {
+              if (submit) submit.disabled = false;
+              return;
+            }
+          }
+        }
         if (changedRole && !confirm(`Change ${form.dataset.fullName} from ${accountRoleName(form.dataset.currentRole)} to ${accountRoleName(role)}? Their individual permission changes for the old role will be reset, and the ${accountRoleName(role)} role's settings apply.`)) {
           if (submit) submit.disabled = false;
           return;
@@ -324,6 +364,7 @@ async function onFormSubmit(event) {
             body: JSON.stringify({ permissions }),
           });
         }
+        form.dataset.savedAccountForm = accountFormSnapshot(form);
         navigate('admin-users');
         return;
       }
@@ -336,7 +377,9 @@ async function onFormSubmit(event) {
           const labels = [...form.querySelectorAll('input[name="permissions"]')]
             .filter((input) => disabled.includes(input.value))
             .map((input) => input.closest('label').querySelector('strong').textContent);
-          if (!confirm(`This will disable ${labels.join(', ')} for ALL ${form.dataset.role} accounts. Continue?`)) {
+          const roleName = accountRoleName(form.dataset.role);
+          const affected = Number(form.dataset.activeAccounts || 0);
+          if (!confirm(`This will disable ${labels.join(', ')} for all ${affected} active ${roleName} accounts. Continue?`)) {
             if (submit) submit.disabled = false;
             return;
           }
@@ -1230,6 +1273,7 @@ function changeRolePermissionRole(event) {
     selector.value = form.dataset.role;
     return;
   }
+  if (changed) form.dataset.savedPermissions = JSON.stringify(currentRolePermissionSelection(form));
   location.href = `/?page=admin-users&tab=role-defaults&role=${encodeURIComponent(selector.value)}`;
 }
 
@@ -1271,6 +1315,7 @@ function bindAccountPermissionForm(form) {
     setActiveRole(event.currentTarget.value);
   });
   setActiveRole(form.querySelector('[data-action="account-role"]')?.value || form.dataset.currentRole);
+  form.dataset.savedAccountForm = accountFormSnapshot(form);
 }
 
 function changeAccountRole(event) {
@@ -1289,8 +1334,55 @@ function accountRoleName(role) {
   return ({ user: 'User', staff: 'Staff', admin: 'Admin' })[role] || 'Unknown';
 }
 
+function accountFormSnapshot(form) {
+  return JSON.stringify([...form.querySelectorAll('input:not([type="hidden"]), select, textarea')].map((input) => ({
+    name: input.name,
+    value: input.type === 'checkbox' ? input.checked : input.value,
+  })));
+}
+
+function isFormDirty(form) {
+  if (form.dataset.form === 'admin-role-permissions') {
+    const saved = JSON.stringify(JSON.parse(form.dataset.savedPermissions || '[]').sort());
+    return saved !== JSON.stringify(currentRolePermissionSelection(form));
+  }
+  if (form.dataset.form === 'admin-edit-user') {
+    return form.dataset.savedAccountForm !== accountFormSnapshot(form);
+  }
+  return false;
+}
+
+function bindDiscardNavigation() {
+  if (app.dataset.discardNavigationBound) return;
+  app.dataset.discardNavigationBound = 'true';
+  app.addEventListener('click', (event) => {
+    const anchor = event.target.closest('a[href]');
+    if (!anchor || anchor.target === '_blank') return;
+    const dirty = [...app.querySelectorAll('form[data-form]')].some(isFormDirty);
+    if (dirty && !confirm('Discard changes?')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    } else if (dirty) {
+      [...app.querySelectorAll('form[data-form]')].forEach((form) => {
+        if (form.dataset.form === 'admin-role-permissions') {
+          form.dataset.savedPermissions = JSON.stringify(currentRolePermissionSelection(form));
+        } else if (form.dataset.form === 'admin-edit-user') {
+          form.dataset.savedAccountForm = accountFormSnapshot(form);
+        }
+      });
+    }
+  });
+  window.addEventListener('beforeunload', (event) => {
+    if (![...app.querySelectorAll('form[data-form]')].some(isFormDirty)) return;
+    event.preventDefault();
+    event.returnValue = 'Discard changes?';
+  });
+}
+
 async function resetAccountPermissions(event) {
   const button = event.currentTarget;
+  const form = button.closest('form');
+  if (form && isFormDirty(form) && !confirm('Discard changes?')) return;
   if (!confirm('Reset this account to its role defaults?')) return;
   try {
     await request(`/admin/users/${encodeURIComponent(button.dataset.id)}/permissions`, { method: 'DELETE' });

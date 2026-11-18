@@ -12,8 +12,8 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
 
     const user = req.user || await requireUser(req);
     req.user = user;
-    if (user.role_name === 'admin' && mapping.allowAdmin) return next();
-    if (!mapping.roles.includes(user.role_name)) auth.requireRole(user, mapping.roles);
+    if (!(user.role_name === 'admin' && mapping.allowAdmin)
+      && !mapping.roles.includes(user.role_name)) auth.requireRole(user, mapping.roles);
 
     const configuredPermission = await resolvePermissionKeys(mapping.permission, req, items);
     const requiredPermissions = Array.isArray(configuredPermission)

@@ -49,8 +49,12 @@ async function connectDatabase() {
     await database.collection('role_permissions').updateOne(
       { role: 'admin', permission_key: permission.key },
       {
-        $set: { role: 'admin', permission_key: permission.key, enabled: true },
-        $setOnInsert: { created_at: new Date() },
+        $setOnInsert: {
+          role: 'admin',
+          permission_key: permission.key,
+          enabled: true,
+          created_at: new Date(),
+        },
         $currentDate: { updated_at: true },
       },
       { upsert: true },
