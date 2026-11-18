@@ -53,8 +53,8 @@ async function migrate() {
   if (!differences.size) console.log('  none');
   for (const [pattern, count] of differences) console.log(`  ${count}: ${pattern}`);
   console.log('Seeding role_permissions as enabled on insert only; existing role settings are preserved.');
-  await Promise.all(['user', 'staff'].map((role) => seedRole(database, role, PERMISSIONS_BY_ROLE[role])));
-  console.log(`Seeded ${PERMISSIONS_BY_ROLE.user.length} User and ${PERMISSIONS_BY_ROLE.staff.length} Staff role permission entries.`);
+  await Promise.all(['user', 'staff', 'admin'].map((role) => seedRole(database, role, PERMISSIONS_BY_ROLE[role])));
+  console.log(`Seeded ${PERMISSIONS_BY_ROLE.user.length} User, ${PERMISSIONS_BY_ROLE.staff.length} Staff, and ${PERMISSIONS_BY_ROLE.admin.length} Admin role permission entries.`);
   console.log('The legacy staff_permissions collection was not modified or removed.');
 }
 

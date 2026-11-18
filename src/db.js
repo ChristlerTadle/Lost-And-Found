@@ -1,5 +1,6 @@
 const { MongoClient } = require('mongodb');
 const config = require('./config');
+const { PERMISSIONS_BY_ROLE } = require('../backend/config/role-permissions');
 
 let client;
 let database;
@@ -35,10 +36,26 @@ async function connectDatabase() {
       { role: 1, permission_key: 1 },
       { unique: true },
     ),
+    database.collection('account_permissions').createIndex(
+      { user_id: 1, permission_key: 1 },
+      { unique: true },
+    ),
+    database.collection('account_permissions').createIndex({ permission_key: 1, user_id: 1 }),
     database.collection('audit_log').createIndex({ created_at: -1, _id: -1 }),
     database.collection('audit_log').createIndex({ actor_id: 1, created_at: -1 }),
     database.collection('audit_log').createIndex({ action: 1, created_at: -1 }),
   ]);
+  for (const permission of PERMISSIONS_BY_ROLE.admin || []) {
+    await database.collection('role_permissions').updateOne(
+      { role: 'admin', permission_key: permission.key },
+      {
+        $set: { role: 'admin', permission_key: permission.key, enabled: true },
+        $setOnInsert: { created_at: new Date() },
+        $currentDate: { updated_at: true },
+      },
+      { upsert: true },
+    );
+  }
   return database;
 }
 

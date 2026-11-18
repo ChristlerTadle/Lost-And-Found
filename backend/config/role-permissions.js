@@ -28,10 +28,22 @@ const ROLE_PERMISSIONS = [
   { key: 'view_profile', label: 'View profile', group: 'Account', role: 'staff', requires: [] },
   { key: 'edit_profile', label: 'Edit profile', group: 'Account', role: 'staff', requires: ['view_profile'] },
   { key: 'receive_notifications', label: 'Receive notifications', group: 'Account', role: 'staff', requires: [] },
+  { key: 'view_admin_dashboard', label: 'View admin dashboard', group: 'Administration', role: 'admin', requires: [] },
+  { key: 'view_users', label: 'View users', group: 'Account management', role: 'admin', requires: [] },
+  { key: 'add_user', label: 'Add user', group: 'Account management', role: 'admin', requires: ['view_users'] },
+  { key: 'edit_user', label: 'Edit user', group: 'Account management', role: 'admin', requires: ['view_users'] },
+  { key: 'disable_user', label: 'Disable user', group: 'Account management', role: 'admin', requires: ['view_users'] },
+  { key: 'manage_permissions', label: 'Manage permissions', group: 'Account management', role: 'admin', requires: ['view_users'] },
+  { key: 'view_all_items', label: 'View all items', group: 'Items', role: 'admin', requires: [] },
+  { key: 'edit_item_records', label: 'Edit item records', group: 'Items', role: 'admin', requires: ['view_all_items'] },
+  { key: 'view_all_claims', label: 'View all claims', group: 'Claims', role: 'admin', requires: [] },
+  { key: 'generate_inventory_report', label: 'Generate inventory report', group: 'Reports', role: 'admin', requires: [] },
+  { key: 'view_system_records', label: 'View system records', group: 'System', role: 'admin', requires: [] },
+  { key: 'manage_integrations', label: 'Manage integrations', group: 'System', role: 'admin', requires: [] },
 ];
 
 const PERMISSIONS_BY_ROLE = Object.fromEntries(
-  ['user', 'staff'].map((role) => [
+  ['user', 'staff', 'admin'].map((role) => [
     role,
     ROLE_PERMISSIONS.filter((permission) => permission.role === role),
   ]),
@@ -67,6 +79,15 @@ function normalizeRolePermissions(role, submittedPermissions) {
   }
   const allowed = new Set(definitions.map(({ key }) => key));
   const selected = new Set(submittedPermissions);
+  if (role === 'admin') {
+    for (const key of ['manage_permissions', 'view_users', 'manage_integrations']) {
+      if (!selected.has(key)) {
+        const error = new Error(`The ${key} Admin permission is locked and cannot be disabled.`);
+        error.status = 400;
+        throw error;
+      }
+    }
+  }
   for (const key of selected) {
     if (!allowed.has(key)) {
       const error = new Error(`Unknown ${role} permission: ${key}`);
@@ -86,6 +107,39 @@ function resolvePermissionKeys(mapping, req, items) {
 }
 
 const ROLE_PERMISSION_ROUTE_MAP = [
+  { method: 'GET', path: '/admin/dashboard', roles: ['admin'], permission: 'view_admin_dashboard' },
+  { method: 'GET', path: '/admin/users', roles: ['admin'], permission: 'view_users' },
+  { method: 'POST', path: '/admin/users', roles: ['admin'], permission: 'add_user' },
+  { method: 'PATCH', path: '/admin/users/:id', roles: ['admin'], permission: 'edit_user' },
+  { method: 'GET', path: '/admin/role-permissions', roles: ['admin'], permission: 'manage_permissions' },
+  { method: 'PUT', path: '/admin/role-permissions/:role', roles: ['admin'], permission: 'manage_permissions' },
+  { method: 'GET', path: '/admin/items', roles: ['admin'], permission: 'view_all_items' },
+  { method: 'GET', path: '/admin/items/:id', roles: ['admin'], permission: 'view_all_items' },
+  { method: 'GET', path: '/admin/items/:id/image', roles: ['admin'], permission: 'view_all_items' },
+  { method: 'PATCH', path: '/admin/items/:id', roles: ['admin'], permission: 'edit_item_records' },
+  { method: 'DELETE', path: '/admin/items/:id', roles: ['admin'], permission: 'edit_item_records' },
+  { method: 'GET', path: '/admin/claims', roles: ['admin'], permission: 'view_all_claims' },
+  { method: 'GET', path: '/admin/inventory', roles: ['admin'], permission: 'generate_inventory_report' },
+  { method: 'GET', path: '/admin/system-records', roles: ['admin'], permission: 'view_system_records' },
+  { method: 'GET', path: '/admin/mfa', roles: ['admin'], permission: 'view_admin_dashboard' },
+  { method: 'POST', path: '/admin/mfa/enrollment/start', roles: ['admin'], permission: 'view_admin_dashboard' },
+  { method: 'POST', path: '/admin/mfa/enrollment/confirm', roles: ['admin'], permission: 'view_admin_dashboard' },
+  { method: 'POST', path: '/admin/mfa/recovery/regenerate', roles: ['admin'], permission: 'view_admin_dashboard' },
+  { method: 'GET', path: '/admin/settings/access', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/unlock', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/lock', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'GET', path: '/admin/settings', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'PUT', path: '/admin/settings', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/code/verify', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/code/resend', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/code/cancel', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/:integrationId/default', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/:integrationId/restore-default', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/smtp/test', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/google-auth/test', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/recaptcha/test', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/google-calendar/test', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/admin-mfa/test', roles: ['admin'], permission: 'manage_integrations' },
   {
     method: 'GET', path: '/items', roles: ['user'], allowAdmin: true,
     permission: (req) => {

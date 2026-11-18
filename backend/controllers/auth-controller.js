@@ -3,6 +3,7 @@ const { categories, locations } = require('../../src/data');
 const { optionalUser, startSession, saveSession, destroySession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
 const { IntegrationError } = require('../../src/services/integration-calls');
+const { PERMISSIONS_BY_ROLE } = require('../config/role-permissions');
 
 function createAuthController({ auth, rolePermissions, email, googleOAuth, recaptcha, integrationSettings, adminMfa, notifications, frontendOrigin, audit }) {
   const startGoogleAuth = async (req, res) => {
@@ -42,8 +43,13 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
         adminMfaReauthRequired = action.action === 'verify'
           && req.session.adminMfaVerified !== String(user.id);
       }
-      const permissions = user && user.role_name !== 'admin'
-        ? await rolePermissions.findRolePermissions(user.role_name) : [];
+      const permissions = user
+        ? (typeof rolePermissions.findEffectivePermissions === 'function'
+          ? await rolePermissions.findEffectivePermissions(user.id, user.role_name)
+          : user.role_name === 'admin'
+            ? PERMISSIONS_BY_ROLE.admin.map(({ key }) => key)
+            : await rolePermissions.findRolePermissions(user.role_name))
+        : [];
       const unreadNotifications = user && (user.role_name === 'admin'
         || permissions.includes('receive_notifications'))
         ? await notifications.countUnread(user.id) : 0;

@@ -1,5 +1,5 @@
 const { asyncRoute } = require('./async-route');
-const { ROLE_PERMISSION_ROUTE_MAP, resolvePermissionKeys } = require('../config/role-permissions');
+const { PERMISSIONS_BY_ROLE, ROLE_PERMISSION_ROUTE_MAP, resolvePermissionKeys } = require('../config/role-permissions');
 const { requireUser, optionalUser } = require('./session-auth');
 
 function createRolePermissionGuard({ auth, rolePermissions, items }) {
@@ -21,7 +21,11 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
       : typeof configuredPermission === 'string' ? [configuredPermission] : [];
     if (!requiredPermissions.length) return deny(req, null);
 
-    const enabled = await rolePermissions.findRolePermissions(user.role_name);
+    const enabled = typeof rolePermissions.findEffectivePermissions === 'function'
+      ? await rolePermissions.findEffectivePermissions(user.id, user.role_name)
+      : user.role_name === 'admin'
+        ? PERMISSIONS_BY_ROLE.admin.map(({ key }) => key)
+        : await rolePermissions.findRolePermissions(user.role_name);
     req.rolePermissions = enabled;
     const missing = requiredPermissions.find((permission) => !enabled.includes(permission));
     if (missing) {
@@ -41,8 +45,11 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
     req.auditMethod = req.method;
     req.auditRequiredPermission = null;
     const user = await optionalUser(req);
-    if (!user || user.role_name === 'admin') return next();
-    if (['user', 'staff'].includes(user.role_name)) auth.requireRole(user, ['user', 'staff']);
+    if (!user) {
+      const error = new Error('Sign in is required.');
+      error.status = 401;
+      throw error;
+    }
     return deny(req, null);
   });
 

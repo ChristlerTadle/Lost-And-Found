@@ -53,7 +53,9 @@ test('role permission dependencies expand parents and reject unknown keys for a 
     'view_items', 'search_items', 'filter_items',
   ]);
   assert.throws(() => normalizeRolePermissions('user', ['view_claims']), { status: 400 });
-  assert.throws(() => normalizeRolePermissions('admin', []), { status: 400 });
+  assert.deepEqual(normalizeRolePermissions('admin', ['view_users', 'edit_user', 'manage_permissions', 'manage_integrations']), [
+    'view_users', 'edit_user', 'manage_permissions', 'manage_integrations',
+  ]);
 });
 
 test('role permissions update globally and are checked from current storage on every request', async () => {
@@ -71,11 +73,33 @@ test('role permissions update globally and are checked from current storage on e
   assert.equal(await service.isEnabled('user', 'view_items'), false);
   assert.equal(await service.isEnabled('staff', 'view_items'), false);
   assert.deepEqual(await service.findRolePermissions('user'), ['view_my_reports', 'edit_my_report']);
-  assert.equal(await service.isEnabled('admin', 'anything'), true);
+  assert.equal(await service.isEnabled('admin', 'anything'), false);
 
   const parentDisabled = await service.replaceRolePermissions('user', []);
   assert.deepEqual(parentDisabled.permissions, []);
   assert.equal(await service.isEnabled('user', 'edit_my_report'), false);
+});
+
+test('effective permissions combine role and account settings with account inheritance', async () => {
+  const initial = ['user', 'staff', 'admin'].flatMap((role) => PERMISSIONS_BY_ROLE[role].map(({ key }) => ({
+    role,
+    permission_key: key,
+    enabled: true,
+  })));
+  const roleCollection = createMemoryCollection(initial);
+  const accountCollection = createMemoryCollection([
+    { user_id: 'staff-1', permission_key: 'update_item_status', enabled: false },
+  ]);
+  const service = createRolePermissionService(memoryDatabase({
+    role_permissions: roleCollection,
+    account_permissions: accountCollection,
+  }));
+
+  assert.ok((await service.findEffectivePermissions('staff-1', 'staff')).includes('view_found_items'));
+  assert.ok(!(await service.findEffectivePermissions('staff-1', 'staff')).includes('update_item_status'));
+  assert.ok((await service.findEffectivePermissions('staff-2', 'staff')).includes('update_item_status'));
+  assert.ok((await service.findEffectivePermissions('admin-1', 'admin')).includes('manage_permissions'));
+  assert.ok((await service.findEffectivePermissions('admin-1', 'admin')).includes('manage_integrations'));
 });
 
 test('route permission map has unique method/path entries and records both dynamic routes', () => {

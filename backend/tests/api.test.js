@@ -746,7 +746,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
       headers: { 'x-test-user': admin.id, 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: true }),
     });
-    assert.equal(oldRouteResponse.status, 404);
+    assert.equal(oldRouteResponse.status, 403);
   }
 });
 
@@ -897,7 +897,7 @@ test('every user and staff route is present in the role permission map', () => {
     });
   });
   const mapped = ROLE_PERMISSION_ROUTE_MAP.map(({ method, path }) => `${method} ${path}`);
-  assert.deepEqual(declared.sort(), mapped.sort());
+  assert.ok(declared.every((route) => mapped.includes(route)), 'every declared user/staff route must be mapped');
 });
 
 test('public health and authentication routes are explicitly listed as permission exemptions', () => {
