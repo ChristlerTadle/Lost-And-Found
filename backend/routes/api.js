@@ -68,6 +68,7 @@ function createApiRouter({ services, frontendOrigin }) {
       auth: services.auth,
       items: services.items,
       rolePermissions: services.rolePermissions,
+      roleChange: services.roleChange,
       notifications: services.notifications,
       integrationSettings: services.integrationSettings,
       integrationSecurity: services.integrationSecurity,

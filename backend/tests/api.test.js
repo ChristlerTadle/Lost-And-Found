@@ -23,6 +23,7 @@ const secondStaff = { id: 'test-staff-2', full_name: 'Second Staff', role_name: 
 const admin = { id: 'test-admin', full_name: 'Test Admin', role_name: 'admin', status: 'active' };
 const disabledUser = { id: 'disabled-user', full_name: 'Disabled User', role_name: 'user', status: 'disabled' };
 const accounts = new Map([user, staff, secondStaff, admin, disabledUser].map((account) => [account.id, account]));
+const roleChangeCalls = [];
 const permissionsByRole = new Map([
   ['user', PERMISSIONS_BY_ROLE.user.map(({ key }) => key)],
   ['staff', PERMISSIONS_BY_ROLE.staff.map(({ key }) => key)],
@@ -42,6 +43,18 @@ const services = {
     async findActiveSessionUser(id) {
       const account = accounts.get(id);
       return account?.status === 'active' ? account : null;
+    },
+    async findAccountsForStaffAssignment() {
+      return [...accounts.values()];
+    },
+    async updateUserByAdmin(id, input) {
+      const account = accounts.get(id);
+      if (account) Object.assign(account, {
+        full_name: input.full_name,
+        email: input.email,
+        student_id: input.student_id || null,
+        phone: input.phone || null,
+      });
     },
     async countActiveAccountsByRole(role) {
       return [...accounts.values()].filter((account) => account.role_name === role && account.status === 'active').length;
@@ -81,6 +94,13 @@ const services = {
       const old = permissionsByRole.get(role) || [];
       permissionsByRole.set(role, [...permissions]);
       return { role, permissions: [...permissions], old_permissions: old, changed: true };
+    },
+  },
+  roleChange: {
+    async changeRole(input) {
+      roleChangeCalls.push(input);
+      const account = accounts.get(input.targetId);
+      if (account) account.role_name = input.newRole;
     },
   },
   email: {
@@ -499,6 +519,45 @@ test('role permissions are admin-only and admin bypass does not alter user-only 
   assert.equal(allowed.status, 200);
   assert.equal((await fetch(`${baseUrl}/items`, { headers: { 'x-test-user': admin.id } })).status, 200);
   assert.equal((await fetch(`${baseUrl}/items/mine`, { headers: { 'x-test-user': admin.id } })).status, 403);
+});
+
+test('admin account edits pass role changes through the shared role-change service', async () => {
+  const target = {
+    id: 'role-change-target',
+    full_name: 'Role Change Target',
+    email: 'role-change-target@example.test',
+    role_name: 'user',
+    status: 'active',
+  };
+  const originalRoleChangeCount = roleChangeCalls.length;
+  accounts.set(target.id, target);
+  try {
+    const response = await fetch(`${baseUrl}/admin/users/${target.id}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user': admin.id,
+        origin: 'http://localhost:5173',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({
+        action: 'edit',
+        full_name: target.full_name,
+        email: target.email,
+        role_name: 'staff',
+        permissions: PERMISSIONS_BY_ROLE.staff.map(({ key }) => key),
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(target.role_name, 'staff');
+    assert.equal(roleChangeCalls.length, originalRoleChangeCount + 1);
+    assert.equal(roleChangeCalls.at(-1).targetId, target.id);
+    assert.equal(roleChangeCalls.at(-1).newRole, 'staff');
+  } finally {
+    accounts.delete(target.id);
+    roleChangeCalls.splice(originalRoleChangeCount);
+  }
 });
 
 test('Admin access to shared item routes uses Admin role permissions', async () => {
