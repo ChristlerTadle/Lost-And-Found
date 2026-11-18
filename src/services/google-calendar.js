@@ -27,8 +27,10 @@ function createGoogleCalendar({
   callIntegration,
   client = googleClient,
 }) {
-  async function testConnection(auditContext) {
-    const integration = await integrationSettings.getIntegration('google_calendar');
+  async function testConnection(auditContext, settings = null, options = {}) {
+    const integration = settings
+      ? { configured: true, active: true, settings }
+      : await integrationSettings.getIntegration('google_calendar');
     if (!integration.configured) {
       const error = new Error('Configure all required saved Google Calendar fields before testing.');
       error.status = 400;
@@ -42,7 +44,7 @@ function createGoogleCalendar({
         throw providerError(error);
       }
       return true;
-    }, auditContext);
+    }, auditContext, options);
   }
 
   async function syncApprovedClaim(claim, auditContext = {}) {

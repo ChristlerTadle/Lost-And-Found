@@ -1,6 +1,13 @@
+const config = require('../config');
+const rateLimits = config.integrationRateLimits;
+
 const integrations = {
   google_auth: {
     label: 'Google sign-in',
+    validationType: 'partial',
+    defaultRateLimitPerMinute: rateLimits.defaultPerMinute.google_auth,
+    rateLimitMinimum: rateLimits.minimum,
+    rateLimitMaximum: rateLimits.maximum,
     fields: [
       {
         name: 'client_id',
@@ -29,16 +36,31 @@ const integrations = {
         label: 'Callback URL',
         type: 'url',
         secret: false,
+        credential: true,
         required: true,
         maxLength: 2048,
         env: 'API_GOOGLE_REDIRECT_URI',
         fallbackEnv: 'GOOGLE_REDIRECT_URI',
         format: 'url',
       },
+      {
+        name: 'rate_limit_per_minute',
+        label: 'Calls per minute',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: String(rateLimits.maximum).length,
+        defaultValue: String(rateLimits.defaultPerMinute.google_auth),
+        format: 'rate_limit',
+      },
     ],
   },
   recaptcha: {
     label: 'reCAPTCHA',
+    validationType: 'partial',
+    defaultRateLimitPerMinute: rateLimits.defaultPerMinute.recaptcha,
+    rateLimitMinimum: rateLimits.minimum,
+    rateLimitMaximum: rateLimits.maximum,
     fields: [
       {
         name: 'site_key',
@@ -62,10 +84,24 @@ const integrations = {
         env: 'RECAPTCHA_SECRET_KEY',
         format: 'text',
       },
+      {
+        name: 'rate_limit_per_minute',
+        label: 'Calls per minute',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: String(rateLimits.maximum).length,
+        defaultValue: String(rateLimits.defaultPerMinute.recaptcha),
+        format: 'rate_limit',
+      },
     ],
   },
   smtp: {
     label: 'Email (SMTP)',
+    validationType: 'full',
+    defaultRateLimitPerMinute: rateLimits.defaultPerMinute.smtp,
+    rateLimitMinimum: rateLimits.minimum,
+    rateLimitMaximum: rateLimits.maximum,
     fields: [
       {
         name: 'host',
@@ -137,10 +173,24 @@ const integrations = {
         maxLength: 128,
         format: 'text',
       },
+      {
+        name: 'rate_limit_per_minute',
+        label: 'Calls per minute',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: String(rateLimits.maximum).length,
+        defaultValue: String(rateLimits.defaultPerMinute.smtp),
+        format: 'rate_limit',
+      },
     ],
   },
   google_calendar: {
     label: 'Google Calendar',
+    validationType: 'full',
+    defaultRateLimitPerMinute: rateLimits.defaultPerMinute.google_calendar,
+    rateLimitMinimum: rateLimits.minimum,
+    rateLimitMaximum: rateLimits.maximum,
     fields: [
       {
         name: 'calendar_id',
@@ -228,10 +278,24 @@ const integrations = {
         required: false,
         defaultValue,
       })),
+      {
+        name: 'rate_limit_per_minute',
+        label: 'Calls per minute',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: String(rateLimits.maximum).length,
+        defaultValue: String(rateLimits.defaultPerMinute.google_calendar),
+        format: 'rate_limit',
+      },
     ],
   },
   admin_mfa: {
     label: 'Admin MFA',
+    validationType: 'full',
+    defaultRateLimitPerMinute: rateLimits.defaultPerMinute.admin_mfa,
+    rateLimitMinimum: rateLimits.minimum,
+    rateLimitMaximum: rateLimits.maximum,
     fields: [
       {
         name: 'require_for_all_admins',
@@ -260,6 +324,16 @@ const integrations = {
         maxLength: 1,
         defaultValue: '1',
         format: 'mfa_window',
+      },
+      {
+        name: 'rate_limit_per_minute',
+        label: 'Calls per minute',
+        type: 'number',
+        secret: false,
+        required: true,
+        maxLength: String(rateLimits.maximum).length,
+        defaultValue: String(rateLimits.defaultPerMinute.admin_mfa),
+        format: 'rate_limit',
       },
     ],
   },

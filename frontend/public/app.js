@@ -314,7 +314,12 @@ async function onFormSubmit(event) {
       navigate('login');
       return;
     }
-    showNotice(error.message, true);
+    if (error.status === 429 && error.retryAfter) {
+      const minutes = Math.max(1, Math.ceil(error.retryAfter / 60));
+      showNotice(`Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, true);
+    } else {
+      showNotice(error.message, true);
+    }
     if (sessionInfo.recaptcha?.active && ['login', 'register'].includes(form.dataset.form)) {
       const widget = form.querySelector('.g-recaptcha');
       if (widget) {
@@ -487,7 +492,12 @@ function updateIntegrationSaveState(form) {
   for (const card of form.querySelectorAll('[data-integration]')) {
     const changed = JSON.stringify(integrationCardPayload(card)) !== card.dataset.savedState;
     card.querySelector('.integration-card-actions').hidden = !changed;
-    card.querySelector('[data-action="set-integration-default"]').disabled = changed;
+    const setDefault = card.querySelector('[data-action="set-integration-default"]');
+    if (setDefault) {
+      setDefault.disabled = changed || card.dataset.active !== 'true'
+        || card.dataset.usingDefault === 'true'
+        || card.dataset.currentValidation !== 'true';
+    }
     card.querySelector('[data-action="integration-test"]')?.toggleAttribute('disabled', changed);
     card.querySelector('[data-action="smtp-test"]')?.toggleAttribute('disabled', changed);
     card.querySelector('[data-action="calendar-test"]')?.toggleAttribute('disabled', changed);
@@ -592,6 +602,24 @@ function startIntegrationCodeResendTimer(dialog, seconds) {
 function closeIntegrationCodeDialog() {
   clearInterval(integrationCodeResendTimer);
   app.querySelector('[data-integration-code-dialog]')?.close();
+}
+
+function showIntegrationRateLimit(error, button) {
+  if (error.status !== 429) return false;
+  const retryAfter = Math.max(1, error.retryAfter || 60);
+  const retryAt = Date.now() + retryAfter * 1000;
+  button.dataset.rateLimitUntil = String(retryAt);
+  button.disabled = true;
+  const minutes = Math.max(1, Math.ceil(retryAfter / 60));
+  showNotice(`Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, true);
+  setTimeout(() => {
+    if (Number(button.dataset.rateLimitUntil) !== retryAt) return;
+    delete button.dataset.rateLimitUntil;
+    button.disabled = false;
+    const form = button.closest('form[data-form="integration-settings"]');
+    if (form) updateIntegrationSaveState(form);
+  }, retryAfter * 1000);
+  return true;
 }
 
 async function verifyIntegrationCode(form) {
@@ -710,7 +738,14 @@ async function setIntegrationDefault(event) {
   const card = button.closest('[data-integration]');
   const form = card.closest('form');
   const name = card.querySelector('h2').textContent;
-  if (!confirm(`Set the current saved ${name} configuration as the default?`)) return;
+  const confirmation = {
+    google_auth: 'Google accepted the client credentials, but no real login was performed.',
+    recaptcha: 'The secret was accepted, but no real captcha challenge was performed.',
+    smtp: 'The SMTP connection and authentication were verified; no email was sent.',
+    google_calendar: 'The service account read the calendar; no event was created or changed.',
+    admin_mfa: 'The local encryption and generated-code self-test passed.',
+  }[card.dataset.integration];
+  if (!confirm(`Set the current saved ${name} configuration as the default? ${confirmation}`)) return;
   button.disabled = true;
   try {
     const result = await request(`/admin/settings/${encodeURIComponent(card.dataset.integration)}/default`, {
@@ -721,9 +756,9 @@ async function setIntegrationDefault(event) {
     applySavedIntegration(card, result.integrations[card.dataset.integration]);
     showNotice(`${name} default settings updated.`);
   } catch (error) {
-    showNotice(error.message, true);
+    if (!showIntegrationRateLimit(error, button)) showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) updateIntegrationSaveState(form);
   }
 }
 
@@ -758,7 +793,7 @@ async function restoreIntegrationDefault(event) {
   } catch (error) {
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
   }
 }
 
@@ -788,6 +823,8 @@ async function saveIntegrationSettings(event) {
   const payload = { [card.dataset.integration]: integrationCardPayload(card) };
   clearIntegrationErrors(card);
   button.disabled = true;
+  card.querySelector('[data-action="cancel-integration"]').disabled = true;
+  card.querySelector('[data-integration-validation]').textContent = 'Validating...';
   try {
     const result = await request('/admin/settings', {
       method: 'PUT',
@@ -804,10 +841,18 @@ async function saveIntegrationSettings(event) {
     if (card.dataset.integration === 'admin_mfa') await refreshAdminMfaGate();
     showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
   } catch (error) {
+    if (showIntegrationRateLimit(error, button)) return;
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
+    if (error.failures) {
+      for (const failure of error.failures) {
+        const failedCard = form.querySelector(`[data-integration="${CSS.escape(failure.integration)}"]`);
+        if (failedCard) failedCard.querySelector('[data-integration-validation]').textContent = failure.reason;
+      }
+    }
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
+    card.querySelector('[data-action="cancel-integration"]').disabled = false;
     updateIntegrationSaveState(form);
   }
 }
@@ -825,8 +870,16 @@ function applySavedIntegration(card, integration) {
   const toggle = card.querySelector('[data-action="integration-toggle"]');
   toggle.dataset.enabled = String(integration.enabled);
   toggle.textContent = integration.enabled ? 'Disable' : 'Enable';
+  card.dataset.active = String(integration.active);
   card.dataset.usingDefault = String(integration.usingDefault);
   card.dataset.hasDefault = String(integration.hasDefault);
+  card.dataset.currentValidation = String(integration.isCurrentValidation);
+  card.querySelector('[data-integration-validation]').textContent =
+    integration.lastValidationResult === 'Validated' && integration.lastValidatedAt
+      ? `Validated at ${new Date(integration.lastValidatedAt).toLocaleString()}`
+      : integration.lastValidationResult === 'Failed'
+        ? integration.lastValidationReason || 'Last validation failed'
+        : 'Not validated';
   updateIntegrationHealth(card, integration);
   card.querySelector('[data-default-status]').textContent = integration.usingDefault
     ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved';
@@ -908,8 +961,9 @@ async function testSmtpConnection(event) {
       body: JSON.stringify({}),
     });
     applySavedIntegration(card, result.integrations.smtp);
-    showNotice('Saved SMTP connection verified and set as the default.');
+    showNotice('Saved SMTP connection verified.');
   } catch (error) {
+    if (showIntegrationRateLimit(error, button)) return;
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
     try {
       const current = await request('/admin/settings');
@@ -919,7 +973,7 @@ async function testSmtpConnection(event) {
     }
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
   }
 }
 
@@ -949,8 +1003,9 @@ async function testIntegrationConnection(event) {
       body: JSON.stringify({}),
     });
     applySavedIntegration(card, result.integrations[integrationId]);
-    showNotice(`${connectionTest.label} connection verified and saved settings are now the default.`);
+    showNotice(`${connectionTest.label} connection verified.`);
   } catch (error) {
+    if (showIntegrationRateLimit(error, button)) return;
     try {
       const current = await request('/admin/settings');
       if (current.integrations?.[integrationId]) applySavedIntegration(card, current.integrations[integrationId]);
@@ -959,7 +1014,7 @@ async function testIntegrationConnection(event) {
     }
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
   }
 }
 
@@ -975,8 +1030,9 @@ async function testCalendarConnection(event) {
       body: JSON.stringify({}),
     });
     applySavedIntegration(card, result.integrations.google_calendar);
-    showNotice('Google Calendar is reachable and the saved settings are now the default.');
+    showNotice('Google Calendar is reachable.');
   } catch (error) {
+    if (showIntegrationRateLimit(error, button)) return;
     try {
       const current = await request('/admin/settings');
       if (current.integrations?.google_calendar) applySavedIntegration(card, current.integrations.google_calendar);
@@ -985,7 +1041,7 @@ async function testCalendarConnection(event) {
     }
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
   }
 }
 
@@ -996,9 +1052,9 @@ async function testAdminMfa(event) {
     await request('/admin/settings/admin-mfa/test', jsonPost({}));
     showNotice('Admin MFA encryption and authenticator self-test passed.');
   } catch (error) {
-    showNotice(error.message, true);
+    if (!showIntegrationRateLimit(error, button)) showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = false;
   }
 }
 

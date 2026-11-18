@@ -750,6 +750,60 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   }
 });
 
+test('eleven rapid integration saves return 429 with Retry-After', async () => {
+  const rateLimitedAdmin = {
+    id: 'integration-rate-limit-admin',
+    full_name: 'Rate Limit Admin',
+    role_name: 'admin',
+    status: 'active',
+  };
+  accounts.set(rateLimitedAdmin.id, rateLimitedAdmin);
+  const headers = {
+    'x-test-user': rateLimitedAdmin.id,
+    Origin: 'http://localhost:5173',
+    'Content-Type': 'application/json',
+  };
+  try {
+    const accessResponse = await fetch(`${baseUrl}/admin/settings/access`, {
+      headers: { 'x-test-user': rateLimitedAdmin.id },
+    });
+    const { csrfToken } = await accessResponse.json();
+    const writeHeaders = { ...headers, 'x-csrf-token': csrfToken };
+    const unlock = await fetch(`${baseUrl}/admin/settings/unlock`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ pin: '123456' }),
+    });
+    assert.equal(unlock.status, 200);
+
+    const before = integrationSaveCount;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const saved = await fetch(`${baseUrl}/admin/settings`, {
+        method: 'PUT',
+        headers: writeHeaders,
+        body: JSON.stringify({
+          integrations: { google_auth: { enabled: false, fields: {} } },
+        }),
+      });
+      assert.equal(saved.status, 200, `save ${attempt + 1} should be below the route limit`);
+    }
+    const limited = await fetch(`${baseUrl}/admin/settings`, {
+      method: 'PUT',
+      headers: writeHeaders,
+      body: JSON.stringify({
+        integrations: { google_auth: { enabled: false, fields: {} } },
+      }),
+    });
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get('retry-after')) > 0);
+    assert.match((await limited.json()).error, /Too many attempts\. Try again in/);
+    assert.equal(integrationSaveCount, before + 10);
+  } finally {
+    accounts.delete(rateLimitedAdmin.id);
+    testSessions.delete(rateLimitedAdmin.id);
+  }
+});
+
 test('role permission dependencies expand parents and reject unknown keys', () => {
   assert.deepEqual(normalizeRolePermissions('staff', ['approve_claim']), [
     'view_claims', 'verify_item_ownership', 'approve_claim',

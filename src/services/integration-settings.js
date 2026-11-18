@@ -1,4 +1,5 @@
 const { createCipheriv, createDecipheriv, createHmac, randomBytes } = require('node:crypto');
+const config = require('../config');
 const { integrations } = require('../config/integrations');
 
 const MASK = '••••••••';
@@ -100,6 +101,17 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         },
         hasDefault,
         usingDefault,
+        lastValidatedAt: document?.last_validation?.at || null,
+        lastValidationResult: document?.last_validation?.passed
+          ? 'Validated'
+          : document?.last_validation?.passed === false ? 'Failed' : 'Not validated',
+        lastValidationReason: document?.last_validation?.passed === false
+          ? String(document.last_validation.result || 'Validation failed')
+          : null,
+        isCurrentValidation: Boolean(
+          document?.last_validation?.passed
+          && document.last_validation.hash === configHash(id, integration.settings, key),
+        ),
         fields: definition.fields.map((field) => {
           const value = integration.settings[field.name];
           return {
@@ -232,6 +244,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       throw validationError('Submit valid integration settings.');
     }
     const ids = Object.keys(input);
+    if (!ids.length) throw validationError('Submit at least one integration setting.');
     if (ids.some((id) => !integrations[id])) throw validationError('An unknown integration was submitted.');
 
     const updates = [];
@@ -344,9 +357,20 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     const { updates, changed } = plan;
     if (!updates.length) return { integrations: await getAdminIntegrations(), changed: [] };
 
+    const validatedIds = new Set(plan.validatedIntegrationIds || []);
+    const defaultSnapshots = new Map();
+    for (const { id, values } of updates) {
+      if (validatedIds.has(id) && integrations[id].validationType === 'full') {
+        defaultSnapshots.set(id, await encryptSnapshot(id, values));
+      }
+    }
     const operations = updates.map(({ id, enabled, persist }) => {
       const set = { enabled, updated_at: new Date().toISOString() };
       for (const [name, value] of Object.entries(persist)) set[`values.${name}`] = value;
+      if (defaultSnapshots.has(id)) {
+        set.defaults = defaultSnapshots.get(id);
+        set.defaults_initialized = true;
+      }
       return { updateOne: { filter: { _id: id }, update: { $set: set }, upsert: true } };
     });
     const events = updates.flatMap(({ id, changedFields, enabledChanged, enabled }) => {
@@ -371,7 +395,44 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       }
       return actions;
     });
-    await audit.runAction(events, () => settings.bulkWrite(operations, { ordered: true }));
+    await audit.runAction(events, async (session) => {
+      if (session) {
+        await settings.bulkWrite(operations, { ordered: true, session });
+        return;
+      }
+
+      const previous = await Promise.all(updates.map(({ id }) => settings.findOne({ _id: id })));
+      const attempted = [];
+      try {
+        for (let index = 0; index < operations.length; index += 1) {
+          attempted.push(index);
+          const { updateOne } = operations[index];
+          await settings.updateOne(
+            updateOne.filter,
+            updateOne.update,
+            { upsert: true },
+          );
+        }
+      } catch {
+        let rollbackFailed = false;
+        for (const index of attempted.reverse()) {
+          try {
+            const id = updates[index].id;
+            if (previous[index]) {
+              await settings.replaceOne({ _id: id }, previous[index], { upsert: true });
+            } else {
+              await settings.deleteOne({ _id: id });
+            }
+          } catch {
+            rollbackFailed = true;
+          }
+        }
+        if (rollbackFailed) console.error('Integration settings rollback failed.');
+        const error = new Error('Integration settings could not be saved. No configuration changes were applied.');
+        error.status = 503;
+        throw error;
+      }
+    });
     return { integrations: await getAdminIntegrations(), changed };
   }
 
@@ -392,10 +453,39 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return { id: integrationId, changedFields, values: defaults };
   }
 
+  async function recordCandidateValidation(integrationId, values, passed, result) {
+    if (!integrations[integrationId]) throw validationError('Unknown integration.');
+    await settings.updateOne(
+      { _id: integrationId },
+      {
+        $set: {
+          last_validation: {
+            hash: configHash(integrationId, values, key),
+            passed: Boolean(passed),
+            at: new Date(),
+            result: String(result || (passed ? 'Validated' : 'Failed')).slice(0, 160),
+          },
+        },
+      },
+      { upsert: true },
+    );
+  }
+
+  function getConfigHash(integrationId, values) {
+    return configHash(integrationId, values, key);
+  }
+
   async function setIntegrationDefault(integrationId, audit, auditContext) {
     const current = await getIntegration(integrationId);
-    if (!current.configured) {
-      const error = new Error('Configure all required fields before setting a default.');
+    if (!current.active) {
+      const error = new Error('Enable and configure the active integration before setting it as the default.');
+      error.status = 400;
+      throw error;
+    }
+    const document = await settings.findOne({ _id: integrationId });
+    const hash = configHash(integrationId, current.settings, key);
+    if (!document?.last_validation?.passed || document.last_validation.hash !== hash) {
+      const error = new Error('The active configuration has not passed validation for exactly this configuration.');
       error.status = 400;
       throw error;
     }
@@ -539,6 +629,8 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     setIntegrationDefault,
     restoreIntegrationDefault,
     validateIntegrationFields,
+    recordCandidateValidation,
+    getConfigHash,
     migrateEnvironmentValues,
     validateStoredSecrets,
   };
@@ -562,7 +654,9 @@ function getEnvironmentValue(integrationId, field, env) {
 
 function normalizeFieldValue(field, value) {
   if (field.type === 'checkbox') return value === true || value === 'true';
-  if (field.name === 'port') return value === '' || value === null ? '' : String(value);
+  if (field.name === 'port' || field.name === 'rate_limit_per_minute') {
+    return value === '' || value === null ? '' : String(value);
+  }
   return typeof value === 'string' ? value.trim() : '';
 }
 
@@ -609,6 +703,13 @@ function validateField(field, raw) {
   } else if (field.format === 'port'
     && (!/^\d{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 65535)) {
     return { error: 'Enter a port between 1 and 65535.' };
+  } else if (field.format === 'rate_limit'
+    && (!/^\d+$/.test(value)
+      || Number(value) < config.integrationRateLimits.minimum
+      || Number(value) > config.integrationRateLimits.maximum)) {
+    return {
+      error: `Enter a call limit between ${config.integrationRateLimits.minimum} and ${config.integrationRateLimits.maximum} per minute.`,
+    };
   } else if (field.format === 'mfa_window' && !/^[01]$/.test(value)) {
     return { error: 'Choose a tolerance of 0 or 1 time step.' };
   } else if (field.format === 'sender_email'
@@ -677,6 +778,14 @@ function decryptValue(value, key) {
   } catch {
     throw new Error('Unable to decrypt integration settings. Check INTEGRATION_ENCRYPTION_KEY.');
   }
+}
+
+function configHash(integrationId, values, key) {
+  const definition = integrations[integrationId];
+  if (!definition) return '';
+  const canonical = {};
+  for (const field of definition.fields) canonical[field.name] = normalizeFieldValue(field, values?.[field.name]);
+  return createHmac('sha256', key).update(JSON.stringify({ integrationId, values: canonical })).digest('hex');
 }
 
 function validationError(message) {

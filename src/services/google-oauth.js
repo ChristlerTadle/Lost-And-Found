@@ -33,8 +33,10 @@ function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchI
   }
 
   return {
-    async testConnection(auditContext) {
-      const integration = await getIntegration('google_auth');
+    async testConnection(auditContext, settings = null, options = {}) {
+      const integration = settings
+        ? { configured: true, active: true, settings }
+        : await getIntegration('google_auth');
       if (!integration.configured) {
         const error = new Error('Configure all required saved Google sign-in fields before testing.');
         error.status = 400;
@@ -68,7 +70,7 @@ function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchI
         }
         if (!response.ok || result.error) throw providerFailure('provider_error');
         return true;
-      }, auditContext);
+      }, auditContext, options);
     },
 
     async createAuthorizationRequest() {

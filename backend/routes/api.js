@@ -75,6 +75,7 @@ function createApiRouter({ services, frontendOrigin }) {
       recaptcha: services.recaptcha,
       googleCalendar: services.googleCalendar,
       email: services.email,
+      callIntegration: services.callIntegration,
       audit: services.audit,
     }),
   };

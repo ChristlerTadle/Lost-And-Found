@@ -17,6 +17,7 @@ function createAdminController({
   recaptcha,
   googleCalendar,
   email,
+  callIntegration,
   audit,
 }) {
   return {
@@ -240,8 +241,11 @@ function createAdminController({
     putAdminSettings: async (req, res) => {
       try {
         const plan = await integrationSettings.prepareIntegrationSave(
-          requireSingleIntegration(req.body?.integrations),
+          req.body?.integrations,
         );
+        await validateIntegrationSavePlan(req, plan, {
+          integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
+        });
         if (plan.credentialChanges.length) {
           const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
           return res.json({ verificationRequired: true, ...result });
@@ -264,13 +268,16 @@ function createAdminController({
           return res.json({ verificationRequired: true, restoreDefault: restore.integrationId, ...result });
         }
         const plan = await integrationSettings.prepareIntegrationSave(
-          requireSingleIntegration(req.body?.integrations),
+          req.body?.integrations,
         );
         if (!plan.credentialChanges.length) {
           const error = new Error('There are no credential changes to verify.');
           error.status = 400;
           throw error;
         }
+        await validateIntegrationSavePlan(req, plan, {
+          integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
+        });
         const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
         return res.json({ verificationRequired: true, ...result });
       } catch (error) {
@@ -306,7 +313,7 @@ function createAdminController({
           ));
         }
         const plan = await integrationSettings.prepareIntegrationSave(
-          requireSingleIntegration(req.body?.integrations),
+          req.body?.integrations,
         );
         if (!plan.credentialChanges.length) {
           const error = new Error('There are no credential changes to verify.');
@@ -321,6 +328,9 @@ function createAdminController({
           auditContext: requestAuditContext(req, null),
           audit,
           changes: plan.changes,
+        });
+        await validateIntegrationSavePlan(req, plan, {
+          integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
         });
         return res.json(await integrationSettings.applyIntegrationSave(
           plan, audit, requestAuditContext(req, null),
@@ -345,6 +355,9 @@ function createAdminController({
           [integrationId]: { enabled: current.enabled, fields: preview.values },
         });
         if (plan.credentialChanges.length) {
+          await validateIntegrationSavePlan(req, plan, {
+            integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
+          });
           req.session.pendingAdminMfaRestore = {
             adminId: String(req.user.id),
             integrationId,
@@ -362,20 +375,21 @@ function createAdminController({
       ));
     },
 
-    postAdminSettingsSmtpTest: async (_req, res) => {
+    postAdminSettingsSmtpTest: async (req, res) => {
+      const smtp = await integrationSettings.getIntegration('smtp');
       try {
-        const smtp = await integrationSettings.getIntegration('smtp');
         if (!smtp.configured) {
           const error = new Error('Configure all required saved SMTP fields before testing.');
           error.status = 400;
           throw error;
         }
-        await email.testConnection(smtp.settings);
-        const result = await integrationSettings.setIntegrationDefault(
-          'smtp', audit, requestAuditContext(_req, null),
-        );
-        return res.json({ verified: true, ...result });
+        await email.testConnection(smtp.settings, requestAuditContext(req, null));
+        if (integrationSettings.recordCandidateValidation) {
+          await integrationSettings.recordCandidateValidation('smtp', smtp.settings, true, 'Validated');
+        }
+        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
       } catch (error) {
+        await recordSavedValidationFailure(integrationSettings, 'smtp', smtp.settings, error);
         const safeError = new Error('SMTP connection could not be verified. Check saved SMTP settings and credentials.');
         safeError.status = error.status || 400;
         throw safeError;
@@ -383,13 +397,15 @@ function createAdminController({
     },
 
     postAdminSettingsGoogleCalendarTest: async (req, res) => {
+      const current = await integrationSettings.getIntegration('google_calendar');
       try {
-        await googleCalendar.testConnection(requestAuditContext(req, null));
-        const result = await integrationSettings.setIntegrationDefault(
-          'google_calendar', audit, requestAuditContext(req, null),
-        );
-        return res.json({ verified: true, ...result });
+        await googleCalendar.testConnection(requestAuditContext(req, null), current.settings);
+        if (integrationSettings.recordCandidateValidation) {
+          await integrationSettings.recordCandidateValidation('google_calendar', current.settings, true, 'Validated');
+        }
+        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
       } catch (error) {
+        await recordSavedValidationFailure(integrationSettings, 'google_calendar', current.settings, error);
         const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
           ? 'Google Calendar credentials were rejected. Check the service-account email and private key.'
           : error instanceof IntegrationError
@@ -404,13 +420,15 @@ function createAdminController({
     },
 
     postAdminSettingsGoogleAuthTest: async (req, res) => {
+      const current = await integrationSettings.getIntegration('google_auth');
       try {
-        await googleOAuth.testConnection(requestAuditContext(req, null));
-        const result = await integrationSettings.setIntegrationDefault(
-          'google_auth', audit, requestAuditContext(req, null),
-        );
-        return res.json({ verified: true, ...result });
+        await googleOAuth.testConnection(requestAuditContext(req, null), current.settings);
+        if (integrationSettings.recordCandidateValidation) {
+          await integrationSettings.recordCandidateValidation('google_auth', current.settings, true, 'Validated');
+        }
+        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
       } catch (error) {
+        await recordSavedValidationFailure(integrationSettings, 'google_auth', current.settings, error);
         const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
           ? 'Google sign-in credentials were rejected. Check the client ID, client secret, and callback URL.'
           : error instanceof IntegrationError
@@ -425,13 +443,15 @@ function createAdminController({
     },
 
     postAdminSettingsRecaptchaTest: async (req, res) => {
+      const current = await integrationSettings.getIntegration('recaptcha');
       try {
-        await recaptcha.testConnection(requestAuditContext(req, null));
-        const result = await integrationSettings.setIntegrationDefault(
-          'recaptcha', audit, requestAuditContext(req, null),
-        );
-        return res.json({ verified: true, ...result });
+        await recaptcha.testConnection(requestAuditContext(req, null), current.settings);
+        if (integrationSettings.recordCandidateValidation) {
+          await integrationSettings.recordCandidateValidation('recaptcha', current.settings, true, 'Validated');
+        }
+        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
       } catch (error) {
+        await recordSavedValidationFailure(integrationSettings, 'recaptcha', current.settings, error);
         const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
           ? 'reCAPTCHA secret key was rejected. Check the saved secret key.'
           : error instanceof IntegrationError
@@ -446,8 +466,17 @@ function createAdminController({
     },
 
     postAdminSettingsAdminMfaTest: async (_req, res) => {
-      await adminMfa.selfTest();
-      return res.json({ verified: true });
+      const current = await integrationSettings.getIntegration('admin_mfa');
+      try {
+        await adminMfa.selfTest(current.settings);
+        if (integrationSettings.recordCandidateValidation) {
+          await integrationSettings.recordCandidateValidation('admin_mfa', current.settings, true, 'Validated');
+        }
+        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+      } catch (error) {
+        await recordSavedValidationFailure(integrationSettings, 'admin_mfa', current.settings, error);
+        throw error;
+      }
     },
 
     getAdminMfaStatus: async (req, res) => {
@@ -557,23 +586,113 @@ async function restoreIntegrationDefaultForRequest(req, integrationId, integrati
   return { ...result, noticeSent, warning };
 }
 
+async function recordSavedValidationFailure(integrationSettings, integrationId, values, error) {
+  if (!integrationSettings.recordCandidateValidation) return;
+  await integrationSettings.recordCandidateValidation(
+    integrationId, values, false, safeValidationReason(error),
+  );
+}
+
+async function validateIntegrationSavePlan(req, plan, services) {
+  const {
+    integrationSettings, adminMfa, googleOAuth, recaptcha, googleCalendar, email,
+    callIntegration, audit,
+  } = services;
+  const failures = [];
+  const validated = [];
+  const context = requestAuditContext(req, null);
+  let responseStatus = 400;
+
+  for (const update of plan.updates || []) {
+    const shouldValidate = update.enabled
+      && (update.credentialFields.length || update.enabledChanged);
+    if (!shouldValidate) continue;
+
+    try {
+      callIntegration?.checkValidationCooldown?.(update.id);
+      if (update.id === 'smtp') {
+        await email.testConnection(update.values, context, { candidateValidation: true });
+      } else if (update.id === 'google_calendar') {
+        await googleCalendar.testConnection(context, update.values, { candidateValidation: true });
+      } else if (update.id === 'google_auth') {
+        await googleOAuth.testConnection(context, update.values, { candidateValidation: true });
+      } else if (update.id === 'recaptcha') {
+        await recaptcha.testConnection(context, update.values, { candidateValidation: true });
+      } else if (update.id === 'admin_mfa') {
+        await adminMfa.selfTest(update.values);
+      }
+      if (integrationSettings.recordCandidateValidation) {
+        await integrationSettings.recordCandidateValidation(
+          update.id, update.values, true, 'Validated',
+        );
+      }
+      callIntegration?.clearValidationFailures?.(update.id);
+      validated.push(update.id);
+    } catch (error) {
+      if (error?.code !== 'rate_limited'
+        && error?.code !== 'validation_cooldown'
+        && error?.name !== 'IntegrationRateLimitError') {
+        callIntegration?.recordValidationFailure?.(update.id);
+      }
+      if (error?.status === 429) responseStatus = 429;
+      else if (error?.status >= 500 && responseStatus !== 429) responseStatus = 503;
+      const reason = safeValidationReason(error);
+      if (integrationSettings.recordCandidateValidation) {
+        await integrationSettings.recordCandidateValidation(update.id, update.values, false, reason);
+      }
+      try {
+        await audit.logAction({
+          ...context,
+          action: 'integration.validate_failed',
+          target_type: 'integration',
+          target_id: update.id,
+          new_value: {},
+          result: 'failed',
+        });
+      } catch {}
+      failures.push({
+        integration: update.id,
+        label: integrationSettings.getIntegrationLabel(update.id),
+        reason,
+      });
+    }
+  }
+
+  if (failures.length) {
+    const error = new Error('One or more integration configurations could not be verified.');
+    error.status = responseStatus;
+    error.failures = failures;
+    throw error;
+  }
+  plan.validatedIntegrationIds = validated;
+}
+
+function safeValidationReason(error) {
+  if (error?.name === 'IntegrationRateLimitError' || error?.code === 'rate_limited') {
+    return 'Please try again shortly';
+  }
+  if (error?.code === 'validation_cooldown') return 'Could not verify, try again';
+  if (error?.code === 'invalid_credentials') return 'Credentials rejected by provider';
+  if (error?.code === 'calendar_not_shared') return 'Calendar not shared with the service account';
+  if (error?.code === 'timeout') return 'Connection timed out';
+  if (error?.code === 'network') return 'Could not verify, try again';
+  if (error?.code === 'provider_error') return 'Could not verify, try again';
+  if (error?.status === 429) return 'Please try again shortly';
+  if (error?.status === 503) return 'Could not verify, try again';
+  return 'Could not verify, try again';
+}
+
 function integrationSettingsError(res, error, fallbackMessage) {
   if (error.fieldErrors) {
     return res.status(error.status || 400).json({ error: error.message, fieldErrors: error.fieldErrors });
+  }
+  if (error.failures) {
+    return res.status(error.status || 400).json({ error: error.message, failures: error.failures });
   }
   if ([400, 403, 404, 429, 503].includes(error.status)) {
     return res.status(error.status).json({ error: error.message });
   }
   return res.status(500).json({ error: fallbackMessage });
-}
-
-function requireSingleIntegration(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1) {
-    const error = new Error('Save one integration card at a time.');
-    error.status = 400;
-    throw error;
-  }
-  return input;
 }
 
 async function findAccount(auth, id) {

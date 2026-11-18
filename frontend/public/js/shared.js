@@ -45,6 +45,7 @@ async function request(path, options = {}) {
     }
     const error = new Error(data.error || `Request failed (${response.status}).`);
     error.status = response.status;
+    error.retryAfter = Number(response.headers.get('Retry-After') || data.retryAfter || 0);
     error.fieldErrors = data.fieldErrors;
     throw error;
   }

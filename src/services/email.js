@@ -72,7 +72,7 @@ function createEmailService(getIntegration, mailer = nodemailer, callIntegration
       }, auditContext);
     },
 
-    async testConnection(settings, auditContext) {
+    async testConnection(settings, auditContext = {}, options = {}) {
       const integration = settings ? null : await getIntegration('smtp');
       if (!settings && !integration.active) return false;
       const config = settings || integration.settings;
@@ -80,7 +80,7 @@ function createEmailService(getIntegration, mailer = nodemailer, callIntegration
         const transport = await getTransport(config);
         await transport.transporter.verify();
         return true;
-      }, auditContext);
+      }, auditContext, options);
     },
   };
 }

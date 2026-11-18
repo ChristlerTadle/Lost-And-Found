@@ -260,6 +260,8 @@ async function adminSettings() {
   };
   const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}"
     data-using-default="${integration.usingDefault}" data-has-default="${integration.hasDefault}"
+    data-active="${integration.active}"
+    data-current-validation="${integration.isCurrentValidation}"
     data-failing="${integration.status === 'Failing'}">
     <div class="integration-setting-main">
       <div class="integration-setting-copy"><div class="integration-setting-heading"><h2>${h(integration.label)}</h2></div>
@@ -271,6 +273,13 @@ async function adminSettings() {
           ${integration.status === 'Failing' && integration.health?.consecutive_failures ? ` (${integration.health.consecutive_failures} consecutive)` : ''}
         </p>
         <p class="integration-default-status">Default: <span data-default-status>${integration.usingDefault ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved'}</span></p>
+        <p class="integration-validation-status" data-integration-validation>
+          ${integration.lastValidationResult === 'Validated' && integration.lastValidatedAt
+            ? `Validated at ${h(new Date(integration.lastValidatedAt).toLocaleString())}`
+            : integration.lastValidationResult === 'Failed'
+              ? h(integration.lastValidationReason || 'Last validation failed')
+              : 'Not validated'}
+        </p>
         <p class="integration-missing-fields" data-integration-missing>${integration.missingFields.length
           ? `Missing: ${integration.missingFields.map((name) => {
             const field = integration.fields.find((entry) => entry.name === name);
@@ -305,7 +314,9 @@ async function adminSettings() {
       </div>`).join('')}</div>
     </details>
     <div class="integration-default-actions">
-      <button class="button button-outline" type="button" data-action="set-integration-default">Set current as default</button>
+      <button class="button button-outline" type="button" data-action="set-integration-default"
+        ${integration.active && integration.isCurrentValidation && !integration.usingDefault ? '' : 'disabled'}>
+        Set current as default</button>
       <button class="button button-outline" type="button" data-action="restore-integration-default" ${integration.hasDefault && !integration.usingDefault ? '' : 'disabled'}>
         Restore default</button>
     </div>
@@ -361,7 +372,7 @@ async function adminSystemRecords() {
     'integration.enable', 'integration.disable', 'integration.update',
     'integration.unlock', 'integration.unlock_failed', 'integration.unlock_locked',
     'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
-    'integration.set_default', 'integration.failure',
+    'integration.set_default', 'integration.validate_failed', 'integration.rate_limited', 'integration.failure',
     'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
     'admin.mfa_enroll_start', 'admin.mfa_enrolled', 'admin.mfa_verify_success',
     'admin.mfa_verify_failed', 'admin.mfa_locked', 'admin.mfa_recovery_used',

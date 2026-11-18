@@ -1,3 +1,5 @@
+const config = require('../config');
+
 const FAILURE_CODES = new Set([
   'invalid_credentials',
   'network',
@@ -54,11 +56,91 @@ function providerFailure(code) {
 }
 
 function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVIDER_TIMEOUT_MS }) {
-  return async function callIntegration(integrationId, operation, auditContext = {}) {
+  const buckets = new Map();
+  const validationFailures = new Map();
+  const validationCooldowns = new Map();
+  const { integrationRouteLimits, integrationRateLimits } = config;
+
+  async function consumeIntegrationBucket(integrationId) {
+    if (!integrationSettings.getIntegration) return;
+    const integration = await integrationSettings.getIntegration(integrationId);
+    const limit = Math.max(
+      integrationRateLimits.minimum,
+      Math.min(integrationRateLimits.maximum, Number(
+        integration.settings?.rate_limit_per_minute
+        || integrationRateLimits.defaultPerMinute[integrationId]
+        || integrationRateLimits.maximum,
+      )),
+    );
+    const now = Date.now();
+    const windowMs = integrationRateLimits.bucketWindowMs;
+    let bucket = buckets.get(integrationId);
+    if (!bucket) {
+      bucket = { tokens: limit, updatedAt: now };
+      buckets.set(integrationId, bucket);
+    }
+    bucket.tokens = Math.min(bucket.tokens, limit);
+    const elapsed = now - bucket.updatedAt;
+    bucket.tokens = Math.min(limit, bucket.tokens + (elapsed / windowMs) * limit);
+    bucket.updatedAt = now;
+    if (bucket.tokens < 1) {
+      const error = new Error('Please try again shortly');
+      error.name = 'IntegrationRateLimitError';
+      error.status = 429;
+      error.integrationId = integrationId;
+      error.code = 'rate_limited';
+      throw error;
+    }
+    bucket.tokens -= 1;
+  }
+
+  async function recordValidationFailure(integrationId) {
+    const now = Date.now();
+    let failures = (validationFailures.get(integrationId) || []).filter(
+      (at) => now - at < integrationRouteLimits.validationFailureWindowMs,
+    );
+    failures.push(now);
+    validationFailures.set(integrationId, failures);
+    if (failures.length >= integrationRouteLimits.validationFailureCount) {
+      validationCooldowns.set(integrationId, now + integrationRouteLimits.validationCooldownMs);
+    }
+  }
+
+  function checkValidationCooldown(integrationId) {
+    const until = validationCooldowns.get(integrationId);
+    if (until && Date.now() < until) {
+      const error = new Error('Could not verify, try again');
+      error.status = 429;
+      error.code = 'validation_cooldown';
+      throw error;
+    }
+  }
+
+  function clearValidationFailures(integrationId) {
+    validationFailures.delete(integrationId);
+    validationCooldowns.delete(integrationId);
+  }
+
+  async function recordRateLimitAudit(integrationId, auditContext) {
+    try {
+      await audit.logAction({
+        ...auditContext,
+        action: 'integration.rate_limited',
+        target_type: 'integration',
+        target_id: integrationId,
+        new_value: {},
+        result: 'failed',
+      });
+    } catch {}
+  }
+
+  async function callIntegration(integrationId, operation, auditContext = {}, options = {}) {
     const controller = new AbortController();
     let timer;
     let timedOut = false;
     try {
+      await consumeIntegrationBucket(integrationId);
+      if (options.candidateValidation) checkValidationCooldown(integrationId);
       const operationPromise = Promise.resolve().then(() => operation({ signal: controller.signal }));
       const timeoutPromise = new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -68,20 +150,28 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
         }, timeoutMs);
       });
       const result = await Promise.race([operationPromise, timeoutPromise]);
-      await integrationSettings.recordIntegrationSuccess(integrationId);
+      if (!options.candidateValidation) await integrationSettings.recordIntegrationSuccess(integrationId);
       return result;
     } catch (error) {
+      if (error?.name === 'IntegrationRateLimitError') {
+        await recordRateLimitAudit(integrationId, auditContext);
+        throw error;
+      }
       if (error?.integrationFailure === false) throw error;
 
       const code = timedOut ? 'timeout' : classifyProviderError(error, integrationId);
       if (!code) throw error;
 
-      await recordFailure(integrationId, code, auditContext);
+      if (!options.candidateValidation) await recordFailure(integrationId, code, auditContext);
       throw new IntegrationError(integrationId, code);
     } finally {
       if (timer) clearTimeout(timer);
     }
-  };
+  }
+  callIntegration.checkValidationCooldown = checkValidationCooldown;
+  callIntegration.recordValidationFailure = recordValidationFailure;
+  callIntegration.clearValidationFailures = clearValidationFailures;
+  return callIntegration;
 
   async function recordFailure(integrationId, code, auditContext) {
     const health = {

@@ -4,8 +4,10 @@ function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch, callInteg
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required to verify reCAPTCHA responses.');
 
   return {
-    async testConnection(auditContext) {
-      const integration = await getIntegration('recaptcha');
+    async testConnection(auditContext, settings = null, options = {}) {
+      const integration = settings
+        ? { configured: true, active: true, settings }
+        : await getIntegration('recaptcha');
       if (!integration.configured || !integration.settings.secret_key) {
         const error = new Error('Configure all required saved reCAPTCHA fields before testing.');
         error.status = 400;
@@ -37,7 +39,7 @@ function createRecaptcha(getIntegration, fetchImpl = globalThis.fetch, callInteg
         }
         if (typeof result.success !== 'boolean') throw providerFailure('provider_error');
         return true;
-      }, auditContext);
+      }, auditContext, options);
     },
 
     async verifyResponse(token, remoteIp, auditContext) {
