@@ -30,6 +30,7 @@ function createApiRouter({ services, frontendOrigin }) {
   const roleGuard = createRolePermissionGuard({
     auth: services.auth,
     rolePermissions: services.rolePermissions,
+    roleChange: services.roleChange,
     items: services.items,
   });
   const guards = {

@@ -9,6 +9,7 @@ function createAdminController({
   auth,
   items,
   rolePermissions,
+  roleChange,
   notifications,
   integrationSettings,
   integrationSecurity,
@@ -53,6 +54,14 @@ function createAdminController({
       const action = req.body.action;
       const oldAccount = await findAccount(auth, req.params.id);
       if (action === 'edit') {
+        const targetRole = String(req.body.role_name || oldAccount.role_name).trim();
+        if (String(req.user.id) === String(req.params.id)) {
+          if (targetRole !== oldAccount.role_name || req.body.permissions !== undefined) {
+            const error = new Error('You cannot edit your own role or permissions.');
+            error.status = 403;
+            throw error;
+          }
+        }
         const nextValues = safeUserValues({
           ...oldAccount,
           full_name: String(req.body.full_name || '').trim(),
@@ -61,6 +70,40 @@ function createAdminController({
           phone: req.body.phone || null,
         });
         const changed = changedValues(safeUserValues(oldAccount), nextValues);
+        if (targetRole !== oldAccount.role_name) {
+          if (!req.rolePermissions?.includes('manage_permissions')
+            || !req.rolePermissions?.includes('edit_user')) {
+            const error = new Error('Role changes require edit_user and manage_permissions.');
+            error.status = 403;
+            throw error;
+          }
+          await roleChange.changeRole({
+            actorId: req.user.id,
+            targetId: req.params.id,
+            newRole: targetRole,
+            permissions: req.body.permissions,
+            auditContext: requestAuditContext(req, null),
+            notifyAssignment: true,
+          });
+        } else if (req.body.permissions !== undefined) {
+          if (!req.rolePermissions?.includes('manage_permissions')) {
+            const error = new Error('Account permissions require manage_permissions.');
+            error.status = 403;
+            throw error;
+          }
+          const normalized = await rolePermissions.prepareAccountPermissions(oldAccount.role_name, req.body);
+          await audit.runAction(requestAuditContext(req, 'account_permissions.update', {
+            target_type: 'user',
+            target_id: req.params.id,
+            old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, oldAccount.role_name) },
+            new_value: { permissions: normalized },
+          }), (session) => rolePermissions.replaceAccountPermissions(
+            req.params.id,
+            oldAccount.role_name,
+            normalized,
+            session,
+          ));
+        }
         await audit.runAction(requestAuditContext(req, 'user.update', {
           target_type: 'user',
           target_id: req.params.id,
@@ -69,25 +112,56 @@ function createAdminController({
         }), (session) => auth.updateUserByAdmin(req.params.id, req.body, { session }));
       }
       else if (action === 'assign_staff') {
-        await audit.runAction(requestAuditContext(req, 'user.update', {
-          target_type: 'user', target_id: req.params.id,
-          old_value: { role_name: oldAccount.role_name }, new_value: { role_name: 'staff' },
-        }), async (session) => {
-          await auth.assignStaffRole(req.params.id, { session });
-          await notifications.create(req.params.id, {
-            type: 'status',
-            title: 'Staff access granted',
-            message: 'An administrator assigned staff access to your account.',
-            href: '/?page=dashboard',
-          }, { session });
+        if (!req.rolePermissions?.includes('manage_permissions')
+          || !req.rolePermissions?.includes('edit_user')) {
+          const error = new Error('Role changes require edit_user and manage_permissions.');
+          error.status = 403;
+          throw error;
+        }
+        await roleChange.changeRole({
+          actorId: req.user.id,
+          targetId: req.params.id,
+          newRole: 'staff',
+          auditContext: requestAuditContext(req, 'account.role_change'),
+          notifyAssignment: true,
         });
       } else if (action === 'revert_staff') {
-        await audit.runAction(requestAuditContext(req, 'user.update', {
-          target_type: 'user', target_id: req.params.id,
-          old_value: { role_name: 'staff' }, new_value: { role_name: 'user' },
-        }), (session) => auth.revertStaffRole(req.params.id, { session }));
+        if (!req.rolePermissions?.includes('manage_permissions')
+          || !req.rolePermissions?.includes('edit_user')) {
+          const error = new Error('Role changes require edit_user and manage_permissions.');
+          error.status = 403;
+          throw error;
+        }
+        await roleChange.changeRole({
+          actorId: req.user.id,
+          targetId: req.params.id,
+          newRole: 'user',
+          auditContext: requestAuditContext(req, 'account.role_change'),
+          notifyAssignment: false,
+        });
       } else if (action === 'disable' || action === 'enable') {
+        if (String(req.user.id) === String(req.params.id) && action === 'disable') {
+          const error = new Error('You cannot disable your own account.');
+          error.status = 403;
+          throw error;
+        }
         const status = action === 'disable' ? 'disabled' : 'active';
+        if (action === 'disable' && oldAccount.role_name === 'admin') {
+          const core = ['manage_permissions', 'view_users', 'manage_integrations'];
+          const accounts = await auth.findAccountsForStaffAssignment();
+          const remaining = accounts.filter((account) => account.id !== String(req.params.id)
+            && account.role_name === 'admin' && account.status === 'active');
+          const qualified = [];
+          for (const account of remaining) {
+            const effective = await rolePermissions.findEffectivePermissions(account.id, 'admin');
+            if (core.every((permission) => effective.includes(permission))) qualified.push(account);
+          }
+          if (!qualified.length) {
+            const error = new Error('This change would leave no active admin with the core permissions.');
+            error.status = 403;
+            throw error;
+          }
+        }
         await audit.runAction(requestAuditContext(req, action === 'disable' ? 'user.disable' : 'user.update', {
           target_type: 'user', target_id: req.params.id,
           old_value: { status: oldAccount.status }, new_value: { status },
@@ -102,8 +176,63 @@ function createAdminController({
     },
 
     getAdminRolePermissions: async (_req, res) => {
-      const roles = await Promise.all(['user', 'staff'].map((role) => rolePermissions.getRoleSettings(role)));
+      const roles = await Promise.all(['user', 'staff', 'admin'].map((role) => rolePermissions.getRoleSettings(role)));
       return res.json({ roles });
+    },
+
+    getAdminUserPermissions: async (req, res) => {
+      const account = await findAccount(auth, req.params.id);
+      return res.json(await rolePermissions.getAccountPermissions(account.id, account.role_name));
+    },
+
+    putAdminUserPermissions: async (req, res) => {
+      if (String(req.user.id) === String(req.params.id)) {
+        const error = new Error('You cannot edit your own permissions.');
+        error.status = 403;
+        throw error;
+      }
+      const account = await findAccount(auth, req.params.id);
+      const normalized = await rolePermissions.prepareAccountPermissions(account.role_name, req.body);
+      if (account.role_name === 'admin') {
+        const core = ['manage_permissions', 'view_users', 'manage_integrations'];
+        if (core.some((permission) => !normalized.includes(permission))) {
+          const error = new Error('Core Admin permissions cannot be removed.');
+          error.status = 403;
+          throw error;
+        }
+      }
+      const result = await audit.runAction(requestAuditContext(req, 'account_permissions.update', {
+        target_type: 'user',
+        target_id: req.params.id,
+        old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
+        new_value: { permissions: normalized },
+      }), (session) => rolePermissions.replaceAccountPermissions(
+        req.params.id,
+        account.role_name,
+        normalized,
+        session,
+      ));
+      return res.json(result);
+    },
+
+    resetAdminUserPermissions: async (req, res) => {
+      if (String(req.user.id) === String(req.params.id)) {
+        const error = new Error('You cannot reset your own permissions.');
+        error.status = 403;
+        throw error;
+      }
+      const account = await findAccount(auth, req.params.id);
+      const result = await audit.runAction(requestAuditContext(req, 'account_permissions.reset', {
+        target_type: 'user',
+        target_id: req.params.id,
+        old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
+        new_value: { permissions: await rolePermissions.findRolePermissions(account.role_name) },
+      }), (session) => rolePermissions.resetAccountPermissions(
+        req.params.id,
+        account.role_name,
+        session,
+      ));
+      return res.json(result);
     },
 
     putAdminRolePermissions: async (req, res) => {

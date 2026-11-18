@@ -26,6 +26,7 @@ const accounts = new Map([user, staff, secondStaff, admin, disabledUser].map((ac
 const permissionsByRole = new Map([
   ['user', PERMISSIONS_BY_ROLE.user.map(({ key }) => key)],
   ['staff', PERMISSIONS_BY_ROLE.staff.map(({ key }) => key)],
+  ['admin', PERMISSIONS_BY_ROLE.admin.map(({ key }) => key)],
 ]);
 const auditEvents = [];
 let recaptchaEnabled = false;

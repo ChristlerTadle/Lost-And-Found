@@ -16,6 +16,7 @@ const { createGoogleCalendar } = require('../src/services/google-calendar');
 const { createItemService } = require('../src/services/items');
 const { createNotificationService } = require('../src/services/notifications');
 const { createRolePermissionService } = require('../src/services/role-permissions');
+const { createRoleChangeService } = require('../src/services/role-change');
 const { createAuditLogService } = require('../src/services/audit-log');
 const { parseEncryptionKey } = require('../src/services/integration-settings');
 const { createApiRouter } = require('./routes/api');
@@ -64,6 +65,7 @@ async function start() {
     audit,
     callIntegration,
   });
+  const rolePermissions = createRolePermissionService(database);
   const services = {
     auth: createAuthService(database),
     googleOAuth: createGoogleOAuth(integrationSettings.getIntegration, callIntegration),
@@ -76,9 +78,14 @@ async function start() {
     googleCalendar,
     items,
     notifications: notificationService,
-    rolePermissions: createRolePermissionService(database),
+    rolePermissions,
     audit,
   };
+  services.roleChange = createRoleChangeService(database, {
+    rolePermissions,
+    notifications: notificationService,
+    audit,
+  });
   const app = express();
   app.locals.services = services;
 

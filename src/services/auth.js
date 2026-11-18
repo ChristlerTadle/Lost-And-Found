@@ -106,10 +106,14 @@ function createAuthService(database) {
 
     async findAccountsForStaffAssignment() {
       const accounts = await users.find(
-        { role_name: { $in: ['user', 'staff'] } },
+        {},
         { projection: { full_name: 1, email: 1, role_name: 1, status: 1, employee_id: 1, student_id: 1 } },
       ).sort({ full_name: 1 }).toArray();
       return accounts.map(({ _id, ...account }) => ({ ...account, id: String(_id) }));
+    },
+
+    async countActiveAccountsByRole(role) {
+      return users.countDocuments({ role_name: role, status: 'active' });
     },
 
     async findAdminEditableUser(userId) {
@@ -139,7 +143,7 @@ function createAuthService(database) {
 
       try {
         const result = await users.updateOne(
-          { _id: String(userId), role_name: { $in: ['user', 'staff'] }, status: 'active' },
+          { _id: String(userId), role_name: { $in: ['user', 'staff', 'admin'] }, status: 'active' },
           { $set: {
             full_name: fullName,
             email,
@@ -194,7 +198,7 @@ function createAuthService(database) {
       if (!['active', 'disabled'].includes(status)) throw new Error('Choose a valid account status.');
       const filter = {
         _id: String(userId),
-        role_name: { $in: ['user', 'staff'] },
+        role_name: { $in: ['user', 'staff', 'admin'] },
         status: status === 'disabled' ? 'active' : 'disabled',
       };
       const result = await users.updateOne(

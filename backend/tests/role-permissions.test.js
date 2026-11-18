@@ -35,6 +35,12 @@ function createMemoryCollection(initial = []) {
       rows.push(document);
       return { insertedId: document._id };
     },
+    async deleteMany(filter = {}) {
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (Object.entries(filter).every(([key, value]) => rows[index][key] === value)) rows.splice(index, 1);
+      }
+      return { deletedCount: 0 };
+    },
   };
 }
 
@@ -100,6 +106,38 @@ test('effective permissions combine role and account settings with account inher
   assert.ok((await service.findEffectivePermissions('staff-2', 'staff')).includes('update_item_status'));
   assert.ok((await service.findEffectivePermissions('admin-1', 'admin')).includes('manage_permissions'));
   assert.ok((await service.findEffectivePermissions('admin-1', 'admin')).includes('manage_integrations'));
+});
+
+test('account permission saves expand dependencies and reject role-disabled permissions', async () => {
+  const roleCollection = createMemoryCollection(['user', 'staff', 'admin'].flatMap((role) =>
+    PERMISSIONS_BY_ROLE[role].map(({ key }) => ({ role, permission_key: key, enabled: true }))));
+  const accountCollection = createMemoryCollection();
+  const service = createRolePermissionService(memoryDatabase({
+    role_permissions: roleCollection,
+    account_permissions: accountCollection,
+  }));
+
+  await service.replaceRolePermissions('staff', []);
+  await assert.rejects(
+    service.prepareAccountPermissions('staff', { permissions: ['view_lost_reports'] }),
+  );
+  await assert.rejects(
+    service.replaceAccountPermissions('staff-1', 'staff', ['unknown']),
+  );
+
+  await service.replaceRolePermissions(
+    'staff',
+    PERMISSIONS_BY_ROLE.staff.map(({ key }) => key),
+  );
+
+  const saved = await service.replaceAccountPermissions('staff-1', 'staff', ['approve_claim']);
+  assert.deepEqual(saved.permissions, ['view_claims', 'verify_item_ownership', 'approve_claim']);
+  assert.ok(!(await service.findEffectivePermissions('staff-1', 'staff')).includes('schedule_pickup'));
+
+  await service.replaceRolePermissions('staff', ['view_claims']);
+  await assert.rejects(
+    service.prepareAccountPermissions('staff', { permissions: ['approve_claim'] }),
+  );
 });
 
 test('route permission map has unique method/path entries and records both dynamic routes', () => {

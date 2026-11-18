@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 
 const ACTIONS = new Set([
   'user.create', 'user.update', 'user.disable', 'staff_permissions.update', 'role_permissions.update',
+  'account_permissions.update', 'account_permissions.reset', 'account.role_change',
   'item.update', 'item.remove', 'report.generate', 'claim.approve',
   'claim.reject', 'ownership.verify', 'item.status_update', 'item.mark_returned',
   'auth.login', 'auth.login_failed', 'access.denied',
