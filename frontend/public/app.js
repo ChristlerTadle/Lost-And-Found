@@ -5,7 +5,7 @@ import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItem
 import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
-const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo } = shared;
+const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, otherLocationValue, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo } = shared;
 let pendingIntegrationCard = null;
 let pendingIntegrationRestore = null;
 let integrationCodeResendTimer;
@@ -201,7 +201,24 @@ async function renderPage(page) {
 
 function bindForms() {
   app.querySelector('[data-action="retry-page-load"]')?.addEventListener('click', () => { void render(); });
+  app.querySelectorAll('input[name="phone"]').forEach((input) => {
+    const keepDigitsOnly = () => {
+      const cursor = input.selectionStart;
+      const value = input.value;
+      const digits = value.replace(/\D/g, '');
+      if (digits === value) return;
+      input.value = digits;
+      if (cursor !== null) {
+        const digitCursor = value.slice(0, cursor).replace(/\D/g, '').length;
+        input.setSelectionRange(digitCursor, digitCursor);
+      }
+    };
+    keepDigitsOnly();
+    input.addEventListener('input', keepDigitsOnly);
+  });
   app.querySelectorAll('form[data-form]').forEach((form) => form.addEventListener('submit', onFormSubmit));
+  app.querySelectorAll('form[data-form="report"], form[data-form="edit-report"], form[data-form="admin-edit-item"]')
+    .forEach(bindOtherLocation);
   app.querySelectorAll('form[data-action]').forEach((form) => form.addEventListener('submit', onActionForm));
   app.querySelectorAll('[data-action="logout"]').forEach((button) => button.addEventListener('click', logout));
   app.querySelectorAll('[data-action="read-all"]').forEach((button) => button.addEventListener('click', readAll));
@@ -273,10 +290,25 @@ function bindForms() {
   bindDiscardNavigation();
 }
 
+function bindOtherLocation(form) {
+  const select = form.elements.namedItem('location');
+  const field = form.querySelector('[data-other-location-field]');
+  const input = field?.querySelector('[name="location_other"]');
+  if (!select || !field || !input) return;
+  const update = () => {
+    const isOther = select.value === otherLocationValue;
+    field.hidden = !isOther;
+    input.required = isOther;
+    if (!isOther) input.value = '';
+  };
+  select.addEventListener('change', update);
+  update();
+}
+
 async function onFormSubmit(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const values = Object.fromEntries(new FormData(form).entries());
+  const values = normalizedFormValues(form);
   const submit = form.querySelector('button[type="submit"]');
   if (submit) submit.disabled = true;
   try {
@@ -352,14 +384,14 @@ async function onFormSubmit(event) {
         navigate('login');
         return;
       case 'report': {
-        const data = new FormData(form);
+        const data = normalizedFormData(form);
         data.set('item_type', form.dataset.type);
         await request('/items', { method: 'POST', body: data });
         navigate('reports');
         return;
       }
       case 'edit-report': {
-        const data = new FormData(form);
+        const data = normalizedFormData(form);
         await request(`/items/${encodeURIComponent(form.dataset.id)}`, { method: 'PUT', body: data });
         navigate('reports');
         return;
@@ -517,6 +549,23 @@ async function mountRecaptchaWidgets() {
     .forEach((button) => { button.disabled = false; });
 }
 
+function normalizedFormValues(form) {
+  const values = Object.fromEntries(new FormData(form).entries());
+  if (values.location === otherLocationValue) {
+    values.location = String(values.location_other || '').trim();
+  }
+  delete values.location_other;
+  return values;
+}
+
+function normalizedFormData(form) {
+  const data = new FormData(form);
+  const values = normalizedFormValues(form);
+  if (data.has('location')) data.set('location', values.location);
+  data.delete('location_other');
+  return data;
+}
+
 function loadRecaptchaApi() {
   if (window.grecaptcha) {
     return new Promise((resolve) => window.grecaptcha.ready(resolve));
@@ -581,6 +630,10 @@ async function onActionForm(event) {
       case 'cancel-report':
         if (!confirm('Cancel this report?')) return;
         await request(`/items/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        break;
+      case 'resolve-report':
+        if (!confirm('Mark this lost report as resolved? Do this only after you have recovered the item.')) return;
+        await request(`/items/${encodeURIComponent(id)}/resolve`, jsonPost({}));
         break;
       case 'read-notice': await request(`/notifications/${encodeURIComponent(id)}/read`, jsonPatch({})); break;
       case 'verify-item': await request(`/staff/items/${encodeURIComponent(id)}/verify`, { method: 'POST' }); break;
@@ -674,6 +727,7 @@ async function resendAdminRoleChangeCode(event) {
 }
 
 async function logout() {
+  if (!confirm('Are you sure you want to sign out?')) return;
   try { await request('/auth/logout', { method: 'POST' }); }
   catch (error) { showNotice(error.message, true); return; }
   location.href = '/';

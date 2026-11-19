@@ -1,5 +1,5 @@
 import * as shared from '../shared.js';
-const { API, sessionInfo, h, date, param, link, buttonLink, badge, itemStatusLabel, itemTypeLabel, field, selectField, optionsFrom, request, icon, pageHeader, table, formAction, hasPermission } = shared;
+const { API, sessionInfo, h, date, param, link, buttonLink, badge, itemStatusLabel, itemTypeLabel, field, selectField, optionsFrom, locationOptions, otherLocationField, request, icon, pageHeader, table, formAction, hasPermission } = shared;
 
 async function adminDashboard() {
   const { users, summary } = await request('/admin/dashboard');
@@ -79,7 +79,7 @@ function renderAdminCreateUser(roles, canManage) {
     data-current-role="user" data-manage-permissions="${canManage}">
     <h2 class="field full">Create account</h2>${field('Full name', 'full_name', 'text', '', true)}
     ${field('Email address', 'email', 'email', '', true)}${field('Student ID', 'student_id')}
-    ${field('Phone number', 'phone', 'tel')}<div class="field"><label for="password">Temporary password</label>
+    ${field('Phone number', 'phone', 'tel', '', false, 'inputmode="numeric" pattern="[0-9]*" autocomplete="tel"')}<div class="field"><label for="password">Temporary password</label>
       <input class="input" id="password" name="password" type="password" required minlength="8"><small class="admin-password-hint">Use at least 8 characters.</small></div>
     ${canManage ? `<div class="field"><label for="new-account-role">Role</label>
       <select class="select" id="new-account-role" name="role_name" data-action="account-role">
@@ -153,7 +153,7 @@ async function adminEditUser(id) {
   return `<main class="container admin-dashboard admin-edit-user">${pageHeader('Edit user')}
     <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}" data-current-role="${h(user.role_name)}" data-full-name="${h(user.full_name)}">
     ${field('Full name', 'full_name', 'text', user.full_name, true, canEditUsers() ? '' : 'readonly')}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
-    ${field('Student ID', 'student_id', 'text', user.student_id || '', false, canEditUsers() ? '' : 'readonly')}${field('Phone number', 'phone', 'tel', user.phone || '', false, canEditUsers() ? '' : 'readonly')}
+    ${field('Student ID', 'student_id', 'text', user.student_id || '', false, canEditUsers() ? '' : 'readonly')}${field('Phone number', 'phone', 'tel', user.phone || '', false, `inputmode="numeric" pattern="[0-9]*" autocomplete="tel"${canEditUsers() ? '' : ' readonly'}`)}
     <div class="field"><label>Account status</label><p>${h(user.status === 'active' ? 'Active' : 'Disabled')}</p></div>
     ${isSelf
       ? `<div class="field"><label>Role</label><p>${roleName(user.role_name)}</p><input type="hidden" name="role_name" value="${h(user.role_name)}"></div>`
@@ -242,7 +242,7 @@ function canDisableUsers() {
 async function adminItems() {
   const query = new URLSearchParams(location.search);
   const search = new URLSearchParams();
-  ['query', 'item_type', 'status', 'category', 'date_from', 'date_to'].forEach((key) => {
+  ['query', 'item_type', 'status', 'category', 'location', 'date_from', 'date_to'].forEach((key) => {
     if (query.get(key)) search.set(key, query.get(key));
   });
   const { items } = await request(`/admin/items?${search}`);
@@ -257,8 +257,9 @@ async function adminItems() {
     <form method="get" class="browse-filter-form"><input type="hidden" name="page" value="admin-items"><div class="card browse-toolbar">
       <label class="browse-search" for="query">${icon('search', 17)}<input id="query" name="query" value="${h(query.get('query') || '')}" placeholder="Search item, description, location, reporter..."></label>
       <select class="select" name="item_type" aria-label="Filter by item type"><option value="">All Types</option>${['lost', 'found'].map((value) => `<option value="${value}" ${query.get('item_type') === value ? 'selected' : ''}>${itemTypeLabel(value)}</option>`).join('')}</select>
-      <select class="select" name="status" aria-label="Filter by status"><option value="">All Statuses</option>${['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled'].map((value) => `<option value="${value}" ${query.get('status') === value ? 'selected' : ''}>${itemStatusLabel(value)}</option>`).join('')}</select>
+      <select class="select" name="status" aria-label="Filter by status"><option value="">All Statuses</option>${['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled', 'resolved'].map((value) => `<option value="${value}" ${query.get('status') === value ? 'selected' : ''}>${itemStatusLabel(value)}</option>`).join('')}</select>
       <select class="select" name="category" aria-label="Filter by category">${optionsFrom(sessionInfo.categories).map(([value, label]) => `<option value="${value}" ${query.get('category') === value ? 'selected' : ''}>${h(label)}</option>`).join('')}</select>
+      <select class="select" name="location" aria-label="Filter by location">${locationOptions(query.get('location') || '', 'All locations').map(([value, label]) => `<option value="${h(value)}" ${query.get('location') === value ? 'selected' : ''}>${h(label)}</option>`).join('')}</select>
       <button class="button button-primary browse-search-submit" type="submit">Search</button></div>
       <details class="browse-more-filters" ${query.get('date_from') || query.get('date_to') ? 'open' : ''}><summary>Filter by date</summary><div class="browse-more-grid">
         <div class="field"><label for="date_from">From date</label><input class="input" id="date_from" name="date_from" type="date" value="${h(query.get('date_from') || '')}"></div>
@@ -286,7 +287,8 @@ async function adminEditItem(id) {
     <form class="card form-grid admin-edit-item-form" data-form="admin-edit-item" data-id="${h(id)}">
       ${field('Item name', 'item_name', 'text', item.item_name, true)}
       ${selectField('Category', 'category', sessionInfo.categories.map((value) => [value, value]), item.category, true)}
-      ${field('Location', 'location', 'text', item.location, true)}
+      ${selectField('Location', 'location', locationOptions(item.location, 'Choose location', true), item.location, true)}
+      ${otherLocationField()}
       ${field(dateLabel, 'date_lost', 'date', String(item.date_lost).slice(0, 10), true)}
       <div class="field full"><label for="description">Description</label><textarea class="textarea" id="description" name="description" required>${h(item.description)}</textarea></div>
       <div class="field full"><label for="identifying_details">Private identifying details</label><textarea class="textarea" id="identifying_details" name="identifying_details" required>${h(item.identifying_details)}</textarea>

@@ -64,6 +64,11 @@ function createItemsController({ items, googleCalendar }) {
       await googleCalendar.cleanupForItem(req.params.id, requestAuditContext(req, null), { notify: true });
       return res.json({ message: 'Report cancelled.' });
     },
+
+    resolveItemsById: async (req, res) => {
+      await items.resolve(req.user.id, req.params.id);
+      return res.json({ message: 'Lost report marked resolved.' });
+    },
   };
 }
 

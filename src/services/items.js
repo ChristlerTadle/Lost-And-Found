@@ -110,6 +110,7 @@ function createItemService(database, notificationService) {
       const itemType = ['lost', 'found'].includes(filters.item_type) ? filters.item_type : '';
       const status = String(filters.status || '');
       const category = String(filters.category || '');
+      const location = String(filters.location || '');
       const dateFrom = isDate(String(filters.date_from || '')) ? String(filters.date_from) : '';
       const dateTo = isDate(String(filters.date_to || '')) ? String(filters.date_to) : '';
       return records.filter((item) => {
@@ -121,6 +122,7 @@ function createItemService(database, notificationService) {
           && (!itemType || item.item_type === itemType)
           && (!status || item.status === status)
           && (!category || item.category === category)
+          && (!location || item.location === location)
           && (!dateFrom || recordDate >= dateFrom)
           && (!dateTo || recordDate <= dateTo);
       });
@@ -923,6 +925,32 @@ function createItemService(database, notificationService) {
       });
     },
 
+    async resolve(userId, itemId) {
+      const ownerId = String(userId);
+      const reportId = String(itemId);
+      const result = await items.updateOne(
+        activeItems({
+          _id: reportId,
+          user_id: ownerId,
+          item_type: 'lost',
+          status: 'lost',
+        }),
+        { $set: { status: 'resolved', updated_at: new Date().toISOString() } },
+      );
+      if (!result.matchedCount) {
+        const error = new Error('Only your active lost report can be marked resolved.');
+        error.status = 400;
+        throw error;
+      }
+      const item = await this.findOne(ownerId, reportId);
+      await notificationService.create(ownerId, {
+        type: 'status',
+        title: 'Lost report resolved',
+        message: `Your report for "${item.item_name}" is now resolved.`,
+        href: `/index.php?page=reports&highlight=item-${encodeURIComponent(item.id)}`,
+      });
+    },
+
     async search(filters, userId = null) {
       const clauses = [{ status: { $in: browseableStatuses } }];
       const searchText = String(filters.query || '').trim();
@@ -1107,6 +1135,7 @@ function validateReport(input) {
     date_lost: dateLost,
   };
   if (Object.values(values).some((value) => !value)) throw new Error('All item details are required.');
+  if (values.location.length > 120) throw new Error('Location must be 120 characters or fewer.');
   if (!isDate(dateLost) || dateLost > localToday()) throw new Error('The item date must be today or an earlier date.');
   return values;
 }

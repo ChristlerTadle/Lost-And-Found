@@ -1,5 +1,5 @@
 import * as shared from '../shared.js';
-const { API, sessionInfo, h, date, param, link, buttonLink, badge, hasPermission, itemStatusLabel, field, selectField, request, icon, roleLabel, frontendHref, pageHeader, reportRows, formAction } = shared;
+const { API, sessionInfo, h, date, param, link, buttonLink, badge, hasPermission, itemStatusLabel, field, selectField, locationOptions, otherLocationField, request, icon, roleLabel, frontendHref, pageHeader, reportRows, formAction } = shared;
 
 async function dashboardPage(user) {
   const [reports, claimData, storedData] = await Promise.all([
@@ -48,6 +48,7 @@ async function browsePage() {
   const canSearch = hasPermission('search_items');
   const canFilter = hasPermission('filter_items');
   const storedOnly = query.get('status_tab') === 'stored';
+  const selectedLocation = query.get('location') || '';
   if (canFilter && query.has('type_tab')) query.set('item_type', query.get('type_tab'));
   if (canFilter && query.has('status_tab')) query.set('status', storedOnly ? 'stored' : '');
   if (canSearch && query.get('query')) filters.set('query', query.get('query'));
@@ -86,7 +87,8 @@ async function browsePage() {
       </nav>
       <details class="browse-more-filters" ${query.get('location') || query.get('date_from') || query.get('date_to') ? 'open' : ''}>
         <summary>More filters</summary><div class="browse-more-grid">
-          <div class="field"><label for="location">Location</label><input class="input" id="location" name="location" value="${h(query.get('location') || '')}"></div>
+          <div class="field"><label for="location">Location</label><select class="select" id="location" name="location">
+            ${locationOptions(selectedLocation, 'All locations').map(([value, label]) => `<option value="${h(value)}" ${value === selectedLocation ? 'selected' : ''}>${h(label)}</option>`).join('')}</select></div>
           <div class="field"><label for="date_from">Date from</label><input class="input" id="date_from" name="date_from" type="date" value="${h(query.get('date_from') || '')}"></div>
           <div class="field"><label for="date_to">Date to</label><input class="input" id="date_to" name="date_to" type="date" value="${h(query.get('date_to') || '')}"></div>
           <div class="browse-more-actions"><a class="button button-secondary" href="/?page=items">Clear all</a><button class="button button-primary" type="submit">Apply filters</button></div>
@@ -161,13 +163,13 @@ async function itemPage(id) {
 function reportPage(type) {
   const isFound = type === 'found';
   const today = new Date().toISOString().slice(0, 10);
-  const locationOptions = sessionInfo.locations.map((place) => `<option>${h(place)}</option>`).join('');
   return `<main class="container edit-report-page"><a class="back-link" href="/?page=dashboard">&larr; Back to dashboard</a>
     ${pageHeader(`Report a ${isFound ? 'found' : 'lost'} item`, 'Add accurate details so the report can be reviewed.')}
     <section class="card edit-report-card"><form class="form-grid" data-form="report" data-type="${type}" enctype="multipart/form-data">
       <div class="edit-report-fields">${field('Item name', 'item_name', 'text', '', true)}
       ${selectField('Category', 'category', [['', 'Choose category'], ...sessionInfo.categories.map((value) => [value, value])], '', true)}
-      <div class="field"><label for="location">Location ${isFound ? 'found' : 'lost'}</label><select class="select" id="location" name="location" required><option value="">Choose location</option>${locationOptions}</select></div>
+      ${selectField(`Location ${isFound ? 'found' : 'lost'}`, 'location', locationOptions('', 'Choose location', true), '', true)}
+      ${otherLocationField()}
       ${field(`Date ${isFound ? 'found' : 'lost'}`, 'date_lost', 'date', '', true, `max="${today}"`)}
       <div class="field"><label for="description">Description</label><textarea class="textarea" id="description" name="description" required></textarea></div>
       <div class="field"><label for="identifying_details">Private identifying details</label><textarea class="textarea" id="identifying_details" name="identifying_details" required></textarea></div>
@@ -193,7 +195,8 @@ async function editReportPage(id) {
     <section class="card edit-report-card"><form class="form-grid" data-form="edit-report" data-id="${h(id)}">
       <div class="edit-report-fields">${field('Item name', 'item_name', 'text', item.item_name, true)}
       ${selectField('Category', 'category', sessionInfo.categories.map((value) => [value, value]), item.category, true)}
-      ${field('Location', 'location', 'text', item.location, true)}
+      ${selectField('Location', 'location', locationOptions(item.location, 'Choose location', true), item.location, true)}
+      ${otherLocationField()}
       ${field('Date', 'date_lost', 'date', String(item.date_lost).slice(0, 10), true, `max="${today}"`)}
       <div class="field"><label for="description">Description</label><textarea class="textarea" id="description" name="description" required>${h(item.description)}</textarea></div>
       <div class="field"><label for="identifying_details">Identifying details</label><textarea class="textarea" id="identifying_details" name="identifying_details" required>${h(item.identifying_details)}</textarea></div>
@@ -259,7 +262,7 @@ async function profilePage() {
       <section class="card profile-details"><h2>Personal Information</h2><form class="form-grid" data-form="profile" id="profile-form"><div class="profile-fields">
         <div class="form-field full"><label for="full_name">Full name</label><input class="input" id="full_name" name="full_name" data-editable value="${h(user.full_name)}" required disabled></div>
         <div class="form-field"><label for="email">Email address</label><input class="input" id="email" value="${h(user.email)}" disabled></div>
-        <div class="form-field"><label for="phone">Phone number</label><input class="input" id="phone" name="phone" data-editable value="${h(user.phone || '')}" disabled></div>
+        <div class="form-field"><label for="phone">Phone number</label><input class="input" id="phone" name="phone" type="tel" inputmode="numeric" pattern="[0-9]*" autocomplete="tel" data-editable value="${h(user.phone || '')}" disabled></div>
         <div class="form-field"><label for="student_id">${user.role_name === 'staff' ? 'Employee ID' : 'Student ID'}</label><input class="input" id="student_id" value="${h(user.student_id || user.employee_id || '')}" disabled></div>
       </div><div class="form-actions" hidden><button class="button button-secondary" data-action="cancel-profile" type="button">Cancel</button>
         <button class="button button-primary" type="submit">Save changes</button></div></form></section></div>

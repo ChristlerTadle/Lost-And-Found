@@ -4,13 +4,10 @@ const categories = [
 ];
 
 const locations = [
-  'Main Library', 'Main Library – 2nd Floor Reading Area', 'Engineering Building',
-  'Engineering Building – Room 204', 'College of Arts and Sciences – Lobby',
-  'University Canteen – Main Building', 'College Computer Laboratory – Room 101',
-  'Gymnasium – Bleacher Area', 'Administration Building – Corridor',
-  'College of Nursing – Simulation Room', 'College of Education – Room 302',
-  "Registrar's Office – Waiting Area", 'Student Affairs Office', 'Science Building',
-  'University Oval', 'Covered Court', 'Dormitory Area', 'Chapel', 'Parking Lot', 'Other',
+  'Gymnasium', 'Library', 'Administration Building', 'Old CAS Building', 'New CAS Building',
+  'Old COT Building', 'New COT Building', 'COB Building', 'CON Building', 'New Cafeteria',
+  'CTE Building', 'ESL Building', 'Finance Building', 'GS Building', 'Rubia Dormitory',
+  'Kilala Dormitory', 'Mahogany Dormitory', 'SSL Building',
 ];
 
 module.exports = { categories, locations };

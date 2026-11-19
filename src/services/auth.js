@@ -154,6 +154,7 @@ function createAuthService(database) {
         error.status = 400;
         throw error;
       }
+      const phone = phoneNumber(input.phone);
 
       try {
         const result = await users.updateOne(
@@ -162,7 +163,7 @@ function createAuthService(database) {
             full_name: fullName,
             email,
             student_id: nullable(input.student_id),
-            phone: nullable(input.phone),
+            phone,
             updated_at: new Date().toISOString(),
           } },
           options.session ? { session: options.session } : undefined,
@@ -288,7 +289,7 @@ function createAuthService(database) {
         { _id: userId, status: 'active' },
         { $set: {
           full_name: fullName,
-          phone: nullable(input.phone),
+          phone: phoneNumber(input.phone),
           updated_at: new Date().toISOString(),
         } },
       );
@@ -316,6 +317,16 @@ function nullable(value) {
   return text || null;
 }
 
+function phoneNumber(value) {
+  const phone = value == null ? '' : String(value).trim();
+  if (phone && !/^\d+$/.test(phone)) {
+    const error = new Error('Phone number must contain digits only.');
+    error.status = 400;
+    throw error;
+  }
+  return phone || null;
+}
+
 async function createPasswordAccount(users, input, session = undefined, roleName = 'user') {
   const email = String(input.email || '').trim().toLowerCase();
   const password = String(input.password || '');
@@ -325,6 +336,7 @@ async function createPasswordAccount(users, input, session = undefined, roleName
     error.status = 400;
     throw error;
   }
+  const phone = phoneNumber(input.phone);
 
   const now = new Date().toISOString();
   const user = {
@@ -334,7 +346,7 @@ async function createPasswordAccount(users, input, session = undefined, roleName
     full_name: fullName,
     student_id: nullable(input.student_id),
     employee_id: null,
-    phone: nullable(input.phone),
+    phone,
     role_name: roleName,
     status: 'active',
     created_at: now,

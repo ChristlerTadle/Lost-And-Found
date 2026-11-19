@@ -191,6 +191,7 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'GET', path: '/items/mine/:id', roles: ['user'], permission: 'view_my_reports' },
   { method: 'PUT', path: '/items/:id', roles: ['user'], permission: 'edit_my_report' },
   { method: 'DELETE', path: '/items/:id', roles: ['user'], permission: 'cancel_my_report' },
+  { method: 'POST', path: '/items/:id/resolve', roles: ['user'], permission: 'cancel_my_report' },
   { method: 'GET', path: '/claims/available/:id', roles: ['user'], permission: 'submit_claim' },
   { method: 'POST', path: '/claims', roles: ['user'], permission: 'submit_claim' },
   { method: 'GET', path: '/claims/mine', roles: ['user'], permission: 'view_claim_status' },

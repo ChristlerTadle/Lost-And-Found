@@ -28,6 +28,27 @@ const selectField = (label, name, options, value = '', required = false) => `
   <div class="field"><label for="${h(name)}">${h(label)}</label><select class="select" id="${h(name)}" name="${h(name)}" ${required ? 'required' : ''}>
   ${options.map(([option, text]) => `<option value="${h(option)}" ${option === value ? 'selected' : ''}>${h(text)}</option>`).join('')}</select></div>`;
 const optionsFrom = (values, placeholder = 'All') => [['', placeholder], ...values.map((value) => [value, value])];
+const otherLocationValue = '__other_location__';
+const locationOptions = (value = '', placeholder = 'Choose location', includeOther = false) => {
+  const locations = [...sessionInfo.locations];
+  if (value && !locations.includes(value)) locations.push(value);
+  if (value === 'Other') {
+    return [
+      ['', placeholder],
+      ...locations.map((location) => [location, location === 'Other' ? 'Other (saved location)' : location]),
+      ...(includeOther ? [[otherLocationValue, 'Other']] : []),
+    ];
+  }
+  return [
+    ['', placeholder],
+    ...locations.map((location) => [location, location]),
+    ...(includeOther ? [[otherLocationValue, 'Other']] : []),
+  ];
+};
+const otherLocationField = () => `<div class="field" data-other-location-field hidden>
+  <label for="location_other">Specify location</label>
+  <input class="input" id="location_other" name="location_other" type="text" maxlength="120" autocomplete="off" placeholder="Enter the campus location">
+</div>`;
 
 function currentInteraction() {
   return lastInteraction?.isConnected ? lastInteraction : null;
@@ -637,6 +658,7 @@ function itemStatusLabel(status, itemType = '') {
     claimed: 'Claimed',
     returned: 'Returned to owner',
     cancelled: 'Cancelled',
+    resolved: 'Resolved',
     pending: 'Pending',
     approved: 'Approved',
     rejected: 'Rejected',
@@ -763,9 +785,15 @@ function reportRows(items, staff = false) {
       && hasPermission('edit_my_report');
     const cancellable = !staff && sessionInfo.user?.id === item.user_id && item.status === item.item_type
       && hasPermission('cancel_my_report');
+    const resolvable = cancellable && item.item_type === 'lost';
     const canReviewStaffItem = staff && (item.item_type === 'lost'
       ? hasPermission('review_lost_report')
       : hasPermission('view_found_items'));
+    const canCheckMatches = !staff && item.item_type === 'lost' && item.status === 'lost'
+      && hasPermission('view_items') && hasPermission('filter_items');
+    const matchQuery = new URLSearchParams({ page: 'items', item_type: 'found' });
+    if (item.category) matchQuery.set('category', item.category);
+    if (item.location) matchQuery.set('location', item.location);
     const detailPage = staff ? canReviewStaffItem ? 'staff-item' : ''
       : hasPermission('view_items') ? 'item' : editable ? 'edit-report' : '';
     const typeLabel = `${staff ? itemTypeLabel(item.item_type) : item.item_type === 'found' ? 'Found' : 'Lost'} report`;
@@ -787,6 +815,8 @@ function reportRows(items, staff = false) {
         ? canReviewStaffItem ? `<a class="button button-outline" href="/?page=staff-item&amp;id=${encodeURIComponent(item.id)}">Review report</a>` : ''
         : `<div class="nav-actions">${editable
               ? `<a class="button button-outline" href="/?page=edit-report&amp;id=${encodeURIComponent(item.id)}">Edit</a>` : ''}
+          ${canCheckMatches ? `<a class="button button-outline" href="/?${h(matchQuery.toString())}">Check possible matches</a>` : ''}
+          ${resolvable ? formAction('resolve-report', item.id, 'Mark as resolved', 'primary') : ''}
           ${cancellable ? formAction('cancel-report', item.id, 'Cancel report', 'secondary') : ''}</div>`}
     </article>`;
   }).join('')}</div>`;
@@ -814,4 +844,4 @@ function setSessionInfo(value) {
   Object.assign(sessionInfo, value);
 }
 
-export { API, app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, itemStatusLabel, itemTypeLabel, frontendHref, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, stickyActionBar, setSessionInfo };
+export { API, app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, locationOptions, otherLocationValue, otherLocationField, request, icon, roleLabel, hasPermission, itemStatusLabel, itemTypeLabel, frontendHref, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, stickyActionBar, setSessionInfo };

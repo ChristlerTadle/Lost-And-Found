@@ -39,7 +39,7 @@ async function staffRecords() {
   });
   const { items, claims } = await request(`/staff/records?${filters}`);
   const selected = (key, value) => params.get(key) === value ? 'selected' : '';
-  const statusOptions = ['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled', 'pending', 'approved', 'rejected'];
+  const statusOptions = ['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled', 'resolved', 'pending', 'approved', 'rejected'];
   const summaryRows = (records) => records.length ? `<div class="table-wrap"><table><thead><tr>
     <th>ID</th><th>Item</th><th>Status</th><th>Date</th></tr></thead><tbody>${records.map((record) => `<tr>
     <td>${h(record.id)}</td><td>${h(record.item_name)}</td><td>${badge(record.status)}</td><td>${date(record.created_at)}</td>

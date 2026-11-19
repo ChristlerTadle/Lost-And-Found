@@ -18,6 +18,7 @@ function createItemsRoutes({ controllers, guards, frontendOrigin }) {
   router.get('/:id', guards.requirePermission('GET', '/items/:id'), asyncRoute(controllers.items.getItemsById));
   router.put('/:id', guards.requirePermission('PUT', '/items/:id'), upload.single('image'), asyncRoute(controllers.items.putItemsById));
   router.delete('/:id', requireCsrf(frontendOrigin), guards.requirePermission('DELETE', '/items/:id'), asyncRoute(controllers.items.deleteItemsById));
+  router.post('/:id/resolve', requireCsrf(frontendOrigin), guards.requirePermission('POST', '/items/:id/resolve'), asyncRoute(controllers.items.resolveItemsById));
   return router;
 }
 
