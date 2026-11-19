@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { generateKeyPairSync, randomBytes } = require('node:crypto');
 const { test } = require('node:test');
 const { createAdminController } = require('../controllers/admin-controller');
+const { createAuthController } = require('../controllers/auth-controller');
 const { createIntegrationSettings } = require('../../src/services/integration-settings');
 const { createIntegrationRouteLimit } = require('../middlewares/integration-route-limits');
 const { createIntegrationCaller } = require('../../src/services/integration-calls');
@@ -266,8 +267,10 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
   };
   googleOAuth.verifyCandidate = async (_context, values) => {
     seen.googleSecret = values.client_secret;
+    seen.googleClientId = values.client_id;
     seen.googleRequests = (seen.googleRequests || 0) + 1;
-    if (values.client_secret === 'google-candidate-secret') {
+    if (values.client_secret === 'google-candidate-secret'
+      || values.client_id === 'google-wrong-client-id') {
       const error = new Error('Google credentials rejected.');
       error.code = 'invalid_credentials';
       error.status = 503;
@@ -323,7 +326,7 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
   });
   return {
     state, integrationSettings, audit, seen, sentHashes, controller,
-    callIntegration, baseSettings, email,
+    callIntegration, baseSettings, email, googleOAuth,
   };
 }
 
@@ -421,6 +424,235 @@ test('reCAPTCHA Verify passes the one-use token and server-configured frontend h
   assert.equal(JSON.stringify(harness.audit.events).includes(proofToken), false);
 });
 
+test('Google OAuth Verify starts a pending candidate-bound redirect without recording a completed proof', async () => {
+  const harness = await createHarness();
+  harness.googleOAuth.verifyCandidate = async (_context, _values, proof) => {
+    harness.seen.googleVerificationProof = proof;
+    return {
+      pending: true,
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/auth?state=opaque',
+    };
+  };
+  const result = await verifyCandidate(harness, 'google_auth', {
+    enabled: true,
+    fields: { client_secret: 'google-pending-candidate-secret' },
+  });
+  assert.equal(result.statusCode, 202);
+  assert.equal(result.body.verificationPending, true);
+  assert.equal(result.body.authorizationUrl.startsWith('https://accounts.google.com/'), true);
+  assert.equal(harness.seen.googleVerificationProof.adminId, 'test-admin');
+  assert.equal(
+    harness.seen.googleVerificationProof.candidateHash,
+    harness.integrationSettings.getVerificationHash(
+      'google_auth',
+      true,
+      await harness.integrationSettings.validateIntegrationFields('google_auth', {
+        client_secret: 'google-pending-candidate-secret',
+      }),
+    ),
+  );
+  assert.equal(harness.audit.events.some(({ action }) => action === 'integration.verify_success'), false);
+});
+
+test('Google verification callback records proof without signing in or mutating the session', async () => {
+  const harness = await createHarness();
+  const settings = (await harness.integrationSettings.getIntegration('google_auth')).settings;
+  const candidateHash = harness.integrationSettings.getVerificationHash(
+    'google_auth',
+    true,
+    settings,
+  );
+  let authenticateCalls = 0;
+  let clearedFailures = 0;
+  const controller = createAuthController({
+    auth: {
+      async authenticateGoogle() {
+        authenticateCalls += 1;
+        return { id: 'signed-in-user', role_name: 'user' };
+      },
+    },
+    googleOAuth: {
+      async completeVerificationCallback({ state }) {
+        return state === 'verification-state' ? {
+          adminId: 'test-admin',
+          candidateHash,
+          enabled: true,
+          settings,
+          status: 'success',
+        } : null;
+      },
+      async verifyAuthorizationResponse({ code, codeVerifier, nonce }) {
+        assert.deepEqual({ code, codeVerifier, nonce }, {
+          code: 'ordinary-code',
+          codeVerifier: 'ordinary-verifier',
+          nonce: 'ordinary-nonce',
+        });
+        return { sub: 'ordinary-user', email: 'user@example.test', emailVerified: true };
+      },
+    },
+    integrationSettings: harness.integrationSettings,
+    adminMfa: { async getLoginAction() { return { action: 'allow' }; } },
+    frontendOrigin: 'https://frontend.example.test',
+    audit: harness.audit,
+    callIntegration: {
+      clearValidationFailures() { clearedFailures += 1; },
+    },
+  });
+  const session = {
+    googleOAuth: {
+      state: 'ordinary-login-state',
+      codeVerifier: 'ordinary-verifier',
+      nonce: 'ordinary-nonce',
+    },
+    userId: 'existing-session-user',
+    regenerate(callback) {
+      delete this.googleOAuth;
+      delete this.userId;
+      delete this.user;
+      callback();
+    },
+    save(callback) { callback(); },
+  };
+  const response = { redirectUrl: null, redirect(url) { this.redirectUrl = url; return this; } };
+  await controller.getAuthGoogleCallback({
+    query: { state: 'verification-state', code: 'oauth-code' },
+    session,
+    ip: '192.0.2.1',
+  }, response);
+
+  assert.match(response.redirectUrl, /googleAuthVerification=success/);
+  assert.equal(response.redirectUrl.includes('verification-state'), false);
+  assert.equal(response.redirectUrl.includes('oauth-code'), false);
+  assert.equal(authenticateCalls, 0);
+  assert.equal(clearedFailures, 1);
+  assert.deepEqual(session.googleOAuth, {
+    state: 'ordinary-login-state',
+    codeVerifier: 'ordinary-verifier',
+    nonce: 'ordinary-nonce',
+  });
+  assert.equal(session.userId, 'existing-session-user');
+  assert.equal(session.user, undefined);
+  assert.ok(await harness.integrationSettings.getCurrentVerification(
+    'test-admin',
+    'google_auth',
+    true,
+    settings,
+  ));
+  assert.equal(await harness.integrationSettings.getCurrentVerification(
+    'different-admin',
+    'google_auth',
+    true,
+    settings,
+  ), null);
+  assert.equal(await harness.integrationSettings.getCurrentVerification(
+    'test-admin',
+    'google_auth',
+    true,
+    { ...settings, client_id: 'different-client-id' },
+  ), null);
+  assert.equal(JSON.stringify(harness.audit.events).includes('oauth-code'), false);
+  assert.equal(JSON.stringify(harness.audit.events).includes('verification-state'), false);
+  assert.equal(JSON.stringify(harness.audit.events).includes(settings.client_secret), false);
+  assert.ok(harness.audit.events.some(({ action, actor_id }) => (
+    action === 'integration.verify_success' && actor_id === 'test-admin'
+  )));
+
+  const normalResponse = { redirectUrl: null, redirect(url) { this.redirectUrl = url; return this; } };
+  await controller.getAuthGoogleCallback({
+    query: { state: 'ordinary-login-state', code: 'ordinary-code' },
+    session,
+    ip: '192.0.2.1',
+  }, normalResponse);
+  assert.equal(authenticateCalls, 1);
+  assert.equal(normalResponse.redirectUrl, 'https://frontend.example.test');
+  assert.equal(session.user.id, 'signed-in-user');
+});
+
+test('Google OAuth callback rejects a mismatched candidate hash and cannot authorize saving', async () => {
+  const harness = await createHarness();
+  const settings = (await harness.integrationSettings.getIntegration('google_auth')).settings;
+  const controller = createAuthController({
+    auth: {},
+    googleOAuth: {
+      async completeVerificationCallback() {
+        return {
+          adminId: 'test-admin',
+          candidateHash: 'f'.repeat(64),
+          enabled: true,
+          settings,
+          status: 'success',
+        };
+      },
+    },
+    integrationSettings: harness.integrationSettings,
+    frontendOrigin: 'https://frontend.example.test',
+    audit: harness.audit,
+    callIntegration: { async recordValidationFailure() {} },
+  });
+  const response = { redirectUrl: null, redirect(url) { this.redirectUrl = url; return this; } };
+  await controller.getAuthGoogleCallback({
+    query: { state: 'verification-state', code: 'oauth-code' },
+    session: {},
+    ip: '192.0.2.1',
+  }, response);
+
+  assert.match(response.redirectUrl, /googleAuthVerification=failed/);
+  assert.equal(response.redirectUrl.includes('verification-state'), false);
+  assert.equal(response.redirectUrl.includes('oauth-code'), false);
+  assert.equal(response.redirectUrl.includes(settings.client_secret), false);
+  assert.equal(await harness.integrationSettings.getCurrentVerification(
+    'test-admin',
+    'google_auth',
+    true,
+    settings,
+  ), null);
+  const beforeDefault = structuredClone(harness.state.documents.get('google_auth').defaults);
+  const before = await harness.integrationSettings.getIntegration('google_auth');
+  const result = await save(harness, {
+    google_auth: { enabled: true, fields: { client_secret: 'unverified-candidate-secret' } },
+  });
+  assert.equal(result.statusCode, 400);
+  assert.equal(harness.sentHashes.length, 0);
+  assert.equal(
+    JSON.stringify((await harness.integrationSettings.getIntegration('google_auth')).settings),
+    JSON.stringify(before.settings),
+  );
+  assert.deepEqual(harness.state.documents.get('google_auth').defaults, beforeDefault);
+  assert.notEqual(
+    (await harness.integrationSettings.getAdminIntegrations()).google_auth.status,
+    'Failing',
+  );
+  const auditJson = JSON.stringify(harness.audit.events);
+  assert.equal(auditJson.includes('verification-state'), false);
+  assert.equal(auditJson.includes('oauth-code'), false);
+  assert.equal(auditJson.includes('unverified-candidate-secret'), false);
+});
+
+test('Google OAuth proof is reused only for the exact re-entered candidate values', async () => {
+  const harness = await createHarness();
+  const payload = {
+    enabled: true,
+    fields: { client_secret: 'google-reusable-candidate-secret' },
+  };
+  const first = await verifyCandidate(harness, 'google_auth', payload);
+  assert.equal(first.statusCode, 200);
+  const requestsBeforeReuse = harness.seen.googleRequests;
+  harness.googleOAuth.verifyCandidate = async () => {
+    throw new Error('An exact unexpired proof should be reused without another OAuth request.');
+  };
+
+  const same = await verifyCandidate(harness, 'google_auth', payload);
+  assert.equal(same.statusCode, 200);
+  assert.equal(same.body.verification.proofType, 'real_sign_in');
+  assert.equal(harness.seen.googleRequests, requestsBeforeReuse);
+
+  const changed = await verifyCandidate(harness, 'google_auth', {
+    enabled: true,
+    fields: { client_secret: 'different-candidate-secret' },
+  });
+  assert.equal(changed.statusCode, 503);
+});
+
 test('wrong candidate credentials block every integration save without emailing or leaking secrets', async () => {
   const cases = [
     {
@@ -447,6 +679,13 @@ test('wrong candidate credentials block every integration save without emailing 
       fields: { client_secret: 'google-candidate-secret' },
       observed: 'googleSecret',
     },
+      {
+        id: 'google_auth',
+        secret: 'google-wrong-client-id',
+        fields: { client_id: 'google-wrong-client-id' },
+        observed: 'googleClientId',
+        expected: 'google-wrong-client-id',
+      },
     {
       id: 'admin_mfa',
       secret: null,
@@ -463,6 +702,7 @@ test('wrong candidate credentials block every integration save without emailing 
     for (const entry of cases) {
       const harness = await createHarness({ failAdminMfa: entry.failAdminMfa });
       const before = await harness.integrationSettings.getIntegration(entry.id);
+      const beforeDefault = structuredClone(harness.state.documents.get(entry.id)?.defaults);
       if (entry.id === 'google_calendar') {
         const candidatePlan = await harness.integrationSettings.prepareIntegrationSave({
           google_calendar: { enabled: true, fields: entry.fields },
@@ -488,7 +728,10 @@ test('wrong candidate credentials block every integration save without emailing 
       if (entry.id === 'smtp') assert.equal(harness.seen.smtpPassword === entry.secret, true);
       if (entry.id === 'google_calendar') assert.equal(harness.seen.calendarPrivateKey === entry.secret, true);
       if (entry.id === 'recaptcha') assert.equal(harness.seen.recaptchaSecret === entry.secret, true);
-      if (entry.id === 'google_auth') assert.equal(harness.seen.googleSecret === entry.secret, true);
+      if (entry.id === 'google_auth' && entry.observed === 'googleSecret') {
+        assert.equal(harness.seen.googleSecret === entry.secret, true);
+      }
+      if (entry.expected) assert.equal(harness.seen[entry.observed], entry.expected);
       if (entry.id === 'admin_mfa') {
         assert.equal(harness.seen.adminMfaCandidate.issuer, 'Candidate issuer');
       }
@@ -497,6 +740,11 @@ test('wrong candidate credentials block every integration save without emailing 
         JSON.stringify(after.settings) === JSON.stringify(before.settings),
         true,
         `${entry.id} active config must remain unchanged`,
+      );
+      assert.deepEqual(
+        harness.state.documents.get(entry.id)?.defaults,
+        beforeDefault,
+        `${entry.id} default must remain unchanged`,
       );
       assert.notEqual(
         (await harness.integrationSettings.getAdminIntegrations())[entry.id].status,

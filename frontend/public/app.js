@@ -30,6 +30,7 @@ async function render() {
     bindForms();
     await mountRecaptchaWidgets();
     showPendingFlash();
+    showGoogleOAuthVerificationResult(page);
     const target = param('highlight');
     if (target) {
       const element = document.getElementById(target);
@@ -1226,6 +1227,14 @@ async function verifyIntegrationCard(event) {
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
       body: JSON.stringify({ ...payload, proof }),
     });
+    if (result.verificationPending === true) {
+      const authorizationUrl = new URL(result.authorizationUrl);
+      if (authorizationUrl.origin !== 'https://accounts.google.com') {
+        throw new Error('Google sign-in could not be started. Please try again.');
+      }
+      window.location.assign(authorizationUrl.toString());
+      return;
+    }
     if (JSON.stringify(integrationCardPayload(card)) !== JSON.stringify(payload)) {
       card.dataset.verifiedPayload = '';
       card.dataset.currentVerification = 'false';
@@ -1252,6 +1261,25 @@ async function verifyIntegrationCard(event) {
     if (!button.dataset.rateLimitUntil) button.disabled = false;
     updateIntegrationSaveState(form);
   }
+}
+
+function showGoogleOAuthVerificationResult(page) {
+  const status = param('googleAuthVerification');
+  if (page !== 'admin-settings' || !status) return;
+  const messages = {
+    success: [document.querySelector('[data-integration="google_auth"]')?.dataset.currentVerification === 'true'
+      ? 'Google sign-in settings verified with a real sign-in.'
+      : 'Google sign-in verification completed. Re-enter the exact candidate settings (including any changed secret), then click Verify to continue saving.', false],
+    access_denied: ['Google sign-in verification was cancelled.', true],
+    redirect_mismatch: ['The Google callback URL does not match the candidate settings.', true],
+    expired: ['Google sign-in verification expired. Verify the settings again.', true],
+    failed: ['Google sign-in verification failed. Check the candidate settings and try again.', true],
+  };
+  const [message, isError] = messages[status] || messages.failed;
+  showNotice(message, isError);
+  const url = new URL(window.location.href);
+  url.searchParams.delete('googleAuthVerification');
+  window.history.replaceState({}, '', url.toString());
 }
 
 async function getRecaptchaCandidateToken(card) {

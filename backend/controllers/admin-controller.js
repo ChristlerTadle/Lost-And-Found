@@ -492,6 +492,12 @@ function createAdminController({
           },
           req.body?.proof,
         );
+        if (verification?.pending) {
+          return res.status(202).json({
+            verificationPending: true,
+            authorizationUrl: verification.authorizationUrl,
+          });
+        }
         return res.json({ verification });
       } catch (error) {
         return integrationSettingsError(res, error, 'Integration settings could not be verified.');
@@ -675,8 +681,14 @@ function createAdminController({
         const current = await integrationSettings.getIntegration('google_auth');
         const verification = await verifyIntegrationCandidate(
           req, 'google_auth', true, current.settings,
-          { integrationSettings, googleOAuth, callIntegration, audit },
+          { integrationSettings, googleOAuth, callIntegration, audit, frontendOrigin },
         );
+        if (verification?.pending) {
+          return res.status(202).json({
+            verificationPending: true,
+            authorizationUrl: verification.authorizationUrl,
+          });
+        }
         return res.json({
           verified: true,
           verification,
@@ -884,6 +896,16 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
   }
 
   callIntegration?.checkValidationCooldown?.(integrationId);
+  if (integrationId === 'google_auth'
+    && typeof integrationSettings.getCurrentVerification === 'function') {
+    const existing = await integrationSettings.getCurrentVerification(
+      req.user.id,
+      integrationId,
+      enabled,
+      values,
+    );
+    if (existing) return existing;
+  }
   await integrationSettings.recordVerification({
     adminId: req.user.id,
     integrationId,
@@ -903,7 +925,17 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
       );
     } else if (integrationId === 'google_auth') {
       verification = await services.googleOAuth.verifyCandidate?.(
-        requestAuditContext(req, null), values, proof,
+        requestAuditContext(req, null),
+        values,
+        {
+          adminId: String(req.user.id),
+          candidateHash: integrationSettings.getVerificationHash(
+            integrationId,
+            enabled,
+            values,
+          ),
+          enabled,
+        },
       );
     } else if (integrationId === 'recaptcha') {
       verification = await services.recaptcha.verifyCandidate?.(
@@ -920,6 +952,11 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
         values,
         proof,
       });
+    }
+    if (verification?.pending === true
+      && typeof verification.authorizationUrl === 'string'
+      && verification.authorizationUrl.startsWith('https://accounts.google.com/')) {
+      return verification;
     }
     if (!verification || verification.verified !== true || verification.proofType !== proofType) {
       const error = new Error('Integration verifier did not return an explicit proof result.');

@@ -51,6 +51,7 @@ function createApiRouter({ services, frontendOrigin }) {
       notifications: services.notifications,
       frontendOrigin,
       audit: services.audit,
+      callIntegration: services.callIntegration,
     }),
     items: createItemsController({
       items: services.items,

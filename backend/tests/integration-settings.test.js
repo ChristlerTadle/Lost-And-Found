@@ -614,6 +614,223 @@ test('Google OAuth observes integration changes without reconstructing its servi
   await assert.rejects(google.createAuthorizationRequest(), /Google sign-in is disabled/);
 });
 
+test('candidate Google OAuth verification uses PKCE and candidate credentials without creating tokens or sessions', async () => {
+  const clients = [];
+  const verifierCalls = [];
+  class MockOAuthClient {
+    constructor(clientId, clientSecret, callbackUrl) {
+      this.clientId = clientId;
+      this.clientSecret = clientSecret;
+      this.callbackUrl = callbackUrl;
+      this.credentials = {};
+      clients.push(this);
+    }
+
+    async generateCodeVerifierAsync() {
+      return { codeVerifier: 'candidate-code-verifier', codeChallenge: 'pkce-challenge' };
+    }
+
+    generateAuthUrl(options) {
+      const url = new URL('https://accounts.google.com/o/oauth2/auth');
+      url.search = new URLSearchParams({
+        client_id: this.clientId,
+        redirect_uri: this.callbackUrl,
+        state: options.state,
+        nonce: options.nonce,
+        code_challenge: options.code_challenge,
+        code_challenge_method: options.code_challenge_method,
+        scope: options.scope.join(' '),
+      }).toString();
+      this.authorizationUrl = url.toString();
+      return this.authorizationUrl;
+    }
+
+    async getToken(options) {
+      verifierCalls.push(options);
+      return { tokens: { id_token: 'private-id-token', access_token: 'private-access-token' } };
+    }
+
+    async verifyIdToken(options) {
+      assert.deepEqual(options, {
+        idToken: 'private-id-token',
+        audience: 'candidate-client-id',
+      });
+      const nonce = new URL(this.authorizationUrl).searchParams.get('nonce');
+      return {
+        getPayload() {
+          return {
+            sub: 'verified-subject',
+            email: 'admin@example.test',
+            email_verified: true,
+            nonce,
+          };
+        },
+      };
+    }
+
+    setCredentials(credentials) {
+      this.credentials = credentials;
+    }
+  }
+
+  const google = createGoogleOAuth(
+    async () => assert.fail('Candidate verification must use the submitted settings.'),
+    async (integrationId, operation, _auditContext, options) => {
+      assert.equal(integrationId, 'google_auth');
+      assert.deepEqual(options, { candidateValidation: true });
+      return operation({ signal: new AbortController().signal });
+    },
+    undefined,
+    { OAuthClient: MockOAuthClient },
+  );
+  const settings = {
+    client_id: 'candidate-client-id',
+    client_secret: 'candidate-client-secret',
+    callback_url: 'https://candidate.example.test/auth/google/callback',
+  };
+  const started = await google.verifyCandidate({}, settings, {
+    adminId: 'admin-123',
+    candidateHash: 'a'.repeat(64),
+    enabled: true,
+  });
+  clients[0].authorizationUrl = started.authorizationUrl;
+  const authorization = new URL(started.authorizationUrl);
+  assert.equal(authorization.origin, 'https://accounts.google.com');
+  assert.equal(authorization.searchParams.get('client_id'), settings.client_id);
+  assert.equal(authorization.searchParams.get('redirect_uri'), settings.callback_url);
+  assert.equal(authorization.searchParams.get('code_challenge'), 'pkce-challenge');
+  assert.equal(authorization.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(started.authorizationUrl.includes(settings.client_secret), false);
+
+  const result = await google.completeVerificationCallback({
+    state: authorization.searchParams.get('state'),
+    code: 'authorization-code',
+  });
+  assert.equal(result.status, 'success');
+  assert.equal(result.adminId, 'admin-123');
+  assert.equal(result.candidateHash, 'a'.repeat(64));
+  assert.deepEqual(verifierCalls, [{
+    code: 'authorization-code',
+    codeVerifier: 'candidate-code-verifier',
+  }]);
+  assert.deepEqual(clients[0].credentials, {});
+  assert.equal(JSON.stringify(result).includes('private-id-token'), false);
+  assert.equal(JSON.stringify(result).includes('private-access-token'), false);
+  assert.equal(await google.completeVerificationCallback({
+    state: authorization.searchParams.get('state'),
+    code: 'authorization-code',
+  }), null);
+});
+
+test('candidate Google OAuth verification fails safely for provider errors, cancellation, redirects, unverified email, and expiry', async () => {
+  const clients = [];
+  let tokenError = null;
+  let emailVerified = true;
+  class MockOAuthClient {
+    constructor(clientId, clientSecret, callbackUrl) {
+      this.clientId = clientId;
+      this.clientSecret = clientSecret;
+      this.callbackUrl = callbackUrl;
+      clients.push(this);
+    }
+    async generateCodeVerifierAsync() {
+      return { codeVerifier: 'verifier', codeChallenge: 'challenge' };
+    }
+    generateAuthUrl(options) {
+      const url = new URL('https://accounts.google.com/o/oauth2/auth');
+      url.searchParams.set('client_id', this.clientId);
+      url.searchParams.set('redirect_uri', this.callbackUrl);
+      url.searchParams.set('state', options.state);
+      url.searchParams.set('nonce', options.nonce);
+      this.authorizationUrl = url.toString();
+      return this.authorizationUrl;
+    }
+    async getToken() {
+      if (tokenError) throw tokenError;
+      return { tokens: { id_token: 'id-token' } };
+    }
+    async verifyIdToken() {
+      return { getPayload: () => ({ nonce: new URL(this.authorizationUrl).searchParams.get('nonce'), email: 'a@example.test', email_verified: emailVerified }) };
+    }
+    setCredentials() {}
+  }
+  const google = createGoogleOAuth(
+    async () => assert.fail('Candidate verification must use the submitted settings.'),
+    async (_id, operation) => operation({ signal: new AbortController().signal }),
+    undefined,
+    { OAuthClient: MockOAuthClient, verificationTtlMs: 100 },
+  );
+  const start = async (overrides = {}) => {
+    const request = await google.verifyCandidate({}, {
+      client_id: 'candidate-client-id',
+      client_secret: 'candidate-client-secret',
+      callback_url: 'https://candidate.example.test/auth/google/callback',
+      ...overrides,
+    }, { adminId: 'admin-123', candidateHash: 'b'.repeat(64), enabled: true });
+    clients[clients.length - 1].authorizationUrl = request.authorizationUrl;
+    return new URL(request.authorizationUrl).searchParams.get('state');
+  };
+
+  const cancelledState = await start();
+  assert.equal((await google.completeVerificationCallback({
+    state: cancelledState,
+    error: 'access_denied',
+  })).status, 'access_denied');
+
+  const providerMismatchState = await start();
+  assert.equal((await google.completeVerificationCallback({
+    state: providerMismatchState,
+    error: 'redirect_uri_mismatch',
+  })).failureCode, 'redirect_uri_mismatch');
+
+  const wrongClientIdState = await start({ client_id: 'wrong-client-id' });
+  assert.equal(
+    new URL(clients.at(-1).authorizationUrl).searchParams.get('client_id'),
+    'wrong-client-id',
+  );
+  assert.equal((await google.completeVerificationCallback({
+    state: wrongClientIdState,
+    error: 'invalid_client',
+  })).failureCode, 'invalid_response');
+
+  tokenError = Object.assign(new Error('redirect_uri_mismatch'), {
+    response: { data: { error: 'redirect_uri_mismatch' } },
+  });
+  const mismatchState = await start();
+  assert.equal((await google.completeVerificationCallback({
+    state: mismatchState,
+    code: 'code',
+  })).failureCode, 'redirect_uri_mismatch');
+
+  tokenError = Object.assign(new Error('invalid_client wrong-candidate-secret'), {
+    response: {
+      data: { error: 'invalid_client', error_description: 'wrong-candidate-secret' },
+    },
+  });
+  const wrongClientSecretState = await start({ client_secret: 'wrong-candidate-secret' });
+  const wrongClientSecret = await google.completeVerificationCallback({
+    state: wrongClientSecretState,
+    code: 'code',
+  });
+  assert.equal(wrongClientSecret.failureCode, 'verification_failed');
+
+  tokenError = null;
+  emailVerified = false;
+  const unverifiedState = await start();
+  assert.equal((await google.completeVerificationCallback({
+    state: unverifiedState,
+    code: 'code',
+  })).failureCode, 'unverified_identity');
+
+  emailVerified = true;
+  const expiredState = await start();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal((await google.completeVerificationCallback({
+    state: expiredState,
+    code: 'code',
+  })).failureCode, 'expired');
+});
+
 test('Google invalid_grant is user-caused while rejected client credentials update integration health', async () => {
   const state = createDatabase([{ _id: 'google_auth', enabled: true }]);
   const integrationSettings = createIntegrationSettings(state.database, { encryptionKey: KEY, env: ENV });

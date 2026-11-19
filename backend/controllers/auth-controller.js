@@ -5,7 +5,19 @@ const { requestAuditContext } = require('../../src/services/audit-log');
 const { IntegrationError } = require('../../src/services/integration-calls');
 const { PERMISSIONS_BY_ROLE } = require('../config/role-permissions');
 
-function createAuthController({ auth, rolePermissions, email, googleOAuth, recaptcha, integrationSettings, adminMfa, notifications, frontendOrigin, audit }) {
+function createAuthController({
+  auth,
+  rolePermissions,
+  email,
+  googleOAuth,
+  recaptcha,
+  integrationSettings,
+  adminMfa,
+  notifications,
+  frontendOrigin,
+  audit,
+  callIntegration,
+}) {
   const startGoogleAuth = async (req, res) => {
     await verifyRecaptcha(req, recaptcha, integrationSettings);
     const google = await integrationSettings.getIntegration('google_auth');
@@ -182,6 +194,66 @@ function createAuthController({ auth, rolePermissions, email, googleOAuth, recap
     postAuthGoogle: startGoogleAuth,
 
     getAuthGoogleCallback: async (req, res) => {
+        const verification = await googleOAuth.completeVerificationCallback?.({
+          state: req.query.state,
+          code: req.query.code,
+          error: req.query.error,
+        }, requestAuditContext(req, null));
+        if (verification) {
+          const candidateHash = verification.settings
+            ? integrationSettings.getVerificationHash(
+              'google_auth',
+              verification.enabled,
+              verification.settings,
+            )
+            : null;
+          const verified = Boolean(verification.settings)
+            && verification.status === 'success'
+            && candidateHash === verification.candidateHash;
+          const status = verified
+            ? 'success'
+            : verification.failureCode === 'redirect_uri_mismatch'
+              ? 'redirect_mismatch'
+              : verification.status === 'access_denied'
+                ? 'access_denied'
+                : verification.failureCode === 'expired' ? 'expired' : 'failed';
+          if (verification.settings) {
+            await integrationSettings.recordVerification({
+              adminId: verification.adminId,
+              integrationId: 'google_auth',
+              enabled: verification.enabled,
+              values: verification.settings,
+              proofType: 'real_sign_in',
+              result: verified,
+            });
+          }
+          if (verified) {
+            callIntegration?.clearValidationFailures?.('google_auth');
+            await audit.logAction({
+              ...requestAuditContext(req, 'integration.verify_success'),
+              actor_id: String(verification.adminId),
+              actor_role: 'admin',
+              target_type: 'integration',
+              target_id: 'google_auth',
+              new_value: { proof_type: 'real_sign_in' },
+            });
+          } else {
+            await callIntegration?.recordValidationFailure?.('google_auth');
+            await audit.logAction({
+              ...requestAuditContext(req, 'integration.verify_failed'),
+              actor_id: String(verification.adminId),
+              actor_role: 'admin',
+              target_type: 'integration',
+              target_id: 'google_auth',
+              new_value: { proof_type: 'real_sign_in' },
+              result: 'failed',
+            });
+          }
+          const returnUrl = new URL('/', frontendOrigin);
+          returnUrl.searchParams.set('page', 'admin-settings');
+          returnUrl.searchParams.set('googleAuthVerification', status);
+          return res.redirect(returnUrl.toString());
+        }
         const pending = req.session.googleOAuth;
       delete req.session.googleOAuth;
       await saveSession(req);

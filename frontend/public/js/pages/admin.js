@@ -373,7 +373,7 @@ async function adminSettings() {
   const { integrations } = await request('/admin/settings');
   const csrfToken = access.csrfToken;
   const descriptions = {
-    google_auth: 'Allow users to sign in or create an account using a verified Google account.',
+    google_auth: 'Allow users to sign in or create an account using a verified Google account. In Google consent screen Testing mode, add the administrator account as a test user.',
     recaptcha: 'Require users to complete a reCAPTCHA challenge before signing in or creating an account.',
     smtp: 'Send password reset messages using this SMTP server.',
     google_calendar: 'Schedule item pickups on one shared organization calendar. Share only the dedicated pickup calendar with the service account.',

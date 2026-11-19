@@ -287,6 +287,7 @@ const services = {
         expiresAt: new Date(Date.now() + 600_000),
       };
     },
+    getVerificationHash() { return 'a'.repeat(64); },
     getIntegrationLabel(id) { return id; },
     async setIntegrationDefault() { return { integrations: {} }; },
     async getDefaultRestorePreview() { return { id: 'google_auth', changedFields: [], values: {} }; },

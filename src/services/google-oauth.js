@@ -1,8 +1,19 @@
 const { randomBytes } = require('node:crypto');
 const { OAuth2Client } = require('google-auth-library');
-const { providerFailure } = require('./integration-calls');
+const { providerFailure, UserProviderError } = require('./integration-calls');
+const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 
-function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchImpl = globalThis.fetch) {
+function createGoogleOAuth(
+  getIntegration,
+  callIntegration = runDirectly,
+  fetchImpl = globalThis.fetch,
+  {
+    OAuthClient = OAuth2Client,
+    verificationTtlMs = VERIFICATION_TTL_MS,
+  } = {},
+) {
+  const pendingVerifications = new Map();
+
   function getClientConfig(integration, { allowDisabled = false } = {}) {
     if (!integration.configured) {
       const error = new Error('Google sign-in is not configured.');
@@ -17,7 +28,15 @@ function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchI
       throw error;
     }
     const { client_id: clientId, client_secret: clientSecret, callback_url: callbackUrl } = integration.settings;
-    if (process.env.NODE_ENV === 'production' && new URL(callbackUrl).protocol !== 'https:') {
+    let callbackProtocol;
+    try {
+      callbackProtocol = new URL(callbackUrl).protocol;
+    } catch {
+      const error = new Error('Google callback URL is invalid.');
+      error.status = 400;
+      throw error;
+    }
+    if (process.env.NODE_ENV === 'production' && callbackProtocol !== 'https:') {
       throw new Error('Google callback URL must use HTTPS in production.');
     }
     return { clientId, clientSecret, callbackUrl };
@@ -28,7 +47,7 @@ function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchI
     const config = getClientConfig(integration);
     return {
       config,
-      client: new OAuth2Client(config.clientId, config.clientSecret, config.callbackUrl),
+      client: new OAuthClient(config.clientId, config.clientSecret, config.callbackUrl),
     };
   }
 
@@ -108,7 +127,161 @@ function createGoogleOAuth(getIntegration, callIntegration = runDirectly, fetchI
         name: payload.name,
       };
     },
+
+    async verifyCandidate(_auditContext, settings, proof = {}) {
+      if (typeof proof.adminId !== 'string' || !proof.adminId
+        || typeof proof.candidateHash !== 'string' || !/^[a-f0-9]{64}$/i.test(proof.candidateHash)
+        || typeof proof.enabled !== 'boolean') {
+        throw new UserProviderError('Google verification could not be started.');
+      }
+
+      const config = getClientConfig({
+        configured: true,
+        active: true,
+        settings,
+      }, { allowDisabled: true });
+      const client = new OAuthClient(config.clientId, config.clientSecret, config.callbackUrl);
+      const { codeVerifier, codeChallenge } = await client.generateCodeVerifierAsync();
+      const state = randomBytes(32).toString('base64url');
+      const nonce = randomBytes(32).toString('base64url');
+      const expiresAt = Date.now() + verificationTtlMs;
+      for (const [pendingState, pending] of pendingVerifications) {
+        if (pending.expiresAt <= Date.now()) {
+          discardPendingCredentials(pending);
+          pendingVerifications.delete(pendingState);
+        }
+      }
+      const pending = {
+        adminId: proof.adminId,
+        candidateHash: proof.candidateHash,
+        enabled: proof.enabled,
+        settings: { ...settings },
+        expiresAt,
+        codeVerifier,
+        nonce,
+        client,
+        clientId: config.clientId,
+      };
+      pending.expiryTimer = setTimeout(() => {
+        if (pendingVerifications.get(state) !== pending) return;
+        pending.expired = true;
+        discardPendingCredentials(pending);
+      }, verificationTtlMs);
+      pending.expiryTimer.unref?.();
+      pendingVerifications.set(state, pending);
+
+      return {
+        pending: true,
+        authorizationUrl: client.generateAuthUrl({
+          access_type: 'online',
+          prompt: 'consent',
+          scope: ['openid', 'email', 'profile'],
+          state,
+          nonce,
+          code_challenge: codeChallenge,
+          code_challenge_method: 'S256',
+        }),
+      };
+    },
+
+    async completeVerificationCallback({ state, code, error }, auditContext = {}) {
+      if (typeof state !== 'string') return null;
+      const pending = pendingVerifications.get(state);
+      if (!pending) return null;
+      pendingVerifications.delete(state);
+      const result = {
+        adminId: pending.adminId,
+        candidateHash: pending.candidateHash,
+        enabled: pending.enabled,
+        settings: pending.settings,
+        status: 'failed',
+      };
+      if (pending.expiresAt <= Date.now()) {
+        discardPendingCredentials(pending);
+        return { ...result, failureCode: 'expired' };
+      }
+      if (error === 'redirect_uri_mismatch') {
+        discardPendingCredentials(pending);
+        return { ...result, failureCode: 'redirect_uri_mismatch' };
+      }
+      if (error === 'access_denied') {
+        discardPendingCredentials(pending);
+        return { ...result, status: 'access_denied' };
+      }
+      if (typeof code !== 'string' || !code) {
+        discardPendingCredentials(pending);
+        return { ...result, failureCode: 'invalid_response' };
+      }
+      if (pending.expired || !pending.client) {
+        return { ...result, settings: null, failureCode: 'expired' };
+      }
+
+      let tokens;
+      try {
+        const tokenResult = await callIntegration(
+          'google_auth',
+          async () => {
+            try {
+              return await pending.client.getToken({ code, codeVerifier: pending.codeVerifier });
+            } catch (tokenError) {
+              if (getGoogleErrorCode(tokenError) === 'redirect_uri_mismatch') {
+                throw new UserProviderError(
+                  'The Google callback URL does not match the candidate settings.',
+                  400,
+                );
+              }
+              throw tokenError;
+            }
+          },
+          auditContext,
+          { candidateValidation: true },
+        );
+        tokens = tokenResult?.tokens;
+        if (!tokens?.id_token) return { ...result, failureCode: 'invalid_response' };
+        const ticket = await callIntegration(
+          'google_auth',
+          () => pending.client.verifyIdToken({
+            idToken: tokens.id_token,
+            audience: pending.clientId,
+          }),
+          auditContext,
+          { candidateValidation: true },
+        );
+        const payload = ticket.getPayload();
+        if (!payload || payload.nonce !== pending.nonce
+          || payload.email_verified !== true
+          || typeof payload.email !== 'string' || !payload.email.includes('@')) {
+          return { ...result, failureCode: 'unverified_identity' };
+        }
+        return { ...result, status: 'success' };
+      } catch (verificationError) {
+        if (getGoogleErrorCode(verificationError) === 'redirect_uri_mismatch'
+          || verificationError?.message === 'The Google callback URL does not match the candidate settings.') {
+          return { ...result, failureCode: 'redirect_uri_mismatch' };
+        }
+        return { ...result, failureCode: 'verification_failed' };
+      } finally {
+        discardPendingCredentials(pending);
+        if (tokens) {
+          for (const key of Object.keys(tokens)) tokens[key] = undefined;
+        }
+      }
+    },
   };
+}
+
+function discardPendingCredentials(pending) {
+  if (pending.expiryTimer) clearTimeout(pending.expiryTimer);
+  pending.client?.setCredentials({});
+  pending.client = null;
+  pending.settings = null;
+  pending.codeVerifier = null;
+  pending.nonce = null;
+  pending.clientId = null;
+}
+
+function getGoogleErrorCode(error) {
+  return String(error?.response?.data?.error || error?.response?.data?.error_description || '');
 }
 
 function runDirectly(_integrationId, operation) {
