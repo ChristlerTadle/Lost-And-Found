@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
+const path = require('node:path');
 const { test } = require('node:test');
 const { createIntegrationSecurity, ACCESS_WINDOW_MS } = require('../../src/services/integration-security');
 
@@ -19,6 +21,7 @@ function createHarness(options = {}) {
   const messages = [];
   const events = [];
   const waits = [];
+  let mailAttempts = 0;
   const database = {
     collection(name) {
       if (!documents.has(name)) documents.set(name, new Map());
@@ -36,6 +39,7 @@ function createHarness(options = {}) {
           entry = entry || { _id: filter._id };
           for (const [key, value] of Object.entries(update.$set || {})) entry[key] = structuredClone(value);
           for (const [key, value] of Object.entries(update.$inc || {})) entry[key] = (entry[key] || 0) + value;
+          for (const key of Object.keys(update.$unset || {})) delete entry[key];
           collection.set(filter._id, entry);
           return { matchedCount: 1, modifiedCount: 1 };
         },
@@ -83,7 +87,12 @@ function createHarness(options = {}) {
         return {
           async sendMail(message) {
             messages.push(message);
-            if (options.bootstrapMailError) throw options.bootstrapMailError;
+            mailAttempts += 1;
+            if (options.bootstrapMailError
+              && (options.bootstrapMailErrorCount === undefined
+                || mailAttempts <= options.bootstrapMailErrorCount)) {
+              throw options.bootstrapMailError;
+            }
           },
         };
       },
@@ -150,11 +159,11 @@ test('missing PIN or email locks settings without requiring SMTP values at start
   const harness = createHarness({ pin: '', email: '' });
   const state = harness.security.configuration();
   assert.equal(state.accessReady, false);
-  assert.match(state.accessError, /SU_PIN and SU_EMAIL/);
+  assert.match(state.accessError, /SU_PIN is missing.*SU_EMAIL is missing/);
   await assert.rejects(harness.security.unlock({
     adminId: 'admin-1', ipAddress: '127.0.0.1', candidate: 'x',
     session: {}, auditContext, audit: harness.audit,
-  }), (error) => error.status === 503 && /SU_PIN and SU_EMAIL/.test(error.message));
+  }), (error) => error.status === 503 && /SU_PIN is missing.*SU_EMAIL is missing/.test(error.message));
 
   const noBootstrap = createHarness({ smtp: {} });
   assert.equal(noBootstrap.security.configuration().accessReady, true);
@@ -166,7 +175,61 @@ test('missing PIN or email locks settings without requiring SMTP values at start
     changes: [],
     auditContext,
     audit: noBootstrap.audit,
-  }), (error) => error.status === 503 && /Verification email is not configured/.test(error.message));
+  }), (error) => error.status === 503 && /SU_SMTP_HOST is missing/.test(error.message));
+});
+
+test('bootstrap configuration normalizes quoted values and rejects invalid addresses by variable name', () => {
+  const configPath = path.resolve(__dirname, '../../src/config');
+  const childEnv = {
+    ...process.env,
+    SU_EMAIL: '  "  admin@example.test  "  ',
+    SU_SMTP_HOST: ' " smtp.example.test " ',
+    SU_SMTP_PORT: ' 587 ',
+    SU_SMTP_SECURE: ' " false " ',
+    SU_SMTP_USER: ' " mailer " ',
+    SU_SMTP_PASSWORD: ' " password " ',
+    SU_SMTP_FROM: ' " System <mailer@example.test> " ',
+    SU_CODE_REQUEST_LIMIT: '5',
+    SU_CODE_REQUEST_WINDOW_SECONDS: '3600',
+    SU_CODE_RESEND_SECONDS: '60',
+  };
+  const script = `const c=require(${JSON.stringify(configPath)}); process.stdout.write(JSON.stringify({
+    email:c.integrationSettingsEmail,emailError:c.integrationSettingsEmailError,
+    host:c.integrationBootstrapSmtp.host,port:c.integrationBootstrapSmtp.port,
+    secure:c.integrationBootstrapSmtp.secure,from:c.integrationBootstrapSmtp.from,
+    smtpErrors:c.integrationBootstrapSmtpErrors
+  }));`;
+  const normalized = JSON.parse(execFileSync(process.execPath, ['-e', script], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: childEnv,
+    encoding: 'utf8',
+  }));
+  assert.equal(normalized.email, 'admin@example.test');
+  assert.equal(normalized.emailError, '');
+  assert.equal(normalized.host, 'smtp.example.test');
+  assert.equal(normalized.port, 587);
+  assert.equal(normalized.secure, false);
+  assert.equal(normalized.from, 'System <mailer@example.test>');
+  assert.deepEqual(normalized.smtpErrors, []);
+
+  const invalidScript = `const c=require(${JSON.stringify(configPath)}); process.stdout.write(JSON.stringify({
+    emailError:c.integrationSettingsEmailError,smtpErrors:c.integrationBootstrapSmtpErrors
+  }));`;
+  const invalid = JSON.parse(execFileSync(process.execPath, ['-e', invalidScript], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: { ...childEnv, SU_EMAIL: 'not-an-address' },
+    encoding: 'utf8',
+  }));
+  assert.equal(invalid.emailError, 'SU_EMAIL is invalid');
+  assert.equal(JSON.stringify(invalid).includes('not-an-address'), false);
+
+  const invalidSmtp = JSON.parse(execFileSync(process.execPath, ['-e', invalidScript], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: { ...childEnv, SU_SMTP_PORT: 'invalid-port' },
+    encoding: 'utf8',
+  }));
+  assert.ok(invalidSmtp.smtpErrors.includes('SU_SMTP_PORT is invalid'));
+  assert.equal(JSON.stringify(invalidSmtp).includes('invalid-port'), false);
 });
 
 test('credential code is hashed, expires, binds to admin and payload, and is one-use', async () => {
@@ -181,7 +244,11 @@ test('credential code is hashed, expires, binds to admin and payload, and is one
     auditContext,
     audit: harness.audit,
   });
-  assert.deepEqual(sent, { expiresInSeconds: 600, resendInSeconds: 60 });
+  assert.equal(sent.expiresInSeconds, 600);
+  assert.equal(sent.resendInSeconds, 60);
+  assert.equal(sent.maskedRecipient, 'a***@example.test');
+  assert.ok(sent.expiresAt);
+  assert.ok(sent.resendAvailableAt);
   const message = harness.messages[0];
   const code = /code is: (\d{6})/.exec(message.text)[1];
   const stored = harness.documents.get('integration_settings_pending_codes').get('session-1');
@@ -192,6 +259,13 @@ test('credential code is hashed, expires, binds to admin and payload, and is one
   assert.match(message.text, /127\.0\.0\.1/);
   assert.equal(message.text.includes('client-secret-value'), false);
   assert.equal(JSON.stringify(harness.events).includes(code), false);
+  const pending = await harness.security.getPendingCodeStatus({
+    adminId: 'admin-1',
+    sessionId: 'session-1',
+  });
+  assert.equal(pending.maskedRecipient, 'a***@example.test');
+  assert.deepEqual(pending.integrationIds, ['google_auth']);
+  assert.equal(JSON.stringify(pending).includes(code), false);
 
   await assert.rejects(harness.security.verifyCode({
     adminId: 'admin-2', sessionId: 'session-1', candidate: code,
@@ -239,6 +313,168 @@ test('bootstrap mail failures log a sanitized message without emitting editable 
   assert.equal(JSON.stringify(logs).includes('bootstrap-password'), false);
   assert.equal(harness.documents.get('integration_settings_pending_codes').has('failed-mail-session'), false);
   assert.equal(harness.events.some(({ action }) => action === 'integration.failure'), false);
+  const failureEvent = harness.events.find(({ action }) => action === 'integration.code_send_failed');
+  assert.deepEqual(failureEvent.new_value, { reason: 'login_rejected' });
+  assert.equal(JSON.stringify(failureEvent).includes('admin@example.test'), false);
+  assert.equal(JSON.stringify(failureEvent).includes('bootstrap-password'), false);
+  const failedCode = /code is: (\d{6})/.exec(harness.messages[0].text)[1];
+  assert.equal(JSON.stringify(failureEvent).includes(failedCode), false);
+  assert.deepEqual(
+    harness.documents.get('integration_settings_code_requests').get('admin-1')?.timestamps || [],
+    [],
+  );
+  assert.equal(
+    harness.documents.get('integration_settings_code_send_failures').get('admin-1').timestamps.length,
+    1,
+  );
+});
+
+test('failed code sends void the pending code and do not consume resend or success-request limits', async () => {
+  const harness = createHarness({
+    bootstrapMailError: Object.assign(new Error('Authentication failed.'), {
+      code: 'EAUTH',
+      responseCode: 535,
+    }),
+    bootstrapMailErrorCount: 1,
+  });
+  const send = () => harness.security.sendCode({
+    adminId: 'admin-1',
+    sessionId: 'retry-session',
+    payloadHash: 'pending-hash',
+    changes: [{ integration: 'smtp', label: 'SMTP', fields: ['password'] }],
+    auditContext,
+    audit: harness.audit,
+  });
+  await assert.rejects(send(), /login was rejected/i);
+  assert.equal(harness.documents.get('integration_settings_pending_codes').has('retry-session'), false);
+  assert.equal(
+    harness.documents.get('integration_settings_code_requests').get('admin-1')?.timestamps,
+    undefined,
+  );
+  harness.advance(0);
+  const resent = await send();
+  assert.equal(resent.maskedRecipient, 'a***@example.test');
+  assert.equal(harness.messages.length, 2);
+  assert.equal(
+    harness.documents.get('integration_settings_code_requests').get('admin-1').timestamps.length,
+    1,
+  );
+  assert.equal(
+    harness.documents.get('integration_settings_code_send_failures').get('admin-1').timestamps.length,
+    1,
+  );
+});
+
+test('code-send failures have a separate ten-per-hour cap and report a retry wait', async () => {
+  const harness = createHarness({
+    bootstrapMailError: Object.assign(new Error('Connection refused.'), { code: 'ECONNECTION' }),
+  });
+  const send = (sessionId) => harness.security.sendCode({
+    adminId: 'admin-1',
+    sessionId,
+    payloadHash: `pending-${sessionId}`,
+    changes: [],
+    auditContext,
+    audit: harness.audit,
+  });
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await assert.rejects(send(`failure-${attempt}`), /could not be sent/i);
+  }
+  await assert.rejects(send('failure-11'), (error) => (
+    error.status === 429 && error.retryAfter === 3600 && /Try again in 3600 seconds/.test(error.message)
+  ));
+  assert.equal(
+    harness.documents.get('integration_settings_code_send_failures').get('admin-1').timestamps.length,
+    10,
+  );
+  assert.equal(
+    harness.documents.get('integration_settings_code_requests').get('admin-1')?.timestamps,
+    undefined,
+  );
+  assert.equal(
+    harness.events.filter(({ action }) => action === 'integration.code_send_failed').length,
+    11,
+  );
+});
+
+test('bootstrap test emails are fixed, masked, and limited to three attempts per hour', async () => {
+  const harness = createHarness();
+  const result = await harness.security.sendTestEmail({
+    adminId: 'admin-1',
+    auditContext,
+  });
+  assert.deepEqual(result, { maskedRecipient: 'a***@example.test' });
+  assert.equal(harness.messages[0].subject, 'Verification email test');
+  assert.match(harness.messages[0].text, /test message confirming/i);
+  assert.equal(/\d{6}/.test(harness.messages[0].text), false);
+  await harness.security.sendTestEmail({ adminId: 'admin-1', auditContext });
+  await harness.security.sendTestEmail({ adminId: 'admin-1', auditContext });
+  await assert.rejects(
+    harness.security.sendTestEmail({ adminId: 'admin-1', auditContext }),
+    (error) => error.status === 429 && error.retryAfter === 3600,
+  );
+  assert.equal(harness.messages.length, 3);
+});
+
+test('bootstrap test email failures return a safe reason and masked recipient', async () => {
+  const harness = createHarness({
+    bootstrapMailError: Object.assign(new Error('Authentication failed: bootstrap-password'), {
+      code: 'EAUTH',
+      responseCode: 535,
+    }),
+  });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(
+      harness.security.sendTestEmail({ adminId: 'admin-1', auditContext }),
+      (error) => error.status === 503
+        && error.reason === 'login_rejected'
+        && error.maskedRecipient === 'a***@example.test'
+        && /login was rejected/.test(error.message)
+        && !error.message.includes('bootstrap-password'),
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('one-character recipient local parts are fully masked', async () => {
+  const harness = createHarness({ email: 'x@example.test' });
+  const result = await harness.security.sendCode({
+    adminId: 'admin-1',
+    sessionId: 'single-character-recipient',
+    payloadHash: 'pending-hash',
+    changes: [],
+    auditContext,
+    audit: harness.audit,
+  });
+  assert.equal(result.maskedRecipient, '***');
+  assert.equal((await harness.security.getPendingCodeStatus({
+    adminId: 'admin-1',
+    sessionId: 'single-character-recipient',
+  })).maskedRecipient, '***');
+});
+
+test('code delivery always uses the bootstrap mailer for every integration identifier', async () => {
+  const harness = createHarness();
+  const integrations = ['google_auth', 'recaptcha', 'smtp', 'google_calendar', 'admin_mfa'];
+  for (const [index, integration] of integrations.entries()) {
+    if (index) harness.advance(60_000);
+    await harness.security.sendCode({
+      adminId: 'admin-1',
+      sessionId: `integration-${integration}`,
+      payloadHash: `payload-${integration}`,
+      changes: [{ integration, label: integration, fields: ['credential'] }],
+      auditContext,
+      audit: harness.audit,
+    });
+  }
+  assert.equal(harness.messages.length, integrations.length);
+  assert.equal(
+    JSON.stringify(harness.messages.map(({ to }) => to)).includes('admin@example.test'),
+    true,
+  );
 });
 
 test('verification code succeeds once, then cannot be reused or guessed five times', async () => {

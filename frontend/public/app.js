@@ -19,6 +19,9 @@ document.addEventListener('shared-rate-limit-ended', (event) => {
 });
 
 async function render() {
+  pendingIntegrationCard = null;
+  pendingIntegrationRestore = null;
+  clearInterval(integrationCodeResendTimer);
   app.innerHTML = '<main class="loading" aria-live="polite">Loading…</main>';
   try {
     setSessionInfo(await request('/auth/me'));
@@ -28,6 +31,7 @@ async function render() {
     const content = await renderPage(page);
     app.innerHTML = shell(content, page);
     bindForms();
+    restorePendingIntegrationCodeDialog();
     await mountRecaptchaWidgets();
     showPendingFlash();
     showGoogleOAuthVerificationResult(page);
@@ -202,6 +206,7 @@ function bindForms() {
   app.querySelectorAll('[data-action="admin-mfa-enrollment-start"]').forEach((button) => button.addEventListener('click', startAdminMfaEnrollment));
   app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
   app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
+  app.querySelector('[data-action="send-verification-test-email"]')?.addEventListener('click', sendVerificationTestEmail);
   app.querySelector('[data-action="resend-role-change-code"]')?.addEventListener('click', resendAdminRoleChangeCode);
   app.querySelector('[data-action="close-role-change-code"]')?.addEventListener('click', closeAdminRoleChangeCodeDialog);
   app.querySelector('[data-role-change-code-dialog]')?.addEventListener('cancel', (event) => {
@@ -827,13 +832,50 @@ async function unlockIntegrationSettings(form) {
   }
 }
 
-function openIntegrationCodeDialog(form, resendInSeconds) {
+function openIntegrationCodeDialog(form, resendInSeconds, status = {}) {
   const dialog = form.closest('.admin-settings').querySelector('[data-integration-code-dialog]');
   const codeForm = dialog.querySelector('form');
   codeForm.reset();
   codeForm.querySelector('[data-integration-code-error]').textContent = '';
+  codeForm.querySelector('[data-integration-code-recipient]').textContent = status.maskedRecipient
+    ? `Code sent to ${status.maskedRecipient}.`
+    : 'Enter the 6-digit verification code.';
+  codeForm.querySelector('[data-integration-code-expiry]').textContent = status.expiresAt
+    ? `Expires at ${new Date(status.expiresAt).toLocaleTimeString()}.`
+    : '';
   if (!dialog.open) dialog.showModal();
   startIntegrationCodeResendTimer(dialog, resendInSeconds);
+}
+
+function restorePendingIntegrationCodeDialog() {
+  const settings = app.querySelector('.admin-settings[data-pending-code]');
+  if (!settings) return;
+  const pending = JSON.parse(settings.dataset.pendingCode || 'null');
+  if (!pending) return;
+  const integrationId = pending.restoreDefault || pending.integrationIds?.[0];
+  const card = settings.querySelector(`[data-integration="${CSS.escape(integrationId || '')}"]`);
+  const form = settings.querySelector('form[data-form="integration-settings"]');
+  if (!card || !form) return;
+  pendingIntegrationCard = card;
+  pendingIntegrationRestore = pending.restoreDefault || null;
+  const resendInSeconds = Math.max(
+    0,
+    Math.ceil((Date.parse(pending.resendAvailableAt) - Date.now()) / 1000),
+  );
+  openIntegrationCodeDialog(form, resendInSeconds, pending);
+}
+
+function updateIntegrationCodeDialog(dialog, status) {
+  const codeForm = dialog.querySelector('form');
+  codeForm.querySelector('[name="code"]').value = '';
+  if (status.maskedRecipient) {
+    codeForm.querySelector('[data-integration-code-recipient]').textContent =
+      `Code sent to ${status.maskedRecipient}.`;
+  }
+  if (status.expiresAt) {
+    codeForm.querySelector('[data-integration-code-expiry]').textContent =
+      `Expires at ${new Date(status.expiresAt).toLocaleTimeString()}.`;
+  }
 }
 
 function startIntegrationCodeResendTimer(dialog, seconds) {
@@ -938,6 +980,7 @@ async function resendIntegrationCode(event) {
         headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
         body: JSON.stringify({ restoreDefault: pendingIntegrationRestore }),
       });
+      updateIntegrationCodeDialog(dialog, result);
       startIntegrationCodeResendTimer(dialog, result.resendInSeconds);
       showNotice('A new verification code was sent.');
       return;
@@ -947,6 +990,7 @@ async function resendIntegrationCode(event) {
       headers: { 'X-CSRF-Token': settingsCsrf(card.closest('form')) },
       body: JSON.stringify({ integrations: { [card.dataset.integration]: integrationCardPayload(card) } }),
     });
+    updateIntegrationCodeDialog(dialog, result);
     startIntegrationCodeResendTimer(dialog, result.resendInSeconds);
     showNotice('A new verification code was sent.');
   } catch (error) {
@@ -959,6 +1003,30 @@ async function resendIntegrationCode(event) {
       updateIntegrationSaveState(card.closest('form'));
     }
     showNotice(error.message, true);
+    if (!isRateLimited(button)) button.disabled = false;
+  }
+}
+
+async function sendVerificationTestEmail(event) {
+  const button = event.currentTarget;
+  const settings = button.closest('.admin-settings');
+  const resultElement = settings.querySelector('[data-test-email-result]');
+  button.disabled = true;
+  resultElement.textContent = '';
+  resultElement.classList.remove('alert-error', 'alert-success');
+  try {
+    const result = await request('/admin/settings/verification-email/test', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': settings.dataset.csrfToken },
+      body: JSON.stringify({}),
+    });
+    resultElement.textContent = `Test email sent to ${result.maskedRecipient}.`;
+    resultElement.classList.add('alert-success');
+  } catch (error) {
+    const recipient = settings.dataset.verificationRecipient || 'the verification address';
+    resultElement.textContent = `Test email to ${recipient} failed: ${error.message}`;
+    resultElement.classList.add('alert-error');
+  } finally {
     if (!isRateLimited(button)) button.disabled = false;
   }
 }
@@ -1026,7 +1094,7 @@ async function restoreIntegrationDefault(event) {
     if (result.verificationRequired) {
       pendingIntegrationCard = card;
       pendingIntegrationRestore = result.restoreDefault;
-      openIntegrationCodeDialog(form, result.resendInSeconds);
+      openIntegrationCodeDialog(form, result.resendInSeconds, result);
       showNotice('A verification code was sent to approve the security-settings change.');
       return;
     }
@@ -1082,7 +1150,7 @@ async function saveIntegrationSettings(event) {
     });
     if (result.verificationRequired) {
       pendingIntegrationCard = card;
-      openIntegrationCodeDialog(form, result.resendInSeconds);
+      openIntegrationCodeDialog(form, result.resendInSeconds, result);
       showNotice('A verification code was sent to the configured administrator email.');
       return;
     }

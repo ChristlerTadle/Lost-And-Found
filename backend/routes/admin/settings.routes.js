@@ -39,6 +39,7 @@ function createAdminSettingsRoutes({ controllers, guards, frontendOrigin, integr
   router.post('/settings/code/verify', manage('POST', '/admin/settings/code/verify'), unlocked, saveLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeVerify));
   router.post('/settings/code/resend', manage('POST', '/admin/settings/code/resend'), unlocked, saveLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeResend));
   router.post('/settings/code/cancel', manage('POST', '/admin/settings/code/cancel'), unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeCancel));
+  router.post('/settings/verification-email/test', manage('POST', '/admin/settings/verification-email/test'), unlocked, testLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsVerificationEmailTest));
   router.post('/settings/:integrationId/verify', manage('POST', '/admin/settings/:integrationId/verify'), unlocked, verificationLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsVerify));
   router.post('/settings/:integrationId/default', manage('POST', '/admin/settings/:integrationId/default'), unlocked, restoreLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsDefault));
   router.post('/settings/:integrationId/restore-default', manage('POST', '/admin/settings/:integrationId/restore-default'), unlocked, restoreLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsRestoreDefault));

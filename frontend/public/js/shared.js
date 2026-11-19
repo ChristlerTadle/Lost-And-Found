@@ -117,7 +117,9 @@ function normalizeRequestError(response, data, path, authenticated) {
   let message;
   let showSignIn = false;
   if (response.status === 429) {
-    message = `Too many attempts. Try again in ${Math.max(1, Math.ceil(retryAfter / 60))} minute${Math.ceil(retryAfter / 60) === 1 ? '' : 's'}.`;
+    message = errorBody.reason === 'rate_limited' && typeof errorBody.error === 'string'
+      ? errorBody.error
+      : `Too many attempts. Try again in ${Math.max(1, Math.ceil(retryAfter / 60))} minute${Math.ceil(retryAfter / 60) === 1 ? '' : 's'}.`;
   } else if (response.status === 401 && authenticated && !isAuthRequest(path) && isAuthenticatedPage()) {
     message = 'Your access changed. Please sign in again.';
     showSignIn = true;

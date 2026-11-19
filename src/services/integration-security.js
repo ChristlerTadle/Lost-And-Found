@@ -7,12 +7,17 @@ const CODE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_CODE_RESEND_MS = 60 * 1000;
 const DEFAULT_CODE_REQUEST_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_CODE_REQUEST_LIMIT = 5;
+const CODE_SEND_FAILURE_LIMIT = 10;
+const TEST_EMAIL_REQUEST_LIMIT = 3;
+const EMAIL_REQUEST_WINDOW_MS = 60 * 60 * 1000;
 const MAX_CODE_ATTEMPTS = 5;
 
 function createIntegrationSecurity(database, {
   pin,
   email,
+  emailError = '',
   smtp,
+  smtpErrors = [],
   hashKey,
   mailer = nodemailer,
   now = () => Date.now(),
@@ -24,34 +29,29 @@ function createIntegrationSecurity(database, {
   const attempts = database.collection('integration_settings_pin_attempts');
   const codes = database.collection('integration_settings_pending_codes');
   const requests = database.collection('integration_settings_code_requests');
+  const failedCodeSends = database.collection('integration_settings_code_send_failures');
+  const testEmailRequests = database.collection('integration_settings_test_email_requests');
+  const codeSendsInProgress = new Set();
 
   function configuration() {
     const missingAccess = [];
-    if (!pin) missingAccess.push('SU_PIN');
-    if (!email) missingAccess.push('SU_EMAIL');
-    const missingSmtp = [];
-    for (const name of ['host', 'port', 'secure', 'user', 'password', 'from']) {
-      if (smtp?.[name] === undefined || smtp[name] === null || smtp[name] === '') {
-        missingSmtp.push(`SU_SMTP_${name.toUpperCase()}`);
-      }
-    }
-    if (smtp?.secure && !['true', 'false'].includes(String(smtp.secure).toLowerCase())) {
-      missingSmtp.push('SU_SMTP_SECURE');
-    }
-    if (smtp?.port && (!/^\d{1,5}$/.test(String(smtp.port))
-      || Number(smtp.port) < 1 || Number(smtp.port) > 65535)) {
-      missingSmtp.push('SU_SMTP_PORT');
-    }
+    if (!pin) missingAccess.push('SU_PIN is missing');
+    const configuredEmailError = emailError || (!email
+      ? 'SU_EMAIL is missing'
+      : isValidEmailAddress(email) ? '' : 'SU_EMAIL is invalid');
+    if (configuredEmailError) missingAccess.push(configuredEmailError);
+    const missingSmtp = smtpErrors.length ? [...smtpErrors] : validateSmtp(smtp);
     return {
       accessReady: missingAccess.length === 0,
       accessError: missingAccess.length
-        ? `Integration Settings are locked. Configure ${missingAccess.join(' and ')} in the server environment.`
+        ? `Integration Settings are locked. ${missingAccess.join('; ')}.`
         : '',
       verificationEmailConfigured: missingSmtp.length === 0,
       verificationEmailError: missingSmtp.length
-        ? 'Verification email is not configured. Configure all SU_SMTP_* environment variables.'
+        ? `${missingSmtp.join('; ')}.`
         : '',
       missingSmtp,
+      maskedRecipient: configuredEmailError ? '' : maskEmail(email),
     };
   }
 
@@ -116,78 +116,159 @@ function createIntegrationSecurity(database, {
     return true;
   }
 
-  async function sendCode({ adminId, sessionId, payloadHash, changes, requester, ipAddress, auditContext, audit }) {
+  async function sendCode(parameters) {
+    const adminKey = String(parameters.adminId);
+    if (codeSendsInProgress.has(adminKey)) {
+      return failCodeSend(
+        'A verification email is already being sent. Try again shortly.',
+        'rate_limited',
+        429,
+        { auditContext: parameters.auditContext, audit: parameters.audit, retryAfter: 1 },
+      );
+    }
+    codeSendsInProgress.add(adminKey);
+    try {
+      return await sendCodeInternal(parameters);
+    } finally {
+      codeSendsInProgress.delete(adminKey);
+    }
+  }
+
+  async function sendCodeInternal({
+    adminId, sessionId, payloadHash, changes, requester, ipAddress, auditContext, audit, restoreDefault,
+  }) {
     const state = configuration();
     if (!state.accessReady) {
-      const error = new Error(state.accessError);
-      error.status = 503;
-      throw error;
+      return failCodeSend(state.accessError, 'not_configured', 503, {
+        auditContext, audit,
+      });
     }
     if (!state.verificationEmailConfigured) {
-      const error = new Error(state.verificationEmailError);
-      error.status = 503;
-      throw error;
+      return failCodeSend(state.verificationEmailError, 'not_configured', 503, {
+        auditContext, audit,
+      });
     }
 
     const timestamp = now();
+    const adminKey = String(adminId);
     const pending = await codes.findOne({ _id: String(sessionId) });
-    if (pending && timestamp - pending.sentAt < codeResendMs) {
-      const error = new Error('Please wait before requesting another verification code.');
-      error.status = 429;
-      throw error;
+    if (pending?.status === 'sent' && timestamp - pending.sentAt < codeResendMs) {
+      const retryAfter = Math.max(1, Math.ceil((codeResendMs - (timestamp - pending.sentAt)) / 1000));
+      return failCodeSend(
+        `Please wait ${retryAfter} seconds before requesting another verification code.`,
+        'rate_limited', 429, { auditContext, audit, retryAfter },
+      );
     }
-    const recent = (await requests.findOne({ _id: String(adminId) }))?.timestamps || [];
+    const recent = (await requests.findOne({ _id: adminKey }))?.timestamps || [];
     if (recent.length && timestamp - recent[recent.length - 1] < codeResendMs) {
-      const error = new Error('Please wait before requesting another verification code.');
-      error.status = 429;
-      throw error;
+      const retryAfter = Math.max(1, Math.ceil((codeResendMs - (timestamp - recent[recent.length - 1])) / 1000));
+      return failCodeSend(
+        `Please wait ${retryAfter} seconds before requesting another verification code.`,
+        'rate_limited', 429, { auditContext, audit, retryAfter },
+      );
     }
     const recentRequests = recent.filter((entry) => timestamp - entry < codeRequestWindowMs);
     if (recentRequests.length >= codeRequestLimit) {
-      const error = new Error('The verification code request limit has been reached. Try again later.');
-      error.status = 429;
-      throw error;
+      const retryAfter = Math.max(1, Math.ceil(
+        (recentRequests[0] + codeRequestWindowMs - timestamp) / 1000,
+      ));
+      return failCodeSend(
+        `The verification code request limit has been reached. Try again in ${retryAfter} seconds.`,
+        'rate_limited', 429, { auditContext, audit, retryAfter },
+      );
     }
-    await requests.findOneAndUpdate(
-      { _id: String(adminId) },
-      { $push: { timestamps: { $each: [timestamp], $slice: -codeRequestLimit } } },
-      { upsert: true, returnDocument: 'after', includeResultMetadata: false },
-    );
+    const failed = (await failedCodeSends.findOne({ _id: adminKey }))?.timestamps || [];
+    const recentFailures = failed.filter((entry) => timestamp - entry < EMAIL_REQUEST_WINDOW_MS);
+    if (recentFailures.length >= CODE_SEND_FAILURE_LIMIT) {
+      const retryAfter = Math.max(1, Math.ceil(
+        (recentFailures[0] + EMAIL_REQUEST_WINDOW_MS - timestamp) / 1000,
+      ));
+      return failCodeSend(
+        `Too many failed verification email sends. Try again in ${retryAfter} seconds.`,
+        'rate_limited', 429, { auditContext, audit, retryAfter },
+      );
+    }
 
     const code = String(randomInt(100000, 1000000));
     const entry = {
       _id: String(sessionId),
-      adminId: String(adminId),
+      adminId: adminKey,
       codeHash: keyedHash(`code\u0000${code}`),
       payloadHash,
+      status: 'sending',
+      integrationIds: [...new Set((changes || []).map(({ integration }) => integration).filter(Boolean))],
+      restoreDefault: null,
       expiresAt: timestamp + CODE_TTL_MS,
       sentAt: timestamp,
       attempts: 0,
     };
-    await codes.updateOne({ _id: entry._id }, { $set: entry }, { upsert: true });
+    entry.restoreDefault = restoreDefault || null;
+    await codes.updateOne(
+      { _id: entry._id },
+      { $set: entry, $unset: { usedAt: '' } },
+      { upsert: true },
+    );
     try {
       await sendBootstrapEmail({
         to: email,
         subject: 'Integration settings verification code',
         text: formatCodeMessage({ code, changes, requester, ipAddress, timestamp }),
       });
-    } catch {
+    } catch (error) {
       await codes.deleteOne({ _id: entry._id });
-      const error = new Error('The verification email could not be sent. Check the SU_SMTP_* configuration.');
-      error.status = 503;
-      throw error;
+      const category = mailFailureCategory(error);
+      const failedAt = now();
+      await failedCodeSends.findOneAndUpdate(
+        { _id: adminKey },
+        { $push: { timestamps: { $each: [failedAt], $slice: -CODE_SEND_FAILURE_LIMIT } } },
+        { upsert: true, returnDocument: 'after', includeResultMetadata: false },
+      );
+      await logCodeSendFailure(audit, auditContext, category);
+      throw codeSendError(category, state.maskedRecipient);
     }
+    const sentAt = now();
+    const expiresAt = sentAt + CODE_TTL_MS;
+    await codes.updateOne(
+      { _id: entry._id, adminId: adminKey },
+      { $set: { status: 'sent', sentAt, expiresAt } },
+    );
+    await requests.findOneAndUpdate(
+      { _id: adminKey },
+      { $push: { timestamps: { $each: [sentAt], $slice: -codeRequestLimit } } },
+      { upsert: true, returnDocument: 'after', includeResultMetadata: false },
+    );
     await auditEvent(audit, auditContext, 'integration.code_sent', changes);
     return {
       expiresInSeconds: CODE_TTL_MS / 1000,
       resendInSeconds: codeResendMs / 1000,
+      maskedRecipient: state.maskedRecipient,
+      expiresAt: new Date(expiresAt).toISOString(),
+      resendAvailableAt: new Date(sentAt + codeResendMs).toISOString(),
+    };
+  }
+
+  async function getPendingCodeStatus({ adminId, sessionId }) {
+    const entry = await codes.findOne({ _id: String(sessionId) });
+    if (!entry || entry.adminId !== String(adminId) || entry.status !== 'sent'
+      || entry.usedAt || entry.expiresAt <= now()) {
+      if (entry?.adminId === String(adminId) && entry.expiresAt <= now()) {
+        await codes.deleteOne({ _id: String(sessionId), adminId: String(adminId) });
+      }
+      return null;
+    }
+    return {
+      integrationIds: entry.integrationIds || [],
+      restoreDefault: entry.restoreDefault || null,
+      maskedRecipient: maskEmail(email),
+      expiresAt: new Date(entry.expiresAt).toISOString(),
+      resendAvailableAt: new Date(entry.sentAt + codeResendMs).toISOString(),
     };
   }
 
   async function verifyCode({ adminId, sessionId, candidate, payloadHash, auditContext, audit, changes }) {
     const id = String(sessionId);
     const entry = await codes.findOne({ _id: id });
-    if (!entry || entry.adminId !== String(adminId) || entry.usedAt
+    if (!entry || entry.adminId !== String(adminId) || entry.status !== 'sent' || entry.usedAt
       || entry.expiresAt <= now()) {
       if (entry && entry.adminId === String(adminId)) await codes.deleteOne({ _id: id });
       await auditEvent(audit, auditContext, 'integration.code_failed', changes);
@@ -236,6 +317,46 @@ function createIntegrationSecurity(database, {
     await codes.deleteOne({ _id: String(sessionId), adminId: String(adminId) });
   }
 
+  async function sendTestEmail({ adminId, auditContext }) {
+    const state = configuration();
+    if (!state.accessReady) throw configurationError(state.accessError);
+    if (!state.verificationEmailConfigured) throw configurationError(state.verificationEmailError);
+    const id = String(adminId);
+    const timestamp = now();
+    const recent = (await testEmailRequests.findOne({ _id: id }))?.timestamps || [];
+    const recentAttempts = recent.filter((entry) => timestamp - entry < EMAIL_REQUEST_WINDOW_MS);
+    if (recentAttempts.length >= TEST_EMAIL_REQUEST_LIMIT) {
+      const retryAfter = Math.max(1, Math.ceil(
+        (recentAttempts[0] + EMAIL_REQUEST_WINDOW_MS - timestamp) / 1000,
+      ));
+      const error = new Error(`Test email limit reached. Try again in ${retryAfter} seconds.`);
+      error.status = 429;
+      error.retryAfter = retryAfter;
+      error.reason = 'rate_limited';
+      error.maskedRecipient = state.maskedRecipient;
+      throw error;
+    }
+    await testEmailRequests.findOneAndUpdate(
+      { _id: id },
+      { $push: { timestamps: { $each: [timestamp], $slice: -TEST_EMAIL_REQUEST_LIMIT } } },
+      { upsert: true, returnDocument: 'after', includeResultMetadata: false },
+    );
+    try {
+      await sendBootstrapEmail({
+        subject: 'Verification email test',
+        text: 'This is a test message confirming the verification email service is working.',
+      });
+    } catch (error) {
+      const category = mailFailureCategory(error);
+      const safeError = new Error(`Test email could not be sent: ${categoryMessage(category)}.`);
+      safeError.status = 503;
+      safeError.reason = category;
+      safeError.maskedRecipient = state.maskedRecipient;
+      throw safeError;
+    }
+    return { maskedRecipient: state.maskedRecipient };
+  }
+
   async function sendBootstrapEmail({ to = email, subject, text }) {
     const state = configuration();
     if (!state.verificationEmailConfigured) {
@@ -254,7 +375,14 @@ function createIntegrationSecurity(database, {
         socketTimeout: 10_000,
         auth: { user: smtp.user, pass: smtp.password },
       });
-      await transporter.sendMail({ from: smtp.from, to, subject, text });
+      const result = await transporter.sendMail({ from: smtp.from, to, subject, text });
+      if (result && ((Array.isArray(result.accepted) && !result.accepted.length)
+        || (Array.isArray(result.rejected) && result.rejected.length && !result.accepted?.length))) {
+        const error = new Error('Bootstrap email recipient was rejected.');
+        error.code = 'EENVELOPE';
+        throw error;
+      }
+      return result;
     } catch (error) {
       const code = safeMailErrorCode(error?.code);
       const command = safeMailCommand(error?.command);
@@ -276,16 +404,111 @@ function createIntegrationSecurity(database, {
     return createHmac('sha256', hashKey).update(String(value)).digest('hex');
   }
 
+  async function failCodeSend(message, category, status, { auditContext, audit, retryAfter } = {}) {
+    await logCodeSendFailure(audit, auditContext, category);
+    const error = new Error(message);
+    error.status = status;
+    error.reason = category;
+    if (retryAfter) error.retryAfter = retryAfter;
+    error.maskedRecipient = configuration().maskedRecipient;
+    throw error;
+  }
+
   return {
     configuration,
     unlock,
     touchSession,
     sendCode,
+    getPendingCodeStatus,
     verifyCode,
     cancelCode,
     sendBootstrapEmail,
+    sendTestEmail,
     keyedHash,
   };
+}
+
+function validateSmtp(smtp) {
+  const errors = [];
+  if (!smtp?.host) errors.push('SU_SMTP_HOST is missing');
+  if (smtp?.port === undefined || smtp?.port === null || smtp.port === '') {
+    errors.push('SU_SMTP_PORT is missing');
+  } else if (!/^\d+$/.test(String(smtp.port)) || Number(smtp.port) < 1 || Number(smtp.port) > 65535) {
+    errors.push('SU_SMTP_PORT is invalid');
+  }
+  if (smtp?.secure !== true && smtp?.secure !== false
+    && !['true', 'false'].includes(String(smtp?.secure).toLowerCase())) {
+    errors.push(smtp?.secure === undefined || smtp?.secure === null || smtp?.secure === ''
+      ? 'SU_SMTP_SECURE is missing' : 'SU_SMTP_SECURE is invalid');
+  }
+  if (!smtp?.user) errors.push('SU_SMTP_USER is missing');
+  if (!smtp?.password) errors.push('SU_SMTP_PASSWORD is missing');
+  if (!smtp?.from) errors.push('SU_SMTP_FROM is missing');
+  return errors;
+}
+
+function isValidEmailAddress(value) {
+  if (typeof value !== 'string' || value.length > 254 || /\s/.test(value)) return false;
+  const at = value.lastIndexOf('@');
+  if (at < 1 || at > 64 || at === value.length - 1) return false;
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  return /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local)
+    && !local.startsWith('.') && !local.endsWith('.') && !local.includes('..')
+    && domain.includes('.') && domain.split('.').every((label) => (
+      label.length > 0 && label.length <= 63
+      && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+    ));
+}
+
+function maskEmail(value) {
+  if (typeof value !== 'string') return '***';
+  const at = value.lastIndexOf('@');
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  if (at < 1 || local.length <= 1 || !domain) return '***';
+  return `${local[0]}***@${domain}`;
+}
+
+function mailFailureCategory(error) {
+  if (error?.code === 'EAUTH' || error?.responseCode === 535
+    || error?.code === 'invalid_credentials') return 'login_rejected';
+  return 'unreachable';
+}
+
+function categoryMessage(category) {
+  return {
+    not_configured: 'verification email is not configured',
+    login_rejected: 'mail server login was rejected',
+    unreachable: 'mail server is unreachable',
+    rate_limited: 'too many attempts',
+  }[category] || 'mail server is unreachable';
+}
+
+function codeSendError(category, maskedRecipient) {
+  const error = new Error(`Verification email could not be sent: ${categoryMessage(category)}.`);
+  error.status = 503;
+  error.reason = category;
+  error.maskedRecipient = maskedRecipient;
+  return error;
+}
+
+function configurationError(message) {
+  const error = new Error(message);
+  error.status = 503;
+  error.reason = 'not_configured';
+  return error;
+}
+
+async function logCodeSendFailure(audit, auditContext, reason) {
+  await audit.logAction({
+    ...auditContext,
+    action: 'integration.code_send_failed',
+    target_type: null,
+    target_id: null,
+    new_value: { reason },
+    result: 'failed',
+  });
 }
 
 function constantTimeMatch(value, expected) {

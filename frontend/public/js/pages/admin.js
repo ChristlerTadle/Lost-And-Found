@@ -464,7 +464,9 @@ async function adminSettings() {
       <button class="button button-outline" type="button" data-action="cancel-integration">Cancel</button>
     </div>
   </section>`).join('');
-  return `<main class="container admin-dashboard admin-settings" data-csrf-token="${h(csrfToken)}">
+  return `<main class="container admin-dashboard admin-settings" data-csrf-token="${h(csrfToken)}"
+    data-verification-recipient="${h(access.verificationRecipient || '')}"
+    data-pending-code="${h(JSON.stringify(access.pendingCode || null))}">
     ${pageHeader('Settings', 'Manage system integrations and pickup scheduling.', buttonLink('admin-dashboard', 'Back to dashboard', 'button-secondary'))}
     ${access.verificationEmailConfigured ? '' : `<p class="integration-settings-note integration-verification-warning">${h(access.verificationEmailError)} Credential changes are unavailable until it is configured.</p>`}
     <form data-form="integration-settings" novalidate>${cards}

@@ -10,6 +10,7 @@ const { createEmailService } = require('../../src/services/email');
 const { createGoogleOAuth } = require('../../src/services/google-oauth');
 const { createRecaptcha } = require('../../src/services/recaptcha');
 const { createGoogleCalendar } = require('../../src/services/google-calendar');
+const { createIntegrationSecurity } = require('../../src/services/integration-security');
 
 const ENCRYPTION_KEY = randomBytes(32).toString('base64');
 const GOOGLE_KEY = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
@@ -49,6 +50,64 @@ function createDatabase({ failWriteFor = null } = {}) {
     database: { collection: () => collection },
     documents,
     control,
+  };
+}
+
+function createSecurityDatabase() {
+  const collections = new Map();
+  function matches(document, filter) {
+    return Object.entries(filter).every(([key, expected]) => {
+      if (expected && typeof expected === 'object') {
+        if ('$exists' in expected) return expected.$exists ? document[key] !== undefined : document[key] === undefined;
+        if ('$lt' in expected) return document[key] < expected.$lt;
+      }
+      return document[key] === expected;
+    });
+  }
+  function apply(document, changes) {
+    for (const [key, value] of Object.entries(changes.$set || {})) document[key] = structuredClone(value);
+    for (const [key, value] of Object.entries(changes.$inc || {})) document[key] = (document[key] || 0) + value;
+    for (const key of Object.keys(changes.$unset || {})) delete document[key];
+    for (const [key, value] of Object.entries(changes.$push || {})) {
+      const entries = value && typeof value === 'object' && '$each' in value ? value.$each : [value];
+      document[key] = [...(document[key] || []), ...structuredClone(entries)];
+      if (value?.$slice < 0) document[key] = document[key].slice(value.$slice);
+    }
+  }
+  return {
+    collection(name) {
+      if (!collections.has(name)) collections.set(name, new Map());
+      const documents = collections.get(name);
+      return {
+        async findOne(filter) {
+          const document = documents.get(filter._id);
+          return document && matches(document, filter) ? structuredClone(document) : null;
+        },
+        async updateOne(filter, changes, { upsert = false } = {}) {
+          let document = documents.get(filter._id);
+          if (document && !matches(document, filter)) return { matchedCount: 0, modifiedCount: 0 };
+          if (!document && !upsert) return { matchedCount: 0, modifiedCount: 0 };
+          const inserted = !document;
+          document ||= { _id: filter._id };
+          apply(document, changes);
+          documents.set(filter._id, document);
+          return { matchedCount: inserted ? 0 : 1, modifiedCount: 1 };
+        },
+        async findOneAndUpdate(filter, changes, { upsert = false } = {}) {
+          let document = documents.get(filter._id);
+          if (!document && !upsert) return null;
+          document ||= { _id: filter._id };
+          apply(document, changes);
+          documents.set(filter._id, document);
+          return structuredClone(document);
+        },
+        async deleteOne(filter) {
+          const document = documents.get(filter._id);
+          if (document && matches(document, filter)) documents.delete(filter._id);
+          return { deletedCount: document ? 1 : 0 };
+        },
+      };
+    },
   };
 }
 
@@ -331,7 +390,7 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
   });
   return {
     state, integrationSettings, audit, seen, sentHashes, controller,
-    callIntegration, baseSettings, email, googleOAuth,
+    callIntegration, baseSettings, email, googleOAuth, recaptcha, googleCalendar, adminMfa,
   };
 }
 
@@ -412,6 +471,106 @@ async function verifyCandidate(harness, integrationId, body) {
   );
   return res;
 }
+
+test('saving every integration sends its code through the independent bootstrap mailer', async () => {
+  const harness = await createHarness();
+  await harness.integrationSettings.saveIntegrations({
+    admin_mfa: { enabled: true, fields: {} },
+  }, harness.audit, {});
+  const bootstrapMessages = [];
+  const bootstrapTransports = [];
+  let timestamp = 1_800_000_000_000;
+  const integrationSecurity = createIntegrationSecurity(createSecurityDatabase(), {
+    pin: 'test-pin',
+    email: 'admin@example.test',
+    smtp: {
+      host: 'bootstrap.example.test',
+      port: 587,
+      secure: false,
+      user: 'bootstrap-user',
+      password: 'bootstrap-password',
+      from: 'settings@example.test',
+    },
+    hashKey: randomBytes(32),
+    now: () => timestamp,
+    mailer: {
+      createTransport(options) {
+        bootstrapTransports.push(options);
+        return { async sendMail(message) { bootstrapMessages.push(message); } };
+      },
+    },
+  });
+  const controller = createAdminController({
+    auth: {},
+    items: {},
+    rolePermissions: {},
+    notifications: {},
+    integrationSettings: harness.integrationSettings,
+    integrationSecurity,
+    adminMfa: harness.adminMfa,
+    googleOAuth: harness.googleOAuth,
+    recaptcha: harness.recaptcha,
+    googleCalendar: harness.googleCalendar,
+    email: harness.email,
+    callIntegration: harness.callIntegration,
+    audit: harness.audit,
+    frontendOrigin: 'https://frontend.example.test',
+  });
+  const calendarKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
+    .export({ format: 'pem', type: 'pkcs8' }).toString().trim();
+  const candidates = [
+    { google_auth: { enabled: true, fields: { client_secret: 'google-next-candidate-secret' } } },
+    { recaptcha: { enabled: true, fields: { secret_key: 'recaptcha-next-candidate-secret' } } },
+    { smtp: { enabled: true, fields: { password: 'smtp-next-candidate-secret' } } },
+    { google_calendar: { enabled: true, fields: { private_key: calendarKey } } },
+    { admin_mfa: { enabled: false, fields: {} } },
+  ];
+  const integrationIds = ['google_auth', 'recaptcha', 'smtp', 'google_calendar', 'admin_mfa'];
+  for (const [index, integrations] of candidates.entries()) {
+    if (index) timestamp += 60_000;
+    const integrationId = integrationIds[index];
+    if (['google_auth', 'recaptcha'].includes(integrationId)) {
+      const verified = response();
+      await controller.postAdminSettingsVerify(
+        request(integrations[integrationId], { integrationId }),
+        verified,
+      );
+      assert.equal(verified.statusCode, 200);
+    }
+    const send = response();
+    await controller.putAdminSettings(request({ integrations }), send);
+    assert.equal(send.body.verificationRequired, true, `integration index ${index}: ${send.body.error}`);
+    assert.equal(send.body.maskedRecipient, 'a***@example.test');
+    assert.ok(send.body.expiresAt);
+    const code = /code is: (\d{6})/.exec(bootstrapMessages[index].text)[1];
+    const apply = response();
+    await controller.postAdminSettingsCodeVerify(request({ code, integrations }), apply);
+    assert.equal(apply.statusCode, 200, `integration index ${index}: ${apply.body.error}`);
+    assert.equal(bootstrapMessages[index].to, 'admin@example.test');
+    assert.equal(bootstrapTransports[index].host, 'bootstrap.example.test');
+    assert.equal(bootstrapTransports[index].auth.pass, 'bootstrap-password');
+    assert.equal(JSON.stringify(harness.audit.events).includes(code), false);
+  }
+  assert.deepEqual(bootstrapMessages.map(({ to }) => to), Array(5).fill('admin@example.test'));
+  assert.deepEqual(bootstrapTransports.map(({ host }) => host), Array(5).fill('bootstrap.example.test'));
+  for (const integrationId of integrationIds) {
+    assert.equal(
+      (await harness.integrationSettings.getIntegration(integrationId)).enabled,
+      integrationId !== 'admin_mfa',
+    );
+  }
+  for (const candidate of candidates) {
+    const candidateSecret = candidate.google_auth?.fields?.client_secret
+      || candidate.recaptcha?.fields?.secret_key
+      || candidate.smtp?.fields?.password
+      || candidate.google_calendar?.fields?.private_key;
+    if (candidateSecret) assert.equal(JSON.stringify(harness.audit.events).includes(candidateSecret), false);
+  }
+  const testEmail = response();
+  await controller.postAdminSettingsVerificationEmailTest(request({}), testEmail);
+  assert.deepEqual(testEmail.body, { sent: true, maskedRecipient: 'a***@example.test' });
+  assert.equal(bootstrapMessages[5].subject, 'Verification email test');
+});
 
 test('reCAPTCHA Verify passes the one-use token and server-configured frontend hostname only to the verifier', async () => {
   const harness = await createHarness();

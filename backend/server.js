@@ -26,6 +26,12 @@ const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 
 async function start() {
   const integrationEncryptionKey = parseEncryptionKey(config.integrationEncryptionKey);
+  for (const warning of [
+    config.integrationSettingsEmailError,
+    ...config.integrationBootstrapSmtpErrors,
+  ].filter(Boolean)) {
+    console.warn(`WARNING: ${warning}.`);
+  }
   if (config.adminMfaDisabled) {
     console.warn('WARNING: ADMIN_MFA_DISABLED=true; admin MFA login enforcement is bypassed.');
   }
@@ -42,7 +48,9 @@ async function start() {
   const integrationSecurity = createIntegrationSecurity(database, {
     pin: config.integrationSettingsPin,
     email: config.integrationSettingsEmail,
+    emailError: config.integrationSettingsEmailError,
     smtp: config.integrationBootstrapSmtp,
+    smtpErrors: config.integrationBootstrapSmtpErrors,
     hashKey: integrationEncryptionKey,
     codeRequestLimit: config.integrationCodeRequestLimit,
     codeRequestWindowMs: config.integrationCodeRequestWindowMs,

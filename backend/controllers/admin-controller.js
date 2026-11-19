@@ -414,6 +414,7 @@ function createAdminController({
     },
 
     getAdminSettingsAccess: async (req, res) => {
+      res.set('Cache-Control', 'no-store');
       if (!req.session.csrfToken) {
         req.session.csrfToken = randomBytes(32).toString('base64url');
       }
@@ -421,6 +422,12 @@ function createAdminController({
       const unlocked = state.accessReady
         && integrationSecurity.touchSession(req.session, req.user.id);
       await saveSession(req);
+      const pendingCode = unlocked
+        ? await integrationSecurity.getPendingCodeStatus({
+          adminId: req.user.id,
+          sessionId: req.sessionID,
+        })
+        : null;
       return res.json({
         csrfToken: req.session.csrfToken,
         accessReady: state.accessReady,
@@ -428,6 +435,8 @@ function createAdminController({
         unlocked,
         verificationEmailConfigured: state.verificationEmailConfigured,
         verificationEmailError: state.verificationEmailError,
+        verificationRecipient: state.maskedRecipient,
+        pendingCode,
       });
     },
 
@@ -449,6 +458,18 @@ function createAdminController({
       await integrationSecurity.cancelCode({ adminId: req.user.id, sessionId: req.sessionID });
       await saveSession(req);
       return res.json({ locked: true });
+    },
+
+    postAdminSettingsVerificationEmailTest: async (req, res) => {
+      try {
+        const result = await integrationSecurity.sendTestEmail({
+          adminId: req.user.id,
+          auditContext: requestAuditContext(req, null),
+        });
+        return res.json({ sent: true, ...result });
+      } catch (error) {
+        return integrationSettingsError(res, error, 'The verification test email could not be sent.');
+      }
     },
 
     getAdminSettings: async (req, res) => {
@@ -529,7 +550,7 @@ function createAdminController({
         const restore = req.session.pendingAdminMfaRestore;
         if (restore && req.body?.restoreDefault === restore.integrationId) {
           const result = await sendIntegrationVerificationCode(
-            req, integrationSecurity, integrationSettings, restore.plan, audit,
+            req, integrationSecurity, integrationSettings, restore.plan, audit, restore.integrationId,
           );
           return res.json({ verificationRequired: true, restoreDefault: restore.integrationId, ...result });
         }
@@ -627,7 +648,7 @@ function createAdminController({
           };
           await saveSession(req);
           const result = await sendIntegrationVerificationCode(
-            req, integrationSecurity, integrationSettings, plan, audit,
+            req, integrationSecurity, integrationSettings, plan, audit, integrationId,
           );
           return res.json({ verificationRequired: true, restoreDefault: integrationId, ...result });
         }
@@ -786,7 +807,9 @@ function createAdminController({
   };
 }
 
-async function sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit) {
+async function sendIntegrationVerificationCode(
+  req, integrationSecurity, integrationSettings, plan, audit, restoreDefault = null,
+) {
   const changes = plan.changes.map(({ integration, fields }) => ({
     integration,
     label: integrationSettings.getIntegrationLabel(integration),
@@ -801,6 +824,7 @@ async function sendIntegrationVerificationCode(req, integrationSecurity, integra
     ipAddress: req.ip,
     auditContext: requestAuditContext(req, null),
     audit,
+    restoreDefault,
   });
 }
 
@@ -1066,7 +1090,12 @@ function integrationSettingsError(res, error, fallbackMessage) {
     return res.status(error.status || 400).json({ error: error.message, failures: error.failures });
   }
   if ([400, 403, 404, 429, 503].includes(error.status)) {
-    return res.status(error.status).json({ error: error.message });
+    return res.status(error.status).json({
+      error: error.message,
+      ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}),
+      ...(error.reason ? { reason: error.reason } : {}),
+      ...(error.maskedRecipient ? { maskedRecipient: error.maskedRecipient } : {}),
+    });
   }
   return res.status(500).json({ error: fallbackMessage });
 }

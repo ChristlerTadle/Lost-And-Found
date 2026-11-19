@@ -1,5 +1,80 @@
 const path = require('node:path');
+const { isIP } = require('node:net');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+
+function normalizeBootstrapValue(value) {
+  if (typeof value !== 'string') return '';
+  let normalized = value.trim();
+  if (normalized.length >= 2
+    && ['"', "'"].includes(normalized[0])
+    && normalized.at(-1) === normalized[0]) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized;
+}
+
+function isValidEmailAddress(value) {
+  if (typeof value !== 'string' || value.length > 254 || /\s/.test(value)) return false;
+  const at = value.lastIndexOf('@');
+  if (at < 1 || at > 64 || at === value.length - 1) return false;
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  if (!/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local)
+    || local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
+  return domain.length <= 253 && domain.includes('.') && domain.split('.').every((label) => (
+    label.length > 0 && label.length <= 63
+    && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+  ));
+}
+
+function isValidSmtpHost(value) {
+  if (!value || value.length > 253 || /\s/.test(value)) return false;
+  if (isIP(value)) return true;
+  return value.split('.').every((label) => (
+    label.length > 0 && label.length <= 63
+    && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+  ));
+}
+
+function normalizeBootstrapMail(env) {
+  const email = normalizeBootstrapValue(env.SU_EMAIL);
+  const emailError = !email ? 'SU_EMAIL is missing'
+    : isValidEmailAddress(email) ? '' : 'SU_EMAIL is invalid';
+  const host = normalizeBootstrapValue(env.SU_SMTP_HOST);
+  const portValue = normalizeBootstrapValue(env.SU_SMTP_PORT);
+  const secureValue = normalizeBootstrapValue(env.SU_SMTP_SECURE).toLowerCase();
+  const user = normalizeBootstrapValue(env.SU_SMTP_USER);
+  const password = normalizeBootstrapValue(env.SU_SMTP_PASSWORD);
+  const from = normalizeBootstrapValue(env.SU_SMTP_FROM);
+  const fromAddress = /<([^<>]+)>$/.exec(from)?.[1]?.trim() || from;
+  const smtpErrors = [];
+  if (!host) smtpErrors.push('SU_SMTP_HOST is missing');
+  else if (!isValidSmtpHost(host)) smtpErrors.push('SU_SMTP_HOST is invalid');
+  const port = portValue ? Number(portValue) : null;
+  if (!portValue) smtpErrors.push('SU_SMTP_PORT is missing');
+  else if (!/^\d+$/.test(portValue) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    smtpErrors.push('SU_SMTP_PORT is invalid');
+  }
+  if (!secureValue) smtpErrors.push('SU_SMTP_SECURE is missing');
+  else if (!['true', 'false'].includes(secureValue)) smtpErrors.push('SU_SMTP_SECURE is invalid');
+  if (!user) smtpErrors.push('SU_SMTP_USER is missing');
+  if (!password) smtpErrors.push('SU_SMTP_PASSWORD is missing');
+  if (!from) smtpErrors.push('SU_SMTP_FROM is missing');
+  else if (!isValidEmailAddress(fromAddress)) smtpErrors.push('SU_SMTP_FROM is invalid');
+  return {
+    email,
+    emailError,
+    smtp: {
+      host,
+      port: smtpErrors.includes('SU_SMTP_PORT is invalid') || !portValue ? null : port,
+      secure: ['true', 'false'].includes(secureValue) ? secureValue === 'true' : null,
+      user,
+      password,
+      from,
+    },
+    smtpErrors,
+  };
+}
 
 function positiveIntegerEnv(name, fallback, maximum) {
   const raw = process.env[name];
@@ -9,6 +84,8 @@ function positiveIntegerEnv(name, fallback, maximum) {
   }
   return Number(raw);
 }
+
+const bootstrapMail = normalizeBootstrapMail(process.env);
 
 // Integration settings route limits are process-local and reset with the API.
 const integrationRouteLimits = {
@@ -44,7 +121,9 @@ module.exports = {
   mongodbDatabase: process.env.MONGODB_DATABASE || 'lost_and_found',
   integrationEncryptionKey: process.env.INTEGRATION_ENCRYPTION_KEY || '',
   integrationSettingsPin: process.env.SU_PIN || '',
-  integrationSettingsEmail: process.env.SU_EMAIL || '',
+  integrationSettingsEmail: bootstrapMail.email,
+  integrationSettingsEmailError: bootstrapMail.emailError,
+  integrationBootstrapSmtpErrors: bootstrapMail.smtpErrors,
   integrationRouteLimits,
   integrationRateLimits,
   integrationCodeRequestLimit: positiveIntegerEnv('SU_CODE_REQUEST_LIMIT', 5, 100),
@@ -56,12 +135,5 @@ module.exports = {
   adminMfaRateLimitDisabled: process.env.ADMIN_MFA_RATE_LIMIT_DISABLED === 'true'
     && process.env.NODE_ENV !== 'production',
   adminMfaRateLimitBypassRequested: process.env.ADMIN_MFA_RATE_LIMIT_DISABLED === 'true',
-  integrationBootstrapSmtp: {
-    host: process.env.SU_SMTP_HOST || '',
-    port: process.env.SU_SMTP_PORT || '',
-    secure: process.env.SU_SMTP_SECURE || '',
-    user: process.env.SU_SMTP_USER || '',
-    password: process.env.SU_SMTP_PASSWORD || '',
-    from: process.env.SU_SMTP_FROM || '',
-  },
+  integrationBootstrapSmtp: bootstrapMail.smtp,
 };
