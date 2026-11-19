@@ -112,6 +112,53 @@ test('candidate reCAPTCHA proof uses the candidate secret and requires explicit 
   assert.equal(harness.auditEvents.length, 0);
 });
 
+test('candidate reCAPTCHA fails closed on network errors, timeouts, 5xx, and malformed replies', async () => {
+  const harness = createHealthHarness({ timeoutMs: 10 });
+  const candidate = {
+    site_key: 'candidate-site-key-123456789012345',
+    secret_key: 'candidate-secret-key-1234567890123456789',
+  };
+  const proof = { token: 'single-use-challenge-token', expectedHostname: 'frontend.example.test' };
+  const failures = [
+    {
+      name: 'network',
+      fetch: async () => {
+        const error = new Error('network failure with candidate-secret-key');
+        error.code = 'ECONNRESET';
+        throw error;
+      },
+    },
+    { name: 'timeout', fetch: async () => new Promise(() => {}) },
+    {
+      name: '5xx',
+      fetch: async () => ({ ok: false, async json() { return { success: true }; } }),
+    },
+    {
+      name: 'malformed JSON',
+      fetch: async () => ({ ok: true, async json() { throw new SyntaxError('unexpected reply'); } }),
+    },
+    {
+      name: 'unexpected reply',
+      fetch: async () => ({ ok: true, async json() { return { success: 'true' }; } }),
+    },
+  ];
+
+  for (const failure of failures) {
+    const recaptcha = createRecaptcha(
+      async () => assert.fail('Candidate verification must not load active settings.'),
+      failure.fetch,
+      harness.callIntegration,
+    );
+    await assert.rejects(recaptcha.verifyCandidate({}, candidate, proof), (error) => (
+      error instanceof IntegrationError && error.status === 503
+    ), failure.name);
+  }
+
+  assert.deepEqual(harness.failures, []);
+  assert.deepEqual(harness.auditEvents, []);
+  assert.equal(harness.health.has('recaptcha'), false);
+});
+
 test('candidate reCAPTCHA rejects hostname mismatch and invalid v3 action or score', async () => {
   const harness = createHealthHarness();
   const settings = {

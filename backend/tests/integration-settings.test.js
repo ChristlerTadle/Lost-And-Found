@@ -533,6 +533,65 @@ test('SMTP candidate verification rejects an unaccepted recipient without exposi
   );
 });
 
+test('SMTP candidate verification fails closed on network, timeout, 5xx, and unaccepted replies', async () => {
+  const healthChanges = [];
+  const auditEvents = [];
+  const callIntegration = createIntegrationCaller({
+    integrationSettings: {
+      async recordIntegrationFailure(id, failure) { healthChanges.push({ id, failure }); },
+      async recordIntegrationSuccess(id) { healthChanges.push({ id, success: true }); },
+      async claimIntegrationFailureAudit() { return true; },
+    },
+    audit: { async logAction(event) { auditEvents.push(event); } },
+    timeoutMs: 10,
+  });
+  const candidate = {
+    host: 'smtp.example.test',
+    port: '587',
+    secure: false,
+    user: 'candidate-user',
+    password: 'candidate-private-password',
+    sender_email: 'candidate@example.test',
+  };
+  const modes = ['network', 'timeout', 'server_error', 'unaccepted'];
+
+  for (const mode of modes) {
+    const email = createEmailService(async () => assert.fail('Candidate verification must not load active settings.'), {
+      createTransport() {
+        return {
+          async verify() {
+            if (mode === 'network') {
+              const error = new Error(`SMTP connection failed: ${candidate.password}`);
+              error.code = 'ECONNRESET';
+              throw error;
+            }
+            if (mode === 'timeout') return new Promise(() => {});
+          },
+          async sendMail() {
+            if (mode === 'server_error') {
+              const error = new Error(`SMTP 550 rejected ${candidate.password}`);
+              error.code = 'EENVELOPE';
+              error.responseCode = 550;
+              throw error;
+            }
+            if (mode === 'unaccepted') return { accepted: ['other@example.test'] };
+            return { accepted: ['admin@example.test'] };
+          },
+        };
+      },
+    }, callIntegration, { verificationEmail: 'admin@example.test' });
+
+    await assert.rejects(email.verifyCandidate(candidate), (error) => (
+      error instanceof IntegrationError
+      && error.status === 503
+      && !error.message.includes(candidate.password)
+    ), mode);
+  }
+
+  assert.deepEqual(healthChanges, []);
+  assert.deepEqual(auditEvents, []);
+});
+
 test('SMTP provider failures are sanitized, health and audit are recorded once, and a passing test clears health', async () => {
   const state = createDatabase([
     { _id: 'smtp', enabled: true },
@@ -725,6 +784,7 @@ test('candidate Google OAuth verification uses PKCE and candidate credentials wi
 test('candidate Google OAuth verification fails safely for provider errors, cancellation, redirects, unverified email, and expiry', async () => {
   const clients = [];
   let tokenError = null;
+  let malformedTokenResponse = false;
   let emailVerified = true;
   class MockOAuthClient {
     constructor(clientId, clientSecret, callbackUrl) {
@@ -747,6 +807,7 @@ test('candidate Google OAuth verification fails safely for provider errors, canc
     }
     async getToken() {
       if (tokenError) throw tokenError;
+      if (malformedTokenResponse) return { tokens: { access_token: 'unexpected-token' } };
       return { tokens: { id_token: 'id-token' } };
     }
     async verifyIdToken() {
@@ -815,6 +876,14 @@ test('candidate Google OAuth verification fails safely for provider errors, canc
   assert.equal(wrongClientSecret.failureCode, 'verification_failed');
 
   tokenError = null;
+  malformedTokenResponse = true;
+  const malformedResponseState = await start();
+  assert.equal((await google.completeVerificationCallback({
+    state: malformedResponseState,
+    code: 'code',
+  })).failureCode, 'invalid_response');
+
+  malformedTokenResponse = false;
   emailVerified = false;
   const unverifiedState = await start();
   assert.equal((await google.completeVerificationCallback({

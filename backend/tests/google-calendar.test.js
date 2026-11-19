@@ -228,6 +228,21 @@ test('calendar candidate verification fails safely when event creation is denied
   assert.deepEqual(harness.operations, ['calendar.get', 'event.insert']);
 });
 
+test('calendar candidate verification cleans up after an ambiguous 5xx event creation failure', async () => {
+  const harness = createHarness({ eventInsertFailure: 500 });
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, candidate),
+    (error) => error.status === 503,
+  );
+  assert.deepEqual(harness.operations, [
+    'calendar.get',
+    'event.insert',
+    'event.delete',
+  ]);
+  assert.equal(harness.events.size, 0);
+});
+
 test('calendar candidate verification reports the event id when cleanup fails', async () => {
   const harness = createHarness({ eventDeleteFailure: 403 });
   const candidate = (await settings().getIntegration()).settings;

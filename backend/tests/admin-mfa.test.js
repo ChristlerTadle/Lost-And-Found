@@ -282,6 +282,27 @@ test('Admin MFA integration proof fails closed when enrollment or encryption sel
   assert.equal(selfTestFailure.database.dump().users[0].admin_mfa.last_time_step, undefined);
 });
 
+test('Admin MFA integration proof rejects an invalid code without consuming its TOTP step', async () => {
+  const state = setup({ enrolled: true });
+  let encryptionSelfTests = 0;
+  state.integrationSettings.selfTestEncryption = () => {
+    encryptionSelfTests += 1;
+    return true;
+  };
+
+  await assert.rejects(state.service.verifyCandidate({
+    adminId: ADMIN._id,
+    ipAddress: IP,
+    proof: { code: '000000' },
+    audit: state.audit,
+  }), /could not be verified/);
+
+  assert.equal(encryptionSelfTests, 1);
+  assert.equal(state.database.dump().users[0].admin_mfa.last_time_step, undefined);
+  assert.ok(state.events.some(({ action }) => action === 'admin.mfa_verify_failed'));
+  assert.equal(JSON.stringify(state.events).includes('000000'), false);
+});
+
 test('admin MFA rejects TOTP replay, consumes recovery codes once, and regenerates codes with a fresh TOTP', async () => {
   const state = setup();
   const enrolled = await state.service.startEnrollment({
