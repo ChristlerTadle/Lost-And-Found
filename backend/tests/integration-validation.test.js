@@ -5,10 +5,10 @@ const { createAdminController } = require('../controllers/admin-controller');
 const { createAuthController } = require('../controllers/auth-controller');
 const { createIntegrationSettings } = require('../../src/services/integration-settings');
 const { createIntegrationRouteLimit } = require('../middlewares/integration-route-limits');
-const { createIntegrationCaller } = require('../../src/services/integration-calls');
-const { createEmailService } = require('../../src/services/email');
-const { createGoogleOAuth } = require('../../src/services/google-oauth');
-const { createRecaptcha } = require('../../src/services/recaptcha');
+const { createIntegrationCaller, IntegrationError } = require('../../src/services/integration-calls');
+const { createEmailService: createEmailServiceWithLimiter } = require('../../src/services/email');
+const { createGoogleOAuth: createGoogleOAuthWithLimiter } = require('../../src/services/google-oauth');
+const { createRecaptcha: createRecaptchaWithLimiter } = require('../../src/services/recaptcha');
 const { createGoogleCalendar } = require('../../src/services/google-calendar');
 const { createIntegrationSecurity } = require('../../src/services/integration-security');
 
@@ -17,6 +17,22 @@ const GOOGLE_KEY = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKe
   .export({ format: 'pem', type: 'pkcs8' }).toString().trim();
 const WRONG_GOOGLE_KEY = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   .export({ format: 'pem', type: 'pkcs8' }).toString().trim();
+
+const testIntegrationCaller = (_integrationId, operation) => operation({
+  signal: new AbortController().signal,
+});
+function createEmailService(...args) {
+  if (typeof args[2] !== 'function') args[2] = testIntegrationCaller;
+  return createEmailServiceWithLimiter(...args);
+}
+function createGoogleOAuth(...args) {
+  if (typeof args[1] !== 'function') args[1] = testIntegrationCaller;
+  return createGoogleOAuthWithLimiter(...args);
+}
+function createRecaptcha(...args) {
+  if (typeof args[2] !== 'function') args[2] = testIntegrationCaller;
+  return createRecaptchaWithLimiter(...args);
+}
 
 function createDatabase({ failWriteFor = null } = {}) {
   const documents = new Map();
@@ -1167,6 +1183,7 @@ test('validation cooldown starts after five failed provider validations', async 
 test('integration token bucket returns a typed error without marking health failing', async () => {
   const audit = createAudit();
   let healthFailures = 0;
+  let timestamp = 0;
   const settings = {
     async getIntegration() {
       return { settings: { rate_limit_per_minute: '1' } };
@@ -1175,16 +1192,150 @@ test('integration token bucket returns a typed error without marking health fail
     async recordIntegrationFailure() { healthFailures += 1; },
     async claimIntegrationFailureAudit() { return true; },
   };
-  const callIntegration = createIntegrationCaller({ integrationSettings: settings, audit });
+  const callIntegration = createIntegrationCaller({
+    integrationSettings: settings,
+    audit,
+    now: () => timestamp,
+  });
   assert.equal(await callIntegration('smtp', async () => true), true);
   await assert.rejects(callIntegration('smtp', async () => true), (error) => (
-    error.name === 'IntegrationRateLimitError'
+    error instanceof IntegrationError
     && error.code === 'rate_limited'
     && error.status === 429
     && error.message === 'Please try again shortly'
+    && error.retryAfter === 60
   ));
   assert.equal(healthFailures, 0);
-  assert.ok(audit.events.some(({ action }) => action === 'integration.rate_limited'));
+  assert.equal(audit.events.filter(({ action }) => action === 'integration.rate_limited').length, 1);
+  assert.deepEqual(audit.events[0].new_value, { suppressed_count: 0 });
+  await assert.rejects(callIntegration('smtp', async () => true), { code: 'rate_limited' });
+  assert.equal(audit.events.filter(({ action }) => action === 'integration.rate_limited').length, 1);
+  timestamp += 10 * 60 * 1000;
+  assert.equal(await callIntegration('smtp', async () => true), true);
+  await assert.rejects(callIntegration('smtp', async () => true), { code: 'rate_limited' });
+  assert.equal(audit.events.filter(({ action }) => action === 'integration.rate_limited').length, 2);
+  assert.deepEqual(audit.events[1].new_value, { suppressed_count: 1 });
+  timestamp += 60 * 1000;
+  assert.equal(await callIntegration('smtp', async () => true), true);
+  assert.equal(healthFailures, 0);
+});
+
+test('all integration buckets refill after a minute', async () => {
+  const ids = ['google_auth', 'recaptcha', 'smtp', 'google_calendar', 'admin_mfa'];
+  let timestamp = 0;
+  const integrationSettings = {
+    async getIntegration() { return { settings: { rate_limit_per_minute: '1' } }; },
+    async recordIntegrationSuccess() {},
+    async recordIntegrationFailure() { assert.fail('Rate limits must not record failures.'); },
+  };
+  const callIntegration = createIntegrationCaller({
+    integrationSettings,
+    audit: createAudit(),
+    now: () => timestamp,
+  });
+  for (const id of ids) {
+    assert.equal(await callIntegration(id, async () => true), true);
+    await assert.rejects(callIntegration(id, async () => true), { code: 'rate_limited' });
+  }
+  timestamp += 60 * 1000;
+  for (const id of ids) assert.equal(await callIntegration(id, async () => true), true);
+});
+
+test('limit changes add capacity when raised and cap available tokens when lowered', async () => {
+  let timestamp = 0;
+  let limit = 2;
+  const integrationSettings = {
+    async getIntegration() { return { settings: { rate_limit_per_minute: String(limit) } }; },
+    async recordIntegrationSuccess() {},
+    async recordIntegrationFailure() { assert.fail('Rate limits must not record failures.'); },
+  };
+  const callIntegration = createIntegrationCaller({
+    integrationSettings,
+    audit: createAudit(),
+    now: () => timestamp,
+  });
+  await callIntegration('smtp', async () => true);
+  limit = 4;
+  for (let count = 0; count < 3; count += 1) {
+    assert.equal(await callIntegration('smtp', async () => true), true);
+  }
+  await assert.rejects(callIntegration('smtp', async () => true), { code: 'rate_limited' });
+
+  timestamp += 60 * 1000;
+  limit = 4;
+  const lowered = createIntegrationCaller({
+    integrationSettings,
+    audit: createAudit(),
+    now: () => timestamp,
+  });
+  await lowered('google_calendar', async () => true);
+  limit = 1;
+  assert.equal(await lowered('google_calendar', async () => true), true);
+  await assert.rejects(lowered('google_calendar', async () => true), { code: 'rate_limited' });
+});
+
+test('admin checks bypass the user-traffic bucket', async () => {
+  const audit = createAudit();
+  const integrationSettings = {
+    async getIntegration() { return { settings: { rate_limit_per_minute: '1' } }; },
+    async recordIntegrationSuccess() {},
+    async recordIntegrationFailure() { assert.fail('Rate-limited checks must not mark health.'); },
+  };
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
+  await callIntegration('recaptcha', async () => true);
+  for (let count = 0; count < 10; count += 1) {
+    assert.equal(await callIntegration('recaptcha', async () => true, {}, {
+      purpose: 'admin_check',
+      candidateValidation: true,
+    }), true);
+  }
+  await assert.rejects(callIntegration('recaptcha', async () => true), { code: 'rate_limited' });
+  assert.equal(audit.events.filter(({ action }) => action === 'integration.rate_limited').length, 1);
+});
+
+test('reCAPTCHA user calls are limited while connection and candidate checks do not drain the bucket', async () => {
+  const { createRecaptcha } = require('../../src/services/recaptcha');
+  const integration = {
+    configured: true,
+    enabled: true,
+    active: true,
+    settings: { secret_key: 'active-secret' },
+  };
+  const settings = {
+    async getIntegration() {
+      return { ...integration, settings: { ...integration.settings, rate_limit_per_minute: '1' } };
+    },
+    async recordIntegrationSuccess() {},
+    async recordIntegrationFailure() { assert.fail('Admin checks must not mark provider health.'); },
+  };
+  const callIntegration = createIntegrationCaller({ integrationSettings: settings, audit: createAudit() });
+  const recaptcha = createRecaptcha(
+    settings.getIntegration,
+    async () => ({ ok: true, async json() { return { success: true }; } }),
+    callIntegration,
+  );
+  assert.equal(await recaptcha.verifyResponse('user-token'), true);
+  assert.equal(await recaptcha.testConnection(), true);
+  assert.deepEqual(await recaptcha.verifyCandidate({}, {
+    site_key: 'candidate-site-key-123456789012345',
+    secret_key: 'candidate-secret-key-1234567890123456789',
+  }, { token: 'admin-token' }), { verified: true, proofType: 'real_challenge' });
+  await assert.rejects(recaptcha.verifyResponse('second-user-token'), {
+    code: 'rate_limited',
+    message: 'Please try again shortly',
+  });
+});
+
+test('provider factories fail closed when callIntegration is not injected', () => {
+  assert.throws(() => require('../../src/services/email').createEmailService(
+    async () => ({ active: false, settings: {} }),
+  ), /callIntegration is required/);
+  assert.throws(() => require('../../src/services/google-oauth').createGoogleOAuth(
+    async () => ({ active: false, configured: false, settings: {} }),
+  ), /callIntegration is required/);
+  assert.throws(() => require('../../src/services/recaptcha').createRecaptcha(
+    async () => ({ active: false, configured: false, settings: {} }),
+  ), /callIntegration is required/);
 });
 
 test('Set Default requires an active configuration with an exact unexpired verification', async () => {

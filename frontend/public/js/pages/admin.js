@@ -448,7 +448,10 @@ async function adminSettings() {
               ${field.required ? 'data-required="true" required' : ''} autocomplete="off"></textarea>`
             : `<input class="input" id="integration-${h(integration.id)}-${h(field.name)}" name="${h(field.name)}" type="${h(field.secret ? 'password' : field.type)}"
               value="${field.secret ? '' : h(field.value)}" placeholder="${field.secret && field.hasValue ? h(field.value) : ''}"
-              ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? `inputmode="numeric" min="${field.name === 'window' && integration.id === 'admin_mfa' ? '0' : ''}" max="${field.name === 'window' && integration.id === 'admin_mfa' ? '1' : ''}" step="${field.name === 'window' && integration.id === 'admin_mfa' ? '1' : ''}"` : ''} autocomplete="off">`}
+              ${field.required ? 'data-required="true"' : ''} ${field.type === 'number' ? `inputmode="numeric" min="${field.name === 'rate_limit_per_minute' ? h(field.min) : field.name === 'window' && integration.id === 'admin_mfa' ? '0' : ''}" max="${field.name === 'rate_limit_per_minute' ? h(field.max) : field.name === 'window' && integration.id === 'admin_mfa' ? '1' : ''}" step="1"` : ''} autocomplete="off">`}
+        ${field.name === 'rate_limit_per_minute'
+          ? `<small>Maximum calls the app makes to this service each minute</small>${integration.id === 'smtp' ? '<small>Sets how many emails the app sends per minute</small>' : ''}`
+          : ''}
         <small class="integration-field-error" data-field-error="${h(field.name)}" role="alert"></small>
       </div>`).join('')}</div>
     </details>

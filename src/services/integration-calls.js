@@ -7,6 +7,7 @@ const FAILURE_CODES = new Set([
   'provider_error',
   'calendar_not_shared',
 ]);
+const RATE_LIMIT_AUDIT_WINDOW_MS = 10 * 60 * 1000;
 
 const SAFE_REASONS = {
   invalid_credentials: 'Credentials rejected by provider',
@@ -27,7 +28,16 @@ const PROVIDER_TIMEOUT_MS = 10_000;
 const FAILURE_AUDIT_WINDOW_MS = 10 * 60 * 1000;
 
 class IntegrationError extends Error {
-  constructor(integrationId, code) {
+  constructor(integrationId, code, { retryAfter } = {}) {
+    if (code === 'rate_limited') {
+      super('Please try again shortly');
+      this.name = 'IntegrationError';
+      this.status = 429;
+      this.integrationId = integrationId;
+      this.code = code;
+      this.retryAfter = retryAfter;
+      return;
+    }
     const safeCode = FAILURE_CODES.has(code) ? code : 'provider_error';
     const message = integrationId === 'google_calendar' && safeCode === 'calendar_not_shared'
       ? 'Calendar not shared with the service account.'
@@ -55,13 +65,19 @@ function providerFailure(code) {
   return error;
 }
 
-function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVIDER_TIMEOUT_MS }) {
+function createIntegrationCaller({
+  integrationSettings,
+  audit,
+  timeoutMs = PROVIDER_TIMEOUT_MS,
+  now = Date.now,
+} = {}) {
   const buckets = new Map();
+  const rateLimitAuditWindows = new Map();
   const validationFailures = new Map();
   const validationCooldowns = new Map();
   const { integrationRouteLimits, integrationRateLimits } = config;
 
-  async function consumeIntegrationBucket(integrationId) {
+  async function consumeIntegrationBucket(integrationId, options = {}) {
     if (!integrationSettings.getIntegration) return;
     const integration = await integrationSettings.getIntegration(integrationId);
     const limit = Math.max(
@@ -72,43 +88,50 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
         || integrationRateLimits.maximum,
       )),
     );
-    const now = Date.now();
+    const timestamp = now();
     const windowMs = integrationRateLimits.bucketWindowMs;
-    let bucket = buckets.get(integrationId);
+    const bucketId = options.bucketKey
+      ? `${integrationId}:${options.bucketKey}`
+      : integrationId;
+    let bucket = buckets.get(bucketId);
     if (!bucket) {
-      bucket = { tokens: limit, updatedAt: now };
-      buckets.set(integrationId, bucket);
+      bucket = { tokens: limit, updatedAt: timestamp, limit };
+      buckets.set(bucketId, bucket);
+    } else {
+      const elapsed = timestamp - bucket.updatedAt;
+      bucket.tokens = Math.min(bucket.limit, bucket.tokens + (elapsed / windowMs) * bucket.limit);
+      if (limit > bucket.limit) {
+        bucket.tokens = Math.min(limit, bucket.tokens + (limit - bucket.limit));
+      } else {
+        bucket.tokens = Math.min(bucket.tokens, limit);
+      }
+      bucket.updatedAt = timestamp;
+      bucket.limit = limit;
     }
-    bucket.tokens = Math.min(bucket.tokens, limit);
-    const elapsed = now - bucket.updatedAt;
-    bucket.tokens = Math.min(limit, bucket.tokens + (elapsed / windowMs) * limit);
-    bucket.updatedAt = now;
     if (bucket.tokens < 1) {
-      const error = new Error('Please try again shortly');
-      error.name = 'IntegrationRateLimitError';
-      error.status = 429;
-      error.integrationId = integrationId;
-      error.code = 'rate_limited';
-      throw error;
+      const retryAfter = Math.max(1, Math.ceil(
+        ((1 - bucket.tokens) / limit) * windowMs / 1000,
+      ));
+      throw new IntegrationError(integrationId, 'rate_limited', { retryAfter });
     }
     bucket.tokens -= 1;
   }
 
   async function recordValidationFailure(integrationId) {
-    const now = Date.now();
+    const timestamp = now();
     let failures = (validationFailures.get(integrationId) || []).filter(
-      (at) => now - at < integrationRouteLimits.validationFailureWindowMs,
+      (at) => timestamp - at < integrationRouteLimits.validationFailureWindowMs,
     );
-    failures.push(now);
+    failures.push(timestamp);
     validationFailures.set(integrationId, failures);
     if (failures.length >= integrationRouteLimits.validationFailureCount) {
-      validationCooldowns.set(integrationId, now + integrationRouteLimits.validationCooldownMs);
+      validationCooldowns.set(integrationId, timestamp + integrationRouteLimits.validationCooldownMs);
     }
   }
 
   function checkValidationCooldown(integrationId) {
     const until = validationCooldowns.get(integrationId);
-    if (until && Date.now() < until) {
+    if (until && now() < until) {
       const error = new Error('Could not verify, try again');
       error.status = 429;
       error.code = 'validation_cooldown';
@@ -121,17 +144,26 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
     validationCooldowns.delete(integrationId);
   }
 
-  async function recordRateLimitAudit(integrationId, auditContext) {
+  async function recordRateLimitAudit(integrationId) {
+    const timestamp = now();
+    const previous = rateLimitAuditWindows.get(integrationId);
+    if (previous && timestamp - previous.loggedAt < RATE_LIMIT_AUDIT_WINDOW_MS) {
+      previous.suppressedCount += 1;
+      return;
+    }
+    const suppressedCount = previous?.suppressedCount || 0;
+    rateLimitAuditWindows.set(integrationId, { loggedAt: timestamp, suppressedCount: 0 });
     try {
       await audit.logAction({
-        ...auditContext,
         action: 'integration.rate_limited',
         target_type: 'integration',
         target_id: integrationId,
-        new_value: {},
+        new_value: { suppressed_count: suppressedCount },
         result: 'failed',
       });
-    } catch {}
+    } catch {
+      console.error(`Integration ${integrationId} rate-limit audit failed.`);
+    }
   }
 
   async function callIntegration(integrationId, operation, auditContext = {}, options = {}) {
@@ -139,7 +171,9 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
     let timer;
     let timedOut = false;
     try {
-      await consumeIntegrationBucket(integrationId);
+      if (options.purpose !== 'admin_check') {
+        await consumeIntegrationBucket(integrationId, options);
+      }
       if (options.candidateValidation) checkValidationCooldown(integrationId);
       const operationPromise = Promise.resolve().then(() => operation({ signal: controller.signal }));
       const timeoutPromise = new Promise((_, reject) => {
@@ -150,11 +184,13 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
         }, timeoutMs);
       });
       const result = await Promise.race([operationPromise, timeoutPromise]);
-      if (!options.candidateValidation) await integrationSettings.recordIntegrationSuccess(integrationId);
+      if (!options.candidateValidation && !options.skipHealth) {
+        await integrationSettings.recordIntegrationSuccess(integrationId);
+      }
       return result;
     } catch (error) {
-      if (error?.name === 'IntegrationRateLimitError') {
-        await recordRateLimitAudit(integrationId, auditContext);
+      if (error instanceof IntegrationError && error.code === 'rate_limited') {
+        await recordRateLimitAudit(integrationId);
         throw error;
       }
       if (error?.integrationFailure === false) throw error;
@@ -162,7 +198,9 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
       const code = timedOut ? 'timeout' : classifyProviderError(error, integrationId);
       if (!code) throw error;
 
-      if (!options.candidateValidation) await recordFailure(integrationId, code, auditContext);
+      if (!options.candidateValidation && !options.skipHealth) {
+        await recordFailure(integrationId, code, auditContext);
+      }
       throw new IntegrationError(integrationId, code);
     } finally {
       if (timer) clearTimeout(timer);
@@ -188,7 +226,7 @@ function createIntegrationCaller({ integrationSettings, audit, timeoutMs = PROVI
 
     try {
       if (await integrationSettings.claimIntegrationFailureAudit(
-        integrationId, new Date(Date.now() - FAILURE_AUDIT_WINDOW_MS),
+        integrationId, new Date(now() - FAILURE_AUDIT_WINDOW_MS),
       )) {
         await audit.logAction({
           ...auditContext,

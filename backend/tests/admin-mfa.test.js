@@ -7,6 +7,7 @@ const { createIntegrationSettings } = require('../../src/services/integration-se
 const { createAuthService } = require('../../src/services/auth');
 const { createAuthController } = require('../controllers/auth-controller');
 const { createAdminMfaSessionGuard } = require('../middlewares/session-auth');
+const { createIntegrationCaller } = require('../../src/services/integration-calls');
 
 const KEY = randomBytes(32).toString('base64');
 const IP = '203.0.113.17';
@@ -122,6 +123,7 @@ function setup({
   required = true,
   disabled = false,
   rateLimitDisabled = false,
+  integrationLimit = 30,
   nowValue = 1_800_000_000_000,
 } = {}) {
   let now = nowValue;
@@ -142,6 +144,7 @@ function setup({
         require_for_all_admins: required,
         issuer: 'Lost and Found System',
         window: '1',
+        rate_limit_per_minute: String(integrationLimit),
       },
     }],
   });
@@ -152,10 +155,16 @@ function setup({
   }
   const events = [];
   const audit = { async logAction(event) { events.push(structuredClone(event)); } };
+  const callIntegration = createIntegrationCaller({
+    integrationSettings,
+    audit,
+    now: () => now,
+  });
   const service = createAdminMfa(database, integrationSettings, {
     disabled,
     rateLimitDisabled,
     now: () => now,
+    callIntegration,
   });
   return {
     database,
@@ -167,6 +176,35 @@ function setup({
     now() { return now; },
   };
 }
+
+test('Admin MFA rate buckets are keyed per administrator account', async () => {
+  const state = setup({ enrolled: true, integrationLimit: 1 });
+  const secondAdmin = {
+    ...structuredClone(ADMIN),
+    _id: 'admin-2',
+    email: 'second-admin@example.test',
+    admin_mfa: {
+      enabled: true,
+      secret: state.integrationSettings.encryptSecret('JBSWY3DPEHPK3PXPGEZDGNBVGY3TQOJQ'),
+      recovery_hashes: [],
+    },
+  };
+  await state.database.collection('users').updateOne(
+    { _id: secondAdmin._id },
+    { $set: secondAdmin },
+    { upsert: true },
+  );
+  const code = await totp('JBSWY3DPEHPK3PXPGEZDGNBVGY3TQOJQ', state.now());
+  await state.service.verifyLogin({
+    adminId: ADMIN._id, ipAddress: IP, code, audit: state.audit,
+  });
+  await assert.rejects(state.service.verifyLogin({
+    adminId: ADMIN._id, ipAddress: IP, code, audit: state.audit,
+  }), (error) => error.code === 'rate_limited' && error.status === 429);
+  assert.equal(await state.service.verifyLogin({
+    adminId: secondAdmin._id, ipAddress: IP, code, audit: state.audit,
+  }), true);
+});
 
 function integrationSettingsPlaceholder() {
   return { version: 1, iv: 'pending', tag: 'pending', data: 'pending' };

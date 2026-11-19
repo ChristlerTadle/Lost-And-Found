@@ -9,10 +9,13 @@ const PUBLIC_TEST_KEYS = new Set([
 function createRecaptcha(
   getIntegration,
   fetchImpl = globalThis.fetch,
-  callIntegration = runDirectly,
+  callIntegration,
   { allowTestKeys = config.recaptchaAllowTestKeys } = {},
 ) {
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required to verify reCAPTCHA responses.');
+  if (typeof callIntegration !== 'function') {
+    throw new Error('callIntegration is required for reCAPTCHA provider calls.');
+  }
 
   return {
     async testConnection(auditContext, settings = null, options = {}) {
@@ -50,7 +53,7 @@ function createRecaptcha(
         }
         if (typeof result.success !== 'boolean') throw providerFailure('provider_error');
         return true;
-      }, auditContext, options);
+      }, auditContext, { ...options, purpose: 'admin_check' });
     },
 
     async verifyResponse(token, remoteIp, auditContext) {
@@ -155,7 +158,7 @@ function createRecaptcha(
           }
         }
         return { verified: true, proofType: 'real_challenge' };
-      }, auditContext, { candidateValidation: true });
+      }, auditContext, { candidateValidation: true, purpose: 'admin_check' });
     },
   };
 }
@@ -177,10 +180,6 @@ function candidateError(code, message) {
   const error = new UserProviderError(message, 400);
   error.code = code;
   return error;
-}
-
-function runDirectly(_integrationId, operation) {
-  return operation({ signal: new AbortController().signal });
 }
 
 module.exports = { createRecaptcha };

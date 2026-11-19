@@ -128,6 +128,8 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
             secret: field.secret,
             credential: Boolean(field.credential),
             required: field.required,
+            min: field.format === 'rate_limit' ? config.integrationRateLimits.minimum : undefined,
+            max: field.format === 'rate_limit' ? config.integrationRateLimits.maximum : undefined,
             value: field.secret && value
               ? field.name === 'private_key' ? MASK : `${MASK}${value.slice(-4)}`
               : value,

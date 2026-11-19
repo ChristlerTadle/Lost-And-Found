@@ -2,9 +2,21 @@ const assert = require('node:assert/strict');
 const { randomBytes } = require('node:crypto');
 const { test } = require('node:test');
 const { createIntegrationSettings, parseEncryptionKey } = require('../../src/services/integration-settings');
-const { createEmailService } = require('../../src/services/email');
-const { createGoogleOAuth } = require('../../src/services/google-oauth');
+const { createEmailService: createEmailServiceWithLimiter } = require('../../src/services/email');
+const { createGoogleOAuth: createGoogleOAuthWithLimiter } = require('../../src/services/google-oauth');
 const { createIntegrationCaller, IntegrationError } = require('../../src/services/integration-calls');
+
+const testIntegrationCaller = (_integrationId, operation) => operation({
+  signal: new AbortController().signal,
+});
+function createEmailService(...args) {
+  if (typeof args[2] !== 'function') args[2] = testIntegrationCaller;
+  return createEmailServiceWithLimiter(...args);
+}
+function createGoogleOAuth(...args) {
+  if (typeof args[1] !== 'function') args[1] = testIntegrationCaller;
+  return createGoogleOAuthWithLimiter(...args);
+}
 
 const KEY = randomBytes(32).toString('base64');
 const ENV = {
@@ -484,7 +496,7 @@ test('SMTP candidate verification authenticates and sends an accepted test email
     },
   }, async (integrationId, operation, _auditContext, options) => {
     assert.equal(integrationId, 'smtp');
-    assert.deepEqual(options, { candidateValidation: true });
+    assert.deepEqual(options, { candidateValidation: true, purpose: 'admin_check' });
     return operation({ signal: new AbortController().signal });
   }, { verificationEmail: 'admin@example.test' });
 
@@ -736,7 +748,7 @@ test('candidate Google OAuth verification uses PKCE and candidate credentials wi
     async () => assert.fail('Candidate verification must use the submitted settings.'),
     async (integrationId, operation, _auditContext, options) => {
       assert.equal(integrationId, 'google_auth');
-      assert.deepEqual(options, { candidateValidation: true });
+      assert.deepEqual(options, { candidateValidation: true, purpose: 'admin_check' });
       return operation({ signal: new AbortController().signal });
     },
     undefined,

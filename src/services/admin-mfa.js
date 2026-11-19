@@ -12,7 +12,11 @@ function createAdminMfa(database, integrationSettings, {
   disabled = false,
   rateLimitDisabled = false,
   now = Date.now,
+  callIntegration,
 } = {}) {
+  if (typeof callIntegration !== 'function') {
+    throw new Error('callIntegration is required for Admin MFA verification.');
+  }
   const users = database.collection('users');
   const attempts = database.collection('admin_mfa_attempts');
 
@@ -196,7 +200,17 @@ function createAdminMfa(database, integrationSettings, {
     return { recoveryCodes };
   }
 
-  async function verifyLogin({ adminId, ipAddress, code, audit }) {
+  async function verifyLogin(params) {
+    const bucketKey = integrationSettings.hashForRateLimit(`admin-mfa:${params.adminId}`);
+    return callIntegration(
+      'admin_mfa',
+      () => verifyLoginCode(params),
+      {},
+      { purpose: 'admin_mfa', bucketKey, skipHealth: true },
+    );
+  }
+
+  async function verifyLoginCode({ adminId, ipAddress, code, audit }) {
     await assertNotLocked(adminId, ipAddress);
     const account = await findAdmin(adminId);
     if (!isEnrolled(account)) throw genericError();

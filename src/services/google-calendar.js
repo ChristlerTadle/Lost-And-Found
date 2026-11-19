@@ -27,6 +27,9 @@ function createGoogleCalendar({
   callIntegration,
   client = googleClient,
 }) {
+  if (typeof callIntegration !== 'function') {
+    throw new Error('callIntegration is required for Google Calendar provider calls.');
+  }
   async function testConnection(auditContext, settings = null, options = {}) {
     const integration = settings
       ? { configured: true, active: true, settings }
@@ -44,7 +47,7 @@ function createGoogleCalendar({
         throw providerError(error);
       }
       return true;
-    }, auditContext, options);
+    }, auditContext, { ...options, purpose: 'admin_check' });
   }
 
   async function verifyCandidate(auditContext, settings) {
@@ -124,7 +127,7 @@ function createGoogleCalendar({
         }
         throw error;
       }
-    }, auditContext, { candidateValidation: true });
+    }, auditContext, { candidateValidation: true, purpose: 'admin_check' });
   }
 
   async function syncApprovedClaim(claim, auditContext = {}) {

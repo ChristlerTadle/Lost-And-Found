@@ -13,9 +13,35 @@ const {
   ROLE_PERMISSION_ROUTE_MAP,
   normalizeRolePermissions,
 } = require('../config/role-permissions');
-const { createAuthRoutes } = require('../routes/auth.routes');
+const { createAuthRoutes, createPublicAuthRateLimit } = require('../routes/auth.routes');
 const { createHealthRoutes } = require('../routes/health.routes');
 const { IntegrationError } = require('../../src/services/integration-calls');
+
+test('public login, register, and forgot-password share a 20-per-minute IP limit', () => {
+  let timestamp = 0;
+  const limit = createPublicAuthRateLimit({ limit: 20, windowMs: 60_000, now: () => timestamp });
+  let proceeded = 0;
+  const makeResponse = () => ({
+    headers: {},
+    set(name, value) { this.headers[name] = value; return this; },
+    status(value) { this.statusCode = value; return this; },
+    json(value) { this.body = value; return this; },
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = makeResponse();
+    limit({ ip: '192.0.2.10' }, result, () => { proceeded += 1; });
+  }
+  const blocked = makeResponse();
+  limit({ ip: '192.0.2.10' }, blocked, () => { proceeded += 1; });
+  assert.equal(proceeded, 20);
+  assert.equal(blocked.statusCode, 429);
+  assert.equal(blocked.headers['Retry-After'], '60');
+  assert.deepEqual(blocked.body, { error: 'Please try again shortly' });
+  timestamp += 60_000;
+  const recovered = makeResponse();
+  limit({ ip: '192.0.2.10' }, recovered, () => { proceeded += 1; });
+  assert.equal(proceeded, 21);
+});
 
 const user = { id: 'test-user', full_name: 'Test User', role_name: 'user', status: 'active' };
 const staff = { id: 'test-staff', full_name: 'Test Staff', role_name: 'staff', status: 'active' };

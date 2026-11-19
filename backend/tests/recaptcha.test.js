@@ -1,7 +1,15 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { createIntegrationCaller, IntegrationError } = require('../../src/services/integration-calls');
-const { createRecaptcha } = require('../../src/services/recaptcha');
+const { createRecaptcha: createRecaptchaWithLimiter } = require('../../src/services/recaptcha');
+
+const testIntegrationCaller = (_integrationId, operation) => operation({
+  signal: new AbortController().signal,
+});
+function createRecaptcha(...args) {
+  if (typeof args[2] !== 'function') args[2] = testIntegrationCaller;
+  return createRecaptchaWithLimiter(...args);
+}
 
 function createHealthHarness(options = {}) {
   const health = new Map();

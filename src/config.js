@@ -105,13 +105,13 @@ const integrationRouteLimits = {
 const integrationRateLimits = {
   bucketWindowMs: 60 * 1000,
   minimum: 1,
-  maximum: 300,
+  maximum: 600,
   defaultPerMinute: {
     google_auth: 20,
-    recaptcha: 20,
-    smtp: 60,
-    google_calendar: 60,
-    admin_mfa: 10,
+    recaptcha: 60,
+    smtp: 10,
+    google_calendar: 30,
+    admin_mfa: 30,
   },
 };
 

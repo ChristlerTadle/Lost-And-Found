@@ -56,12 +56,13 @@ async function start() {
     codeRequestWindowMs: config.integrationCodeRequestWindowMs,
     codeResendMs: config.integrationCodeResendMs,
   });
+  const audit = createAuditLogService(database, getMongoClient());
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
   const adminMfa = createAdminMfa(database, integrationSettings, {
     disabled: config.adminMfaDisabled,
     rateLimitDisabled: config.adminMfaRateLimitDisabled,
+    callIntegration,
   });
-  const audit = createAuditLogService(database, getMongoClient());
-  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
   await integrationSettings.validateStoredSecrets();
   const items = createItemService(database, notificationService);
   const email = createEmailService(integrationSettings.getIntegration, undefined, callIntegration);
@@ -136,6 +137,9 @@ async function start() {
   app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
+    if (error.code === 'rate_limited' && Number.isInteger(error.retryAfter)) {
+      res.set('Retry-After', String(error.retryAfter));
+    }
     const uploadError = error instanceof multer.MulterError;
     const status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
       : error instanceof Error && error.constructor === Error ? 400 : 500;

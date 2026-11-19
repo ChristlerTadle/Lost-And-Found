@@ -6,9 +6,12 @@ const SMTP_TIMEOUT_MS = 10_000;
 function createEmailService(
   getIntegration,
   mailer = nodemailer,
-  callIntegration = runDirectly,
+  callIntegration,
   { verificationEmail = config.integrationSettingsEmail } = {},
 ) {
+  if (typeof callIntegration !== 'function') {
+    throw new Error('callIntegration is required for SMTP provider calls.');
+  }
   async function getTransport(override) {
     const integration = override ? null : await getIntegration('smtp');
     if (!override && !integration.active) return null;
@@ -87,7 +90,7 @@ function createEmailService(
         const transport = await getTransport(config);
         await transport.transporter.verify();
         return true;
-      }, auditContext, options);
+      }, auditContext, { ...options, purpose: 'admin_check' });
     },
 
     async verifyCandidate(settings, auditContext = {}) {
@@ -114,13 +117,9 @@ function createEmailService(
         }
         if (!wasAccepted(result, verificationEmail)) throw providerFailure('provider_error');
         return { verified: true, proofType: 'test_email_sent' };
-      }, auditContext, { candidateValidation: true });
+      }, auditContext, { candidateValidation: true, purpose: 'admin_check' });
     },
   };
-}
-
-function runDirectly(_integrationId, operation) {
-  return operation({ signal: new AbortController().signal });
 }
 
 function formatSender(name, email) {

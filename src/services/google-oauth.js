@@ -5,13 +5,16 @@ const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 
 function createGoogleOAuth(
   getIntegration,
-  callIntegration = runDirectly,
+  callIntegration,
   fetchImpl = globalThis.fetch,
   {
     OAuthClient = OAuth2Client,
     verificationTtlMs = VERIFICATION_TTL_MS,
   } = {},
 ) {
+  if (typeof callIntegration !== 'function') {
+    throw new Error('callIntegration is required for Google OAuth provider calls.');
+  }
   const pendingVerifications = new Map();
 
   function getClientConfig(integration, { allowDisabled = false } = {}) {
@@ -89,7 +92,7 @@ function createGoogleOAuth(
         }
         if (!response.ok || result.error) throw providerFailure('provider_error');
         return true;
-      }, auditContext, options);
+      }, auditContext, { ...options, purpose: 'admin_check' });
     },
 
     async createAuthorizationRequest() {
@@ -234,7 +237,7 @@ function createGoogleOAuth(
             }
           },
           auditContext,
-          { candidateValidation: true },
+          { candidateValidation: true, purpose: 'admin_check' },
         );
         tokens = tokenResult?.tokens;
         if (!tokens?.id_token) return { ...result, failureCode: 'invalid_response' };
@@ -245,7 +248,7 @@ function createGoogleOAuth(
             audience: pending.clientId,
           }),
           auditContext,
-          { candidateValidation: true },
+          { candidateValidation: true, purpose: 'admin_check' },
         );
         const payload = ticket.getPayload();
         if (!payload || payload.nonce !== pending.nonce
@@ -282,10 +285,6 @@ function discardPendingCredentials(pending) {
 
 function getGoogleErrorCode(error) {
   return String(error?.response?.data?.error || error?.response?.data?.error_description || '');
-}
-
-function runDirectly(_integrationId, operation) {
-  return operation({ signal: new AbortController().signal });
 }
 
 module.exports = { createGoogleOAuth };
