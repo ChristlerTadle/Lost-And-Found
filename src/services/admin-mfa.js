@@ -91,6 +91,29 @@ function createAdminMfa(database, integrationSettings, {
     return true;
   }
 
+  async function verifyCandidate({ adminId, ipAddress, proof, audit }) {
+    await assertNotLocked(adminId, ipAddress);
+    const account = await findAdmin(adminId);
+    if (!isEnrolled(account)) {
+      await recordFailure(adminId, ipAddress, audit);
+      throw genericError();
+    }
+
+    await selfTest();
+    const result = await verifyToken(
+      integrationSettings.decryptSecret(account.admin_mfa.secret),
+      proof?.code,
+      (await getPolicy()).window,
+    );
+    if (!result.valid || !(await claimTimeStep(adminId, result.timeStep))) {
+      await recordFailure(adminId, ipAddress, audit);
+      throw genericError();
+    }
+
+    await clearAttempts(adminId, ipAddress);
+    return { verified: true, proofType: 'authenticator_code_accepted' };
+  }
+
   async function startEnrollment({ adminId, ipAddress, code, audit }) {
     const account = await findAdmin(adminId);
     if (!account) throw genericError();
@@ -388,6 +411,7 @@ function createAdminMfa(database, integrationSettings, {
     getAdminSummary,
     getStatus,
     selfTest,
+    verifyCandidate,
     startEnrollment,
     confirmEnrollment,
     verifyLogin,

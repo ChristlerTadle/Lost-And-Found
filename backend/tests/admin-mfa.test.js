@@ -222,6 +222,66 @@ test('admin MFA enrollment encrypts secrets, confirms TOTP, and returns recovery
   ]);
 });
 
+test('Admin MFA integration proof requires the saving admin enrolled TOTP and runs the encryption self-test', async () => {
+  const state = setup({ enrolled: true });
+  let encryptionSelfTests = 0;
+  state.integrationSettings.selfTestEncryption = () => {
+    encryptionSelfTests += 1;
+    return true;
+  };
+  const code = await totp('JBSWY3DPEHPK3PXPGEZDGNBVGY3TQOJQ', state.now());
+  const proof = await state.service.verifyCandidate({
+    adminId: ADMIN._id,
+    ipAddress: IP,
+    proof: { code },
+    audit: state.audit,
+  });
+
+  assert.deepEqual(proof, {
+    verified: true,
+    proofType: 'authenticator_code_accepted',
+  });
+  assert.equal(encryptionSelfTests, 1);
+  assert.equal(Number.isSafeInteger(state.database.dump().users[0].admin_mfa.last_time_step), true);
+  assert.equal(JSON.stringify({ proof, database: state.database.dump(), events: state.events }).includes(code), false);
+  await assert.rejects(state.service.verifyCandidate({
+    adminId: ADMIN._id,
+    ipAddress: IP,
+    proof: { code },
+    audit: state.audit,
+  }), /could not be verified/);
+  assert.equal(encryptionSelfTests, 2);
+
+  await assert.rejects(state.service.verifyCandidate({
+    adminId: 'different-admin',
+    ipAddress: IP,
+    proof: { code },
+    audit: state.audit,
+  }), /could not be verified/);
+});
+
+test('Admin MFA integration proof fails closed when enrollment or encryption self-test is unavailable', async () => {
+  const notEnrolled = setup();
+  await assert.rejects(notEnrolled.service.verifyCandidate({
+    adminId: ADMIN._id,
+    ipAddress: IP,
+    proof: { code: '123456' },
+    audit: notEnrolled.audit,
+  }), /could not be verified/);
+  assert.ok(notEnrolled.events.some(({ action }) => action === 'admin.mfa_verify_failed'));
+
+  const selfTestFailure = setup({ enrolled: true });
+  selfTestFailure.integrationSettings.selfTestEncryption = () => false;
+  const code = await totp('JBSWY3DPEHPK3PXPGEZDGNBVGY3TQOJQ', selfTestFailure.now());
+  await assert.rejects(selfTestFailure.service.verifyCandidate({
+    adminId: ADMIN._id,
+    ipAddress: IP,
+    proof: { code },
+    audit: selfTestFailure.audit,
+  }), /Encryption self-test failed/);
+  assert.equal(selfTestFailure.database.dump().users[0].admin_mfa.last_time_step, undefined);
+});
+
 test('admin MFA rejects TOTP replay, consumes recovery codes once, and regenerates codes with a fresh TOTP', async () => {
   const state = setup();
   const enrolled = await state.service.startEnrollment({

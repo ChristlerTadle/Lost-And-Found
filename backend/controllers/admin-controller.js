@@ -949,6 +949,8 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
     } else if (integrationId === 'admin_mfa') {
       verification = await services.adminMfa.verifyCandidate?.({
         adminId: req.user.id,
+        ipAddress: req.ip,
+        audit,
         values,
         proof,
       });

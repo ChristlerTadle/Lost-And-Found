@@ -289,9 +289,14 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
     }
     return { verified: true, proofType: 'real_challenge' };
   };
-  adminMfa.verifyCandidate = async ({ adminId, values, proof }) => {
+  adminMfa.verifyCandidate = async ({ adminId, ipAddress, audit: verificationAudit, values, proof }) => {
     seen.adminMfaCandidate = values;
-    seen.adminMfaCode = proof?.code;
+    seen.adminMfaVerification = {
+      adminId,
+      ipAddress,
+      code: proof?.code,
+      auditProvided: verificationAudit === audit,
+    };
     if (failAdminMfa) throw new Error('Admin MFA proof failed.');
     return { verified: true, proofType: 'authenticator_code_accepted', adminId };
   };
@@ -422,6 +427,40 @@ test('reCAPTCHA Verify passes the one-use token and server-configured frontend h
   assert.equal('expectedHostname' in result.body, false);
   assert.equal(JSON.stringify([...harness.state.documents.values()]).includes(proofToken), false);
   assert.equal(JSON.stringify(harness.audit.events).includes(proofToken), false);
+});
+
+test('Admin MFA Verify binds the code to the saving admin and stores only verification metadata', async () => {
+  const harness = await createHarness();
+  const code = '654321';
+  const payload = {
+    enabled: true,
+    fields: { require_for_all_admins: true },
+  };
+  const result = await verifyCandidate(harness, 'admin_mfa', { ...payload, proof: { code } });
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(harness.seen.adminMfaVerification, {
+    adminId: 'test-admin',
+    ipAddress: '127.0.0.1',
+    code,
+    auditProvided: true,
+  });
+  assert.equal(result.body.verification.proofType, 'authenticator_code_accepted');
+  const storedVerification = JSON.stringify(harness.state.documents.get('verification-admin_mfa'));
+  assert.equal(storedVerification.includes(code), false);
+  assert.equal(JSON.stringify(harness.audit.events).includes(code), false);
+  assert.ok(harness.audit.events.some(({ action, target_id }) => (
+    action === 'integration.verify_success' && target_id === 'admin_mfa'
+  )));
+  const saved = await save(harness, { admin_mfa: payload });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(harness.sentHashes.length, 0);
+  assert.ok(harness.state.documents.get('admin_mfa').defaults);
+  assert.equal(
+    (await harness.integrationSettings.getIntegration('admin_mfa')).settings.require_for_all_admins,
+    true,
+  );
+  assert.equal(JSON.stringify(harness.audit.events).includes(code), false);
 });
 
 test('Google OAuth Verify starts a pending candidate-bound redirect without recording a completed proof', async () => {
