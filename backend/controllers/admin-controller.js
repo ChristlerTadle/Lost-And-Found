@@ -19,6 +19,7 @@ function createAdminController({
   email,
   callIntegration,
   audit,
+  frontendOrigin,
 }) {
   return {
     getAdminDashboard: async (req, res) => {
@@ -487,6 +488,7 @@ function createAdminController({
           candidate.values,
           {
             integrationSettings, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
+            frontendOrigin,
           },
           req.body?.proof,
         );
@@ -905,7 +907,12 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
       );
     } else if (integrationId === 'recaptcha') {
       verification = await services.recaptcha.verifyCandidate?.(
-        requestAuditContext(req, null), values, proof,
+        requestAuditContext(req, null),
+        values,
+        {
+          token: proof?.token,
+          expectedHostname: expectedRecaptchaHostname(req, services.frontendOrigin),
+        },
       );
     } else if (integrationId === 'admin_mfa') {
       verification = await services.adminMfa.verifyCandidate?.({
@@ -990,9 +997,26 @@ function safeValidationReason(error) {
   if (error?.code === 'calendar_invalid_time_zone') {
     return 'Enter a valid IANA time zone, such as Asia/Manila.';
   }
+  if (error?.code === 'recaptcha_invalid_configuration') {
+    return 'Enter valid reCAPTCHA site and secret keys.';
+  }
+  if (error?.code === 'recaptcha_test_keys') {
+    return 'Google public test keys cannot be used for verification.';
+  }
+  if (error?.code === 'recaptcha_hostname_mismatch') {
+    return 'The challenge hostname did not match this site.';
+  }
   if (error?.status === 429) return 'Please try again shortly';
   if (error?.status === 503) return 'Could not verify, try again';
   return 'Could not verify, try again';
+}
+
+function expectedRecaptchaHostname(req, frontendOrigin) {
+  try {
+    return new URL(frontendOrigin).hostname;
+  } catch {
+    return req.hostname;
+  }
 }
 
 function integrationSettingsError(res, error, fallbackMessage) {

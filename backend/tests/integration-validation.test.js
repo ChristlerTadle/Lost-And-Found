@@ -275,8 +275,9 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
     }
     return { verified: true, proofType: 'real_sign_in' };
   };
-  recaptcha.verifyCandidate = async (_context, values) => {
+  recaptcha.verifyCandidate = async (_context, values, proof) => {
     seen.recaptchaSecret = values.secret_key;
+    seen.recaptchaProof = proof;
     if (values.secret_key === 'recaptcha-candidate-secret') {
       const error = new Error('reCAPTCHA credentials rejected.');
       error.code = 'invalid_credentials';
@@ -318,6 +319,7 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
     email,
     callIntegration,
     audit,
+    frontendOrigin: 'https://frontend.example.test',
   });
   return {
     state, integrationSettings, audit, seen, sentHashes, controller,
@@ -346,6 +348,7 @@ function request(body, params = {}) {
     params,
     user: { id: 'test-admin', role_name: 'admin' },
     ip: '127.0.0.1',
+    hostname: 'api.example.test',
     sessionID: 'test-session',
     session: {},
   };
@@ -401,6 +404,22 @@ async function verifyCandidate(harness, integrationId, body) {
   );
   return res;
 }
+
+test('reCAPTCHA Verify passes the one-use token and server-configured frontend hostname only to the verifier', async () => {
+  const harness = await createHarness();
+  const proofToken = 'single-use-recaptcha-token';
+  const result = await verifyCandidate(harness, 'recaptcha', {
+    enabled: true,
+    fields: { secret_key: 'recaptcha-valid-candidate-secret' },
+    proof: { token: proofToken, expectedHostname: 'attacker.example.test' },
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(harness.seen.recaptchaProof.token, proofToken);
+  assert.equal(harness.seen.recaptchaProof.expectedHostname, 'frontend.example.test');
+  assert.equal('expectedHostname' in result.body, false);
+  assert.equal(JSON.stringify([...harness.state.documents.values()]).includes(proofToken), false);
+  assert.equal(JSON.stringify(harness.audit.events).includes(proofToken), false);
+});
 
 test('wrong candidate credentials block every integration save without emailing or leaking secrets', async () => {
   const cases = [

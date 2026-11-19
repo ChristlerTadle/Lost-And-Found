@@ -78,6 +78,112 @@ test('reCAPTCHA sends the current secret, challenge, client IP, and timeout sign
   assert.equal(harness.failures.length, 0);
 });
 
+test('candidate reCAPTCHA proof uses the candidate secret and requires explicit success and expected hostname', async () => {
+  let request;
+  const harness = createHealthHarness();
+  const recaptcha = createRecaptcha(
+    async () => assert.fail('Candidate verification must not load active settings.'),
+    async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        async json() {
+          return { success: true, hostname: 'frontend.example.test' };
+        },
+      };
+    },
+    harness.callIntegration,
+  );
+  const result = await recaptcha.verifyCandidate({}, {
+    site_key: 'candidate-site-key-123456789012345',
+    secret_key: 'candidate-secret-key-1234567890123456789',
+  }, {
+    token: 'single-use-challenge-token',
+    expectedHostname: 'frontend.example.test',
+  });
+
+  assert.deepEqual(result, { verified: true, proofType: 'real_challenge' });
+  assert.deepEqual(Object.fromEntries(request.options.body), {
+    secret: 'candidate-secret-key-1234567890123456789',
+    response: 'single-use-challenge-token',
+  });
+  assert.ok(request.options.signal instanceof AbortSignal);
+  assert.equal(harness.failures.length, 0);
+  assert.equal(harness.auditEvents.length, 0);
+});
+
+test('candidate reCAPTCHA rejects hostname mismatch and invalid v3 action or score', async () => {
+  const harness = createHealthHarness();
+  const settings = {
+    site_key: 'candidate-site-key-123456789012345',
+    secret_key: 'candidate-secret-key-1234567890123456789',
+  };
+  const withReply = (reply) => createRecaptcha(
+    async () => assert.fail('Candidate verification must not load active settings.'),
+    async () => ({ ok: true, async json() { return reply; } }),
+    harness.callIntegration,
+  );
+
+  await assert.rejects(
+    withReply({ success: true, hostname: 'other.example.test' }).verifyCandidate({}, settings, {
+      token: 'challenge-token',
+      expectedHostname: 'frontend.example.test',
+    }),
+    (error) => error.code === 'recaptcha_hostname_mismatch',
+  );
+  await assert.rejects(
+    withReply({ success: true, action: 'login', score: 0.9 }).verifyCandidate({}, settings, {
+      token: 'challenge-token',
+      expectedHostname: 'frontend.example.test',
+    }),
+    /could not be verified/,
+  );
+  await assert.rejects(
+    withReply({ success: true, action: 'integration_verify', score: 0.49 }).verifyCandidate({}, settings, {
+      token: 'challenge-token',
+      expectedHostname: 'frontend.example.test',
+    }),
+    /could not be verified/,
+  );
+  assert.equal(harness.failures.length, 0);
+});
+
+test('candidate reCAPTCHA rejects malformed keys and public test keys unless explicitly allowed', async () => {
+  const harness = createHealthHarness();
+  const candidate = {
+    site_key: '6LeIxAcTAAAAAJcZVRXS4R1b3u0XWg0d8',
+    secret_key: '6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe',
+  };
+  const fetchImpl = async () => ({
+    ok: true,
+    async json() { return { success: true, hostname: 'frontend.example.test' }; },
+  });
+  const rejected = createRecaptcha(async () => {}, fetchImpl, harness.callIntegration, {
+    allowTestKeys: false,
+  });
+  await assert.rejects(
+    rejected.verifyCandidate({}, candidate, {
+      token: 'challenge-token',
+      expectedHostname: 'frontend.example.test',
+    }),
+    (error) => error.code === 'recaptcha_test_keys',
+  );
+  await assert.rejects(
+    rejected.verifyCandidate({}, { ...candidate, site_key: 'bad' }, {
+      token: 'challenge-token',
+      expectedHostname: 'frontend.example.test',
+    }),
+    (error) => error.code === 'recaptcha_invalid_configuration',
+  );
+  const allowedInDevelopment = createRecaptcha(async () => {}, fetchImpl, harness.callIntegration, {
+    allowTestKeys: true,
+  });
+  assert.deepEqual(await allowedInDevelopment.verifyCandidate({}, candidate, {
+    token: 'challenge-token',
+    expectedHostname: 'frontend.example.test',
+  }), { verified: true, proofType: 'real_challenge' });
+});
+
 test('reCAPTCHA connection test validates the saved secret without a user challenge', async () => {
   let request;
   const harness = createHealthHarness();

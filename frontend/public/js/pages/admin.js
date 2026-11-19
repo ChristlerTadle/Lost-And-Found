@@ -424,6 +424,11 @@ async function adminSettings() {
         ${integration.id === 'google_calendar' ? '<button class="button button-outline" type="button" data-action="calendar-test">Test Connection</button>' : ''}
       </div>
     </div>
+    ${integration.id === 'recaptcha' ? `<div class="integration-recaptcha-verification"
+      data-recaptcha-verification hidden>
+      <p data-recaptcha-verification-prompt>Complete this challenge to verify the candidate keys.</p>
+      <div data-recaptcha-verification-widget></div>
+    </div>` : ''}
     ${integration.id === 'admin_mfa' ? `<div class="field integration-verification-code">
       <label for="integration-admin-mfa-code">Current authenticator code</label>
       <input class="input" id="integration-admin-mfa-code" data-verification-code inputmode="numeric" autocomplete="one-time-code" maxlength="6">

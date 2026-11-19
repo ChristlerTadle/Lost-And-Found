@@ -79,6 +79,7 @@ function createApiRouter({ services, frontendOrigin }) {
       email: services.email,
       callIntegration: services.callIntegration,
       audit: services.audit,
+      frontendOrigin,
     }),
   };
 

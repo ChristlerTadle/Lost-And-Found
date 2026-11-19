@@ -11,6 +11,7 @@ let pendingIntegrationRestore = null;
 let integrationCodeResendTimer;
 let pendingAdminRoleChange = null;
 let roleChangeCodeResendTimer;
+const recaptchaChallengeCancels = new WeakMap();
 
 document.addEventListener('shared-rate-limit-ended', (event) => {
   const form = event.detail?.closest?.('form[data-form="integration-settings"]');
@@ -690,6 +691,7 @@ function handleIntegrationEdit(event) {
   const form = event.currentTarget;
   const card = event.target.closest('[data-integration]');
   if (card && !event.target.matches('[data-verification-code]')) {
+    recaptchaChallengeCancels.get(card)?.();
     card.dataset.verifiedPayload = '';
     card.dataset.currentVerification = 'false';
     const message = card.querySelector('[data-integration-validation]');
@@ -1207,19 +1209,31 @@ async function verifyIntegrationCard(event) {
   const card = button.closest('[data-integration]');
   const integrationId = card.dataset.integration;
   const payload = integrationCardPayload(card);
-  const proof = integrationId === 'admin_mfa'
-    ? { code: card.querySelector('[data-verification-code]')?.value || '' }
-    : undefined;
+  let proof;
+  if (integrationId === 'admin_mfa') {
+    proof = { code: card.querySelector('[data-verification-code]')?.value || '' };
+  }
   card.dataset.verifiedPayload = '';
   card.dataset.currentVerification = 'false';
   card.querySelector('[data-integration-validation]').textContent = 'Verification in progress...';
   button.disabled = true;
   try {
+    if (integrationId === 'recaptcha') {
+      proof = { token: await getRecaptchaCandidateToken(card) };
+    }
     const result = await request(`/admin/settings/${encodeURIComponent(integrationId)}/verify`, {
       method: 'POST',
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
       body: JSON.stringify({ ...payload, proof }),
     });
+    if (JSON.stringify(integrationCardPayload(card)) !== JSON.stringify(payload)) {
+      card.dataset.verifiedPayload = '';
+      card.dataset.currentVerification = 'false';
+      card.querySelector('[data-integration-validation]').textContent =
+        'Settings changed during verification. Verify the current settings again.';
+      showNotice('Settings changed during verification. Verify the current settings again.', true);
+      return;
+    }
     card.dataset.verifiedPayload = JSON.stringify(payload);
     card.dataset.currentVerification = 'true';
     card.dataset.verificationProof = result.verification.proofType;
@@ -1237,6 +1251,60 @@ async function verifyIntegrationCard(event) {
     if (code) code.value = '';
     if (!button.dataset.rateLimitUntil) button.disabled = false;
     updateIntegrationSaveState(form);
+  }
+}
+
+async function getRecaptchaCandidateToken(card) {
+  const container = card.querySelector('[data-recaptcha-verification]');
+  const widget = container?.querySelector('[data-recaptcha-verification-widget]');
+  const siteKey = card.querySelector('[name="site_key"]')?.value.trim();
+  if (!container || !widget || !siteKey) {
+    throw new Error('Enter the candidate reCAPTCHA site key before verifying.');
+  }
+  try {
+    await loadRecaptchaApi();
+  } catch {
+    throw new Error('Could not load the reCAPTCHA challenge. Check the site key and try again.');
+  }
+
+  container.hidden = false;
+  widget.replaceChildren();
+  const prompt = container.querySelector('[data-recaptcha-verification-prompt]');
+  if (prompt) prompt.textContent = 'Complete this challenge to verify the candidate keys.';
+
+  let widgetId;
+  try {
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        recaptchaChallengeCancels.delete(card);
+        callback(value);
+      };
+      recaptchaChallengeCancels.set(card, () => {
+        if (widgetId !== undefined) window.grecaptcha.reset(widgetId);
+        finish(reject, new Error('Settings changed. Verify the current settings again.'));
+      });
+      widgetId = window.grecaptcha.render(widget, {
+        sitekey: siteKey,
+        callback: (token) => finish(resolve, token),
+        'error-callback': () => finish(
+          reject,
+          new Error('Could not load the reCAPTCHA challenge. Check the site key and try again.'),
+        ),
+      });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Settings changed. Verify the current settings again.') {
+      throw error;
+    }
+    throw new Error('Could not load the reCAPTCHA challenge. Check the site key and try again.');
+  } finally {
+    recaptchaChallengeCancels.delete(card);
+    if (widgetId !== undefined) window.grecaptcha.reset(widgetId);
+    container.hidden = true;
+    widget.replaceChildren();
   }
 }
 

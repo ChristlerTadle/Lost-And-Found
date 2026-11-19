@@ -50,6 +50,8 @@ module.exports = {
   integrationCodeRequestLimit: positiveIntegerEnv('SU_CODE_REQUEST_LIMIT', 5, 100),
   integrationCodeRequestWindowMs: positiveIntegerEnv('SU_CODE_REQUEST_WINDOW_SECONDS', 3600, 86400) * 1000,
   integrationCodeResendMs: positiveIntegerEnv('SU_CODE_RESEND_SECONDS', 60, 3600) * 1000,
+  recaptchaAllowTestKeys: process.env.RECAPTCHA_ALLOW_TEST_KEYS === 'true'
+    && process.env.NODE_ENV !== 'production',
   adminMfaDisabled: process.env.ADMIN_MFA_DISABLED === 'true',
   adminMfaRateLimitDisabled: process.env.ADMIN_MFA_RATE_LIMIT_DISABLED === 'true'
     && process.env.NODE_ENV !== 'production',
