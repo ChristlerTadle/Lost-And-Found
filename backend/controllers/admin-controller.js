@@ -1,6 +1,6 @@
 
 const path = require('node:path');
-const { randomBytes } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { saveSession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
 const { IntegrationError } = require('../../src/services/integration-calls');
@@ -110,11 +110,60 @@ function createAdminController({
             error.status = 403;
             throw error;
           }
+          const adminRoleChange = oldAccount.role_name === 'admin' || targetRole === 'admin';
+          if (adminRoleChange && !req.rolePermissions?.includes('assign_admin_role')) {
+            const error = new Error('Admin role changes require assign_admin_role.');
+            error.status = 403;
+            throw error;
+          }
+          const prepared = await roleChange.validateRoleChange(
+            req.user.id,
+            req.params.id,
+            targetRole,
+            req.body.permissions,
+          );
+          if (adminRoleChange) {
+            const payloadHash = adminRoleChangePayloadHash(
+              req.user.id,
+              req.params.id,
+              targetRole,
+              prepared.normalized,
+            );
+            const sessionId = `${req.sessionID}:role-change`;
+            const changes = [{ integration: 'account role', fields: ['target account', 'role', 'permissions'] }];
+            if (req.body.role_change_code === undefined) {
+              const verification = await integrationSecurity.sendCode({
+                adminId: req.user.id,
+                sessionId,
+                payloadHash,
+                changes,
+                requester: req.user.full_name || req.user.email || 'Administrator',
+                ipAddress: req.ip,
+                auditContext: requestAuditContext(req, null),
+                audit,
+              });
+              return res.json({ verificationRequired: true, ...verification });
+            }
+            await integrationSecurity.verifyCode({
+              adminId: req.user.id,
+              sessionId,
+              candidate: req.body.role_change_code,
+              payloadHash,
+              auditContext: requestAuditContext(req, null),
+              audit,
+              changes,
+            });
+          } else {
+            await integrationSecurity.cancelCode({
+              adminId: req.user.id,
+              sessionId: `${req.sessionID}:role-change`,
+            });
+          }
           await roleChange.changeRole({
             actorId: req.user.id,
             targetId: req.params.id,
             newRole: targetRole,
-            permissions: req.body.permissions,
+            permissions: prepared.normalized,
             auditContext: requestAuditContext(req, null),
             notifyAssignment: true,
           });
@@ -151,6 +200,11 @@ function createAdminController({
           error.status = 403;
           throw error;
         }
+        if (oldAccount.role_name === 'admin') {
+          const error = new Error('Admin role changes must be made through Edit user.');
+          error.status = 403;
+          throw error;
+        }
         await roleChange.changeRole({
           actorId: req.user.id,
           targetId: req.params.id,
@@ -162,6 +216,11 @@ function createAdminController({
         if (!req.rolePermissions?.includes('manage_permissions')
           || !req.rolePermissions?.includes('edit_user')) {
           const error = new Error('Role changes require edit_user and manage_permissions.');
+          error.status = 403;
+          throw error;
+        }
+        if (oldAccount.role_name === 'admin') {
+          const error = new Error('Admin role changes must be made through Edit user.');
           error.status = 403;
           throw error;
         }
@@ -900,6 +959,16 @@ function safeUserValues(user) {
     role_name: user.role_name,
     status: user.status,
   };
+}
+
+function adminRoleChangePayloadHash(actorId, targetId, roleName, permissions) {
+  const payload = JSON.stringify({
+    actor_id: String(actorId),
+    target_id: String(targetId),
+    role_name: roleName,
+    permissions,
+  });
+  return createHash('sha256').update(payload).digest('hex');
 }
 
 function safeItemValues(item) {

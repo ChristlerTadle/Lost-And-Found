@@ -34,6 +34,7 @@ const ROLE_PERMISSIONS = [
   { key: 'edit_user', label: 'Edit user', group: 'Account management', role: 'admin', requires: ['view_users'] },
   { key: 'disable_user', label: 'Disable user', group: 'Account management', role: 'admin', requires: ['view_users'] },
   { key: 'manage_permissions', label: 'Manage permissions', group: 'Account management', role: 'admin', requires: ['view_users'] },
+  { key: 'assign_admin_role', label: 'Assign admin role', group: 'Account management', role: 'admin', requires: ['manage_permissions'] },
   { key: 'view_all_items', label: 'View all items', group: 'Items', role: 'admin', requires: [] },
   { key: 'edit_item_records', label: 'Edit item records', group: 'Items', role: 'admin', requires: ['view_all_items'] },
   { key: 'view_all_claims', label: 'View all claims', group: 'Claims', role: 'admin', requires: [] },
@@ -121,7 +122,18 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   },
   {
     method: 'PATCH', path: '/admin/users/:id', roles: ['admin'],
-    permission: (req) => ['disable', 'enable'].includes(req.body?.action) ? 'disable_user' : 'edit_user',
+    permission: (req) => {
+      if (['disable', 'enable'].includes(req.body?.action)) return 'disable_user';
+      const permissions = ['edit_user'];
+      if (req.body?.role_change
+        || ['assign_staff', 'revert_staff'].includes(req.body?.action)
+        || req.body?.permissions !== undefined) permissions.push('manage_permissions');
+      if (req.body?.admin_role_change
+        || (req.body?.role_change && req.body?.role_name === 'admin')) {
+        permissions.push('assign_admin_role');
+      }
+      return permissions.length === 1 ? permissions[0] : permissions;
+    },
   },
   { method: 'GET', path: '/admin/users/:id/permissions', roles: ['admin'], permission: 'manage_permissions' },
   { method: 'PUT', path: '/admin/users/:id/permissions', roles: ['admin'], permission: 'manage_permissions' },

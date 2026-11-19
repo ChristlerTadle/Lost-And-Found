@@ -135,8 +135,10 @@ async function adminEditUser(id) {
   const { users } = await request('/admin/users');
   const user = users.find((account) => account.id === id);
   if (!user) throw new Error('User account was not found.');
-  const canManage = canManagePermissions() && user.id !== sessionInfo.user?.id;
-  const canChangeRole = canManage && canEditUsers() && user.role_name !== 'admin' && user.id !== sessionInfo.user?.id;
+  const isSelf = user.id === sessionInfo.user?.id;
+  const canManage = canManagePermissions() && !isSelf;
+  const canChangeRole = canManage && canEditUsers();
+  const canAssignAdminRole = sessionInfo.rolePermissions.includes('assign_admin_role');
   const [accountSettings, roleSettings] = canManage
     ? await Promise.all([
       request(`/admin/users/${encodeURIComponent(id)}/permissions`),
@@ -153,18 +155,33 @@ async function adminEditUser(id) {
     ${field('Full name', 'full_name', 'text', user.full_name, true, canEditUsers() ? '' : 'readonly')}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
     ${field('Student ID', 'student_id', 'text', user.student_id || '', false, canEditUsers() ? '' : 'readonly')}${field('Phone number', 'phone', 'tel', user.phone || '', false, canEditUsers() ? '' : 'readonly')}
     <div class="field"><label>Account status</label><p>${h(user.status === 'active' ? 'Active' : 'Disabled')}</p></div>
-    ${user.role_name === 'admin'
-      ? `<div class="field"><label>Role</label><p>Admin</p><input type="hidden" name="role_name" value="admin"></div>`
+    ${isSelf
+      ? `<div class="field"><label>Role</label><p>${roleName(user.role_name)}</p><input type="hidden" name="role_name" value="${h(user.role_name)}"></div>`
       : `<div class="field"><label for="account-role">Role</label><select class="select" id="account-role" name="role_name" data-action="account-role" ${canChangeRole ? '' : 'disabled'}>
-        <option value="user" ${user.role_name === 'user' ? 'selected' : ''}>User</option>
-        <option value="staff" ${user.role_name === 'staff' ? 'selected' : ''}>Staff</option>
-      </select></div>`}
+        <option value="user" ${user.role_name === 'user' ? 'selected' : ''} ${user.role_name === 'admin' && !canAssignAdminRole ? 'disabled' : ''}>User</option>
+        <option value="staff" ${user.role_name === 'staff' ? 'selected' : ''} ${user.role_name === 'admin' && !canAssignAdminRole ? 'disabled' : ''}>Staff</option>
+        <option value="admin" ${user.role_name === 'admin' ? 'selected' : ''} ${!canAssignAdminRole && user.role_name !== 'admin' ? 'disabled' : ''}>Admin</option>
+      </select>${!canAssignAdminRole ? '<small>Assigning or demoting Admins requires the Assign admin role permission.</small>' : ''}</div>`}
     ${canManage ? `<section class="admin-account-permissions" data-current-role="${h(user.role_name)}">
       <p class="muted">Changes here apply to this account only. The role setting always wins.</p>
       ${rolePanels}
       <button class="button button-secondary" type="button" data-action="reset-account-permissions" data-id="${h(id)}">Reset to role defaults</button>
     </section>` : '<p class="muted">You do not have permission to manage this account’s permissions.</p>'}
-    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save Changes</button></div></form></main>`;
+    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save Changes</button></div></form>
+    <dialog class="admin-role-change-code-dialog" data-role-change-code-dialog>
+      <form class="form-grid" data-form="admin-role-change-code">
+        <h2 class="field full">Verify Admin role change</h2>
+        <p class="muted field full">A six-digit code was sent to SU_EMAIL. It expires in 10 minutes.</p>
+        <div class="field full"><label for="admin-role-change-code">Verification code</label>
+          <input class="input" id="admin-role-change-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div>
+        <p class="field full" data-role-change-code-error role="status"></p>
+        <div class="form-actions full">
+          <button class="button button-secondary" type="button" data-action="close-role-change-code">Close</button>
+          <button class="button button-secondary" type="button" data-action="resend-role-change-code">Resend (60s)</button>
+          <button class="button button-primary" type="submit">Verify and save</button>
+        </div>
+      </form>
+    </dialog></main>`;
 }
 
 function renderPermissionChecklist(role, permissions, currentRole) {

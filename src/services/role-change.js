@@ -11,7 +11,7 @@ function createRoleChangeService(database, { rolePermissions, notifications, aud
   }
 
   async function validateTarget(actorId, targetId, newRole, submittedPermissions) {
-    if (!targetId || !['user', 'staff'].includes(newRole)) {
+    if (!targetId || !['user', 'staff', 'admin'].includes(newRole)) {
       safeError('Choose a valid account role.');
     }
     if (String(actorId) === String(targetId)) {
@@ -21,11 +21,8 @@ function createRoleChangeService(database, { rolePermissions, notifications, aud
     if (!target || target.status !== 'active') {
       safeError('Active user account was not found.', 404);
     }
-    if (target.role_name === 'admin') {
-      safeError('An Admin account role cannot be changed.', 403);
-    }
-    if (!['user', 'staff'].includes(target.role_name)) {
-      safeError('Only User and Staff accounts can be changed here.', 403);
+    if (!['user', 'staff', 'admin'].includes(target.role_name)) {
+      safeError('The account has an invalid role.', 403);
     }
     const roleEnabled = new Set(await rolePermissions.findRolePermissions(newRole));
     const normalized = submittedPermissions === undefined
@@ -36,7 +33,30 @@ function createRoleChangeService(database, { rolePermissions, notifications, aud
         safeError(`The role has turned off permission: ${permission}`, 403);
       }
     }
+    if (target.role_name === 'admin' && newRole !== 'admin') {
+      const corePermissions = ['manage_permissions', 'view_users', 'manage_integrations'];
+      const admins = await users.find(
+        { role_name: 'admin', status: 'active' },
+        { projection: { _id: 1 } },
+      ).toArray();
+      let qualifiedAdminRemains = false;
+      for (const account of admins) {
+        if (String(account._id) === String(targetId)) continue;
+        const effective = await rolePermissions.findEffectivePermissions(String(account._id), 'admin');
+        if (corePermissions.every((permission) => effective.includes(permission))) {
+          qualifiedAdminRemains = true;
+          break;
+        }
+      }
+      if (!qualifiedAdminRemains) {
+        safeError('This change would leave no active admin with the core permissions.', 403);
+      }
+    }
     return { target, normalized };
+  }
+
+  async function validateRoleChange(actorId, targetId, newRole, permissions) {
+    return validateTarget(actorId, targetId, newRole, permissions);
   }
 
   async function changeRole({ actorId, targetId, newRole, permissions, auditContext, notifyAssignment = false }) {
@@ -63,7 +83,10 @@ function createRoleChangeService(database, { rolePermissions, notifications, aud
             target_type: 'user',
             target_id: targetId,
             old_value: { role_name: oldRole },
-            new_value: { role_name: newRole },
+            new_value: {
+              role_name: newRole,
+              ...(oldRole === 'admin' || newRole === 'admin' ? { privilege_change: true } : {}),
+            },
           },
           {
             ...auditContext,
@@ -128,7 +151,7 @@ function createRoleChangeService(database, { rolePermissions, notifications, aud
     });
   }
 
-  return { changeRole };
+  return { changeRole, validateRoleChange };
 }
 
 module.exports = { createRoleChangeService };

@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const path = require('node:path');
 const { test } = require('node:test');
+const vm = require('node:vm');
 const {
   PERMISSIONS_BY_ROLE,
   ROLE_PERMISSION_ROUTE_MAP,
@@ -7,6 +10,7 @@ const {
   resolvePermissionKeys,
 } = require('../config/role-permissions');
 const { createRolePermissionService } = require('../../src/services/role-permissions');
+const { createRoleChangeService } = require('../../src/services/role-change');
 const { createNotificationService } = require('../../src/services/notifications');
 
 function createMemoryCollection(initial = []) {
@@ -63,6 +67,12 @@ test('role permission dependencies expand parents and reject unknown keys for a 
   assert.deepEqual(normalizeRolePermissions('admin', ['view_users', 'edit_user', 'manage_permissions', 'manage_integrations']), [
     'view_users', 'edit_user', 'manage_permissions', 'manage_integrations',
   ]);
+  assert.ok(PERMISSIONS_BY_ROLE.admin.some(({ key, label, requires }) => (
+    key === 'assign_admin_role' && label === 'Assign admin role' && requires.includes('manage_permissions')
+  )));
+  assert.ok(normalizeRolePermissions('admin', [
+    'manage_permissions', 'view_users', 'manage_integrations', 'assign_admin_role',
+  ]).includes('assign_admin_role'));
 });
 
 test('role permissions update globally and are checked from current storage on every request', async () => {
@@ -160,6 +170,159 @@ test('admin account status actions require disable_user while edits require edit
   assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'disable' } }), 'disable_user');
   assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'enable' } }), 'disable_user');
   assert.equal(resolvePermissionKeys(mapping.permission, { body: { action: 'edit' } }), 'edit_user');
+  assert.deepEqual(resolvePermissionKeys(mapping.permission, {
+    body: { action: 'edit', role_change: true, admin_role_change: true },
+  }), ['edit_user', 'manage_permissions', 'assign_admin_role']);
+  assert.deepEqual(resolvePermissionKeys(mapping.permission, {
+    body: { action: 'edit', role_change: true, role_name: 'admin' },
+  }), ['edit_user', 'manage_permissions', 'assign_admin_role']);
+  assert.deepEqual(resolvePermissionKeys(mapping.permission, {
+    body: { action: 'edit', role_change: true },
+  }), ['edit_user', 'manage_permissions']);
+});
+
+test('shared role changes validate active targets and new-role permissions and preserve an active capable Admin', async () => {
+  const users = createMemoryCollection([
+    { _id: 'admin-1', role_name: 'admin', status: 'active' },
+    { _id: 'admin-2', role_name: 'admin', status: 'active' },
+    { _id: 'user-1', role_name: 'user', status: 'active' },
+    { _id: 'disabled-user', role_name: 'user', status: 'disabled' },
+  ]);
+  const accountPermissions = createMemoryCollection([
+    { user_id: 'user-1', permission_key: 'view_profile', enabled: false },
+  ]);
+  const enabledByRole = new Map(Object.entries(PERMISSIONS_BY_ROLE)
+    .map(([role, definitions]) => [role, definitions.map(({ key }) => key)]));
+  const rolePermissions = {
+    async findRolePermissions(role) { return [...(enabledByRole.get(role) || [])]; },
+    async findEffectivePermissions(_userId, role) { return this.findRolePermissions(role); },
+  };
+  const audited = [];
+  const audit = {
+    async runAction(events, action) {
+      const result = await action();
+      audited.push(...events);
+      return result;
+    },
+  };
+  const service = createRoleChangeService(memoryDatabase({
+    users,
+    account_permissions: accountPermissions,
+  }), {
+    rolePermissions,
+    notifications: { async create() {} },
+    audit,
+  });
+  const adminPermissions = PERMISSIONS_BY_ROLE.admin.map(({ key }) => key);
+
+  await assert.rejects(service.validateRoleChange('admin-1', 'disabled-user', 'admin', adminPermissions), { status: 404 });
+  enabledByRole.set('admin', enabledByRole.get('admin').filter((key) => key !== 'view_all_claims'));
+  await assert.rejects(service.validateRoleChange('admin-1', 'user-1', 'admin', adminPermissions), { status: 403 });
+  enabledByRole.set('admin', PERMISSIONS_BY_ROLE.admin.map(({ key }) => key));
+
+  const promoted = await service.changeRole({
+    actorId: 'admin-1',
+    targetId: 'user-1',
+    newRole: 'admin',
+    permissions: adminPermissions,
+    auditContext: {},
+  });
+  assert.equal(promoted.role_name, 'admin');
+  assert.deepEqual(accountPermissions.rows.filter(({ user_id }) => user_id === 'user-1'), []);
+  assert.equal(audited.at(-2).action, 'account.role_change');
+  assert.equal(audited.at(-2).new_value.privilege_change, true);
+
+  const demoted = await service.changeRole({
+    actorId: 'admin-1',
+    targetId: 'admin-2',
+    newRole: 'user',
+    permissions: PERMISSIONS_BY_ROLE.user.map(({ key }) => key),
+    auditContext: {},
+  });
+  assert.equal(demoted.role_name, 'user');
+
+  const onlyAdminUsers = createMemoryCollection([
+    { _id: 'sole-admin', role_name: 'admin', status: 'active' },
+  ]);
+  const soleAdminService = createRoleChangeService(memoryDatabase({
+    users: onlyAdminUsers,
+    account_permissions: createMemoryCollection(),
+  }), {
+    rolePermissions,
+    notifications: { async create() {} },
+    audit,
+  });
+  await assert.rejects(
+    soleAdminService.validateRoleChange('manager', 'sole-admin', 'user', PERMISSIONS_BY_ROLE.user.map(({ key }) => key)),
+    { status: 403 },
+  );
+});
+
+test('Edit user renders all role choices and an Admin checklist using role defaults', async () => {
+  const account = {
+    id: 'target-user',
+    full_name: 'Target User',
+    email: 'target@example.test',
+    role_name: 'user',
+    status: 'active',
+  };
+  const roles = ['user', 'staff', 'admin'].map((role) => ({
+    role,
+    permissions: PERMISSIONS_BY_ROLE[role].map((permission) => ({ ...permission, enabled: true })),
+  }));
+  const shared = {
+    API: '',
+    sessionInfo: {
+      user: { id: 'editor' },
+      rolePermissions: ['edit_user', 'manage_permissions'],
+    },
+    h: (value) => String(value ?? ''),
+    date: () => '',
+    param: () => '',
+    link: () => '',
+    buttonLink: () => '',
+    badge: () => '',
+    itemStatusLabel: () => '',
+    itemTypeLabel: () => '',
+    field: () => '<input>',
+    selectField: () => '<select>',
+    optionsFrom: () => [],
+    request: async (route) => {
+      if (route === '/admin/users') return { users: [account] };
+      if (route.endsWith('/permissions')) {
+        return {
+          role: 'user',
+          permissions: PERMISSIONS_BY_ROLE.user.map((permission) => ({
+            ...permission,
+            enabled: true,
+            role_enabled: true,
+          })),
+        };
+      }
+      if (route === '/admin/role-permissions') return { roles };
+      throw new Error(`Unexpected request: ${route}`);
+    },
+    icon: () => '',
+    pageHeader: (title) => `<header>${title}</header>`,
+    table: () => '',
+    formAction: () => '',
+    hasPermission: () => true,
+  };
+  const file = path.join(__dirname, '../../frontend/public/js/pages/admin.js');
+  const source = readFileSync(file, 'utf8')
+    .replace("import * as shared from '../shared.js';", 'const shared = globalThis.__shared;')
+    .replace(/export \{[^}]+\};\s*$/, '');
+  const context = vm.createContext({ __shared: shared });
+  vm.runInContext(source, context);
+  const html = await context.adminEditUser(account.id);
+
+  for (const role of ['user', 'staff', 'admin']) {
+    assert.match(html, new RegExp(`<option value="${role}"`));
+    assert.match(html, new RegExp(`data-role-panel="${role}"`));
+    assert.match(html, new RegExp(`${role[0].toUpperCase()}${role.slice(1)} permissions`));
+  }
+  assert.match(html, /value="assign_admin_role"/);
+  assert.match(html, /Assign admin role/);
 });
 
 test('notifications are suppressed for roles without receive_notifications', async () => {

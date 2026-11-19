@@ -11,6 +11,12 @@ async function currentUser(req) {
     await destroySession(req);
     return null;
   }
+  if (req.session.user.role_name && req.session.user.role_name !== user.role_name) {
+    await destroySession(req);
+    const error = new Error('Your access changed. Please sign in again.');
+    error.status = 401;
+    throw error;
+  }
   req.session.user = user;
   return user;
 }

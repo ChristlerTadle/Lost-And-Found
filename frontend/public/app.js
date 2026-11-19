@@ -5,10 +5,17 @@ import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItem
 import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
-const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, setSessionInfo } = shared;
+const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo } = shared;
 let pendingIntegrationCard = null;
 let pendingIntegrationRestore = null;
 let integrationCodeResendTimer;
+let pendingAdminRoleChange = null;
+let roleChangeCodeResendTimer;
+
+document.addEventListener('shared-rate-limit-ended', (event) => {
+  const form = event.detail?.closest?.('form[data-form="integration-settings"]');
+  if (form) updateIntegrationSaveState(form);
+});
 
 async function render() {
   app.innerHTML = '<main class="loading" aria-live="polite">Loading…</main>';
@@ -21,6 +28,7 @@ async function render() {
     app.innerHTML = shell(content, page);
     bindForms();
     await mountRecaptchaWidgets();
+    showPendingFlash();
     const target = param('highlight');
     if (target) {
       const element = document.getElementById(target);
@@ -44,8 +52,13 @@ async function render() {
     }
   } catch (error) {
     const page = param('page') || 'home';
-    app.innerHTML = shell(`<main class="container">${alert(error.message, true)}<a class="button button-primary" href="/">Reload</a></main>`, page);
+    app.innerHTML = shell(`<main class="container page-load-error" data-page-error>
+      <h1>Unable to load this page</h1><div data-message-area></div>
+      <button class="button button-primary" type="button" data-action="retry-page-load">Try again</button>
+    </main>`, page);
+    window.scrollTo({ top: 0, behavior: 'auto' });
     bindForms();
+    showFormError(error, { anchor: app.querySelector('[data-page-error]') });
   }
 }
 
@@ -172,6 +185,7 @@ async function renderPage(page) {
 }
 
 function bindForms() {
+  app.querySelector('[data-action="retry-page-load"]')?.addEventListener('click', () => { void render(); });
   app.querySelectorAll('form[data-form]').forEach((form) => form.addEventListener('submit', onFormSubmit));
   app.querySelectorAll('form[data-action]').forEach((form) => form.addEventListener('submit', onActionForm));
   app.querySelectorAll('[data-action="logout"]').forEach((button) => button.addEventListener('click', logout));
@@ -189,6 +203,12 @@ function bindForms() {
   app.querySelectorAll('[data-action="admin-mfa-enrollment-start"]').forEach((button) => button.addEventListener('click', startAdminMfaEnrollment));
   app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
   app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
+  app.querySelector('[data-action="resend-role-change-code"]')?.addEventListener('click', resendAdminRoleChangeCode);
+  app.querySelector('[data-action="close-role-change-code"]')?.addEventListener('click', closeAdminRoleChangeCodeDialog);
+  app.querySelector('[data-role-change-code-dialog]')?.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeAdminRoleChangeCodeDialog();
+  });
   app.querySelectorAll('[data-integration-code-dialog]').forEach((dialog) => {
     dialog.addEventListener('cancel', (event) => {
       event.preventDefault();
@@ -251,6 +271,19 @@ async function onFormSubmit(event) {
       case 'integration-settings': return;
       case 'integration-pin': await unlockIntegrationSettings(form); return;
       case 'integration-code': await verifyIntegrationCode(form); return;
+      case 'admin-role-change-code': {
+        if (!pendingAdminRoleChange?.form?.isConnected) throw new Error('The pending role change is no longer available.');
+        const roleChange = adminEditUserRequest(pendingAdminRoleChange.form);
+        const code = String(values.code || '').trim();
+        await request(`/admin/users/${encodeURIComponent(pendingAdminRoleChange.targetId)}`, jsonPatch({
+          ...roleChange.body,
+          role_change_code: code,
+        }));
+        pendingAdminRoleChange = null;
+        closeAdminRoleChangeCodeDialog();
+        navigate('admin-users');
+        return;
+      }
       case 'admin-mfa-verify': {
         const result = await request('/auth/mfa/verify', jsonPost(values));
         sessionInfo.pendingAdminMfa = false;
@@ -341,10 +374,8 @@ async function onFormSubmit(event) {
         return;
       }
       case 'admin-edit-user': {
-        const formData = new FormData(form);
-        const permissions = formData.getAll('permissions');
-        const role = String(formData.get('role_name') || form.dataset.currentRole);
-        const changedRole = role !== form.dataset.currentRole;
+        const roleChange = adminEditUserRequest(form);
+        const { role, changedRole, adminRoleChange, permissions } = roleChange;
         if (!changedRole && sessionInfo.rolePermissions.includes('manage_permissions')) {
           const currentPanel = form.querySelector(`[data-role-panel="${role}"]`);
           const saved = new Set(JSON.parse(currentPanel?.querySelector('[data-saved-permissions]')?.dataset.savedPermissions || '[]'));
@@ -354,22 +385,40 @@ async function onFormSubmit(event) {
               .find((input) => input.value === permission)
               ?.closest('label')?.querySelector('strong')?.textContent || permission);
             if (!confirm(`Remove ${labels.join(', ')} from ${form.dataset.fullName}?`)) {
-              if (submit) submit.disabled = false;
+              if (submit && !isRateLimited(submit)) submit.disabled = false;
               return;
             }
           }
         }
-        if (changedRole && !confirm(`Change ${form.dataset.fullName} from ${accountRoleName(form.dataset.currentRole)} to ${accountRoleName(role)}? Their individual permission changes for the old role will be reset, and the ${accountRoleName(role)} role's settings apply.`)) {
+        const confirmation = role === 'admin' && form.dataset.currentRole !== 'admin'
+          ? `Make ${form.dataset.fullName} an Admin? Admins can manage users, permissions, items, and system settings. Their individual permission changes for the old role will be reset.`
+          : `Change ${form.dataset.fullName} from ${accountRoleName(form.dataset.currentRole)} to ${accountRoleName(role)}? Their individual permission changes for the old role will be reset, and the ${accountRoleName(role)} role's settings apply.`;
+        if (changedRole && !confirm(confirmation)) {
           if (submit) submit.disabled = false;
           return;
         }
-        const valuesToSave = Object.fromEntries([...formData.entries()].filter(([key]) => key !== 'permissions'));
+        if (pendingAdminRoleChange?.targetId === form.dataset.id && !adminRoleChange) {
+          pendingAdminRoleChange = null;
+          closeAdminRoleChangeCodeDialog();
+        }
+        if (pendingAdminRoleChange?.targetId === form.dataset.id && adminRoleChange) {
+          pendingAdminRoleChange.form = form;
+          if (submit) submit.disabled = false;
+          openAdminRoleChangeCodeDialog();
+          return;
+        }
         if (changedRole || sessionInfo.rolePermissions.includes('edit_user')) {
-          await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, jsonPatch({
-            ...valuesToSave,
-            action: 'edit',
-            ...(sessionInfo.rolePermissions.includes('manage_permissions') ? { permissions } : {}),
-          }));
+          const result = await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, jsonPatch(roleChange.body));
+          if (result.verificationRequired) {
+            pendingAdminRoleChange = {
+              targetId: form.dataset.id,
+              form,
+              resendAt: Date.now() + (Number(result.resendInSeconds) || 60) * 1000,
+            };
+            if (submit) submit.disabled = false;
+            openAdminRoleChangeCodeDialog();
+            return;
+          }
         } else {
           await request(`/admin/users/${encodeURIComponent(form.dataset.id)}/permissions`, {
             method: 'PUT',
@@ -409,16 +458,24 @@ async function onFormSubmit(event) {
     }
     await render();
   } catch (error) {
-    if (form.dataset.form === 'admin-mfa-verify' && error.status === 401) {
+    if (form.dataset.form === 'admin-mfa-verify' && error.status === 401
+      && /this sign-in attempt (?:expired|is no longer valid)/i.test(error.message)) {
       navigate('login');
       return;
     }
-    if (error.status === 429 && error.retryAfter) {
-      const minutes = Math.max(1, Math.ceil(error.retryAfter / 60));
-      showNotice(`Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, true);
-    } else {
-      showNotice(error.message, true);
+    if (form.dataset.form === 'admin-role-change-code') {
+      const errorElement = form.querySelector('[data-role-change-code-error]');
+      if (errorElement) errorElement.textContent = error.message;
+      form.querySelector('[name="code"]').value = '';
+      if (error.message.includes('pending settings changed')) {
+        pendingAdminRoleChange = null;
+        closeAdminRoleChangeCodeDialog();
+        showNotice(error.message, true);
+      }
+      if (submit && !isRateLimited(submit)) submit.disabled = false;
+      return;
     }
+    showNotice(error.message, true);
     if (sessionInfo.recaptcha?.active && ['login', 'register'].includes(form.dataset.form)) {
       const widget = form.querySelector('.g-recaptcha');
       if (widget) {
@@ -426,7 +483,7 @@ async function onFormSubmit(event) {
         delete widget.dataset.responseToken;
       }
     }
-    if (submit) submit.disabled = false;
+    if (submit && !isRateLimited(submit)) submit.disabled = false;
   }
 }
 
@@ -527,6 +584,76 @@ async function onActionForm(event) {
 function jsonPost(body) { return { method: 'POST', body: JSON.stringify(body) }; }
 function jsonPatch(body) { return { method: 'PATCH', body: JSON.stringify(body) }; }
 function navigate(page) { location.href = `/?page=${encodeURIComponent(page)}`; }
+
+function adminEditUserRequest(form) {
+  const formData = new FormData(form);
+  const permissions = formData.getAll('permissions');
+  const role = String(formData.get('role_name') || form.dataset.currentRole);
+  const changedRole = role !== form.dataset.currentRole;
+  const adminRoleChange = changedRole
+    && (role === 'admin' || form.dataset.currentRole === 'admin');
+  const values = Object.fromEntries([...formData.entries()].filter(([key]) => key !== 'permissions'));
+  const body = {
+    ...values,
+    action: 'edit',
+    role_change: changedRole,
+    admin_role_change: adminRoleChange,
+  };
+  if (changedRole || sessionInfo.rolePermissions.includes('manage_permissions')) body.permissions = permissions;
+  return { body, permissions, role, changedRole, adminRoleChange };
+}
+
+function openAdminRoleChangeCodeDialog() {
+  const dialog = app.querySelector('[data-role-change-code-dialog]');
+  if (!dialog) return;
+  const codeForm = dialog.querySelector('form');
+  codeForm.reset();
+  codeForm.querySelector('[data-role-change-code-error]').textContent = '';
+  if (!dialog.open) dialog.showModal();
+  startAdminRoleChangeCodeResendTimer();
+  codeForm.querySelector('[name="code"]').focus();
+}
+
+function closeAdminRoleChangeCodeDialog() {
+  clearInterval(roleChangeCodeResendTimer);
+  app.querySelector('[data-role-change-code-dialog]')?.close();
+}
+
+function startAdminRoleChangeCodeResendTimer() {
+  const button = app.querySelector('[data-action="resend-role-change-code"]');
+  if (!button || !pendingAdminRoleChange) return;
+  clearInterval(roleChangeCodeResendTimer);
+  const update = () => {
+    const remaining = Math.max(0, Math.ceil((pendingAdminRoleChange.resendAt - Date.now()) / 1000));
+    button.disabled = remaining > 0;
+    button.textContent = remaining ? `Resend (${remaining}s)` : 'Resend';
+    if (!remaining) clearInterval(roleChangeCodeResendTimer);
+  };
+  update();
+  roleChangeCodeResendTimer = setInterval(update, 1000);
+}
+
+async function resendAdminRoleChangeCode(event) {
+  const button = event.currentTarget;
+  const pending = pendingAdminRoleChange;
+  if (!pending?.form?.isConnected) return;
+  button.disabled = true;
+  try {
+    const roleChange = adminEditUserRequest(pending.form);
+    const result = await request(`/admin/users/${encodeURIComponent(pending.targetId)}`, jsonPatch({
+      ...roleChange.body,
+      role_change_resend: true,
+    }));
+    pending.resendAt = Date.now() + (Number(result.resendInSeconds) || 60) * 1000;
+    startAdminRoleChangeCodeResendTimer();
+    showNotice('A new verification code was sent to SU_EMAIL.');
+  } catch (error) {
+    if (!isRateLimited(button)) button.disabled = false;
+    const errorElement = app.querySelector('[data-role-change-code-error]');
+    if (errorElement) errorElement.textContent = error.message;
+  }
+}
+
 async function logout() {
   try { await request('/auth/logout', { method: 'POST' }); }
   catch (error) { showNotice(error.message, true); return; }
@@ -669,9 +796,8 @@ async function unlockIntegrationSettings(form) {
   } catch (requestError) {
     error.textContent = requestError.message;
     pin.value = '';
-    pin.focus();
   } finally {
-    submit.disabled = false;
+    if (!isRateLimited(submit)) submit.disabled = false;
   }
 }
 
@@ -705,19 +831,7 @@ function closeIntegrationCodeDialog() {
 
 function showIntegrationRateLimit(error, button) {
   if (error.status !== 429) return false;
-  const retryAfter = Math.max(1, error.retryAfter || 60);
-  const retryAt = Date.now() + retryAfter * 1000;
-  button.dataset.rateLimitUntil = String(retryAt);
-  button.disabled = true;
-  const minutes = Math.max(1, Math.ceil(retryAfter / 60));
-  showNotice(`Too many attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, true);
-  setTimeout(() => {
-    if (Number(button.dataset.rateLimitUntil) !== retryAt) return;
-    delete button.dataset.rateLimitUntil;
-    button.disabled = false;
-    const form = button.closest('form[data-form="integration-settings"]');
-    if (form) updateIntegrationSaveState(form);
-  }, retryAfter * 1000);
+  if (!isRateLimited(button)) showFormError(error, { anchor: button });
   return true;
 }
 
@@ -777,7 +891,7 @@ async function verifyIntegrationCode(form) {
       closeIntegrationCodeDialog();
     }
   } finally {
-    submit.disabled = false;
+    if (!isRateLimited(submit)) submit.disabled = false;
   }
 }
 
@@ -807,7 +921,7 @@ async function resendIntegrationCode(event) {
     showNotice('A new verification code was sent.');
   } catch (error) {
     showNotice(error.message, true);
-    button.disabled = false;
+    if (!isRateLimited(button)) button.disabled = false;
   }
 }
 
@@ -1174,7 +1288,7 @@ async function startAdminMfaEnrollment(event) {
   } catch (error) {
     showNotice(error.message, true);
   } finally {
-    button.disabled = false;
+    if (!isRateLimited(button)) button.disabled = false;
   }
 }
 
@@ -1194,16 +1308,8 @@ function showAdminMfaRecoveryCodes(codes) {
 }
 
 function showNotice(message, isError = false) {
-  const previous = app.querySelector('.alert');
-  if (previous) previous.remove();
-  const notice = document.createElement('div');
-  notice.className = `alert ${isError ? 'alert-error' : 'alert-success'}`;
-  notice.setAttribute('role', 'status');
-  notice.textContent = message;
-  const authBox = app.querySelector('.auth-box');
-  const subtitle = authBox?.querySelector('.sub');
-  if (subtitle) subtitle.insertAdjacentElement('afterend', notice);
-  else app.querySelector('main')?.prepend(notice);
+  if (isError) return showFormError(message);
+  return showFormSuccess(message);
 }
 
 function staffHomePage() {

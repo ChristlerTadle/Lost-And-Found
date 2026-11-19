@@ -2,3 +2,57 @@
 .front-action-form button { font: inherit; }
 .notification.unread { background: #f8fcf8; }
 .notification .front-action-form { align-self: flex-start; }
+
+.shared-message-area { display: block; margin: 0.75rem 0; }
+.shared-message-area.alert-error { color: #8d1b1b; }
+.shared-message-area.alert-success { color: #176b36; }
+.report > .shared-message-area,
+.notification > .shared-message-area,
+.staff-claim-row > .shared-message-area { flex-basis: 100%; }
+.admin-item-row > .shared-message-area,
+.admin-claim-record > .shared-message-area { grid-column: 1 / -1; }
+.field-invalid .input,
+.field-invalid .select,
+.field-invalid .textarea,
+.input.input-invalid { border-color: #b42318; }
+.shared-field-error { display: block; margin-top: 0.25rem; color: #b42318; }
+.shared-error-banner {
+  position: fixed;
+  z-index: 2147483647;
+  top: max(1rem, env(safe-area-inset-top));
+  left: 50%;
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  width: min(42rem, calc(100vw - 2rem));
+  padding: 1rem 1.25rem;
+  transform: translateX(-50%);
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  background: #fff;
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 20%);
+}
+.shared-error-banner.alert-error { color: #8d1b1b; }
+.shared-error-banner.alert-success { color: #176b36; }
+.shared-message-dismiss {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.sticky-action-bar {
+  position: sticky;
+  z-index: 10;
+  bottom: 0;
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 0;
+  background: #fff;
+  border-top: 1px solid #d8e2da;
+}
+.sticky-action-bar-buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; }
