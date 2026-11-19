@@ -465,6 +465,74 @@ test('disabled SMTP is skipped and Test Connection verifies without sending mail
   assert.equal(sent, false);
 });
 
+test('SMTP candidate verification authenticates and sends an accepted test email through candidate settings', async () => {
+  const calls = [];
+  let transportOptions;
+  const email = createEmailService(async () => assert.fail('Candidate verification must not load active settings.'), {
+    createTransport(options) {
+      transportOptions = options;
+      return {
+        async verify() { calls.push('verify'); },
+        async sendMail(message) {
+          calls.push('send');
+          assert.equal(message.from, '"Test Sender" <candidate@example.test>');
+          assert.equal(message.to, 'admin@example.test');
+          assert.doesNotMatch(message.text, /candidate-password|candidate-user/);
+          return { accepted: ['admin@example.test'] };
+        },
+      };
+    },
+  }, async (integrationId, operation, _auditContext, options) => {
+    assert.equal(integrationId, 'smtp');
+    assert.deepEqual(options, { candidateValidation: true });
+    return operation({ signal: new AbortController().signal });
+  }, { verificationEmail: 'admin@example.test' });
+
+  const result = await email.verifyCandidate({
+    host: 'smtp.example.test',
+    port: '587',
+    secure: false,
+    user: 'candidate-user',
+    password: 'candidate-password',
+    sender_name: 'Test Sender',
+    sender_email: 'candidate@example.test',
+  });
+  assert.deepEqual(result, { verified: true, proofType: 'test_email_sent' });
+  assert.deepEqual(calls, ['verify', 'send']);
+  assert.deepEqual(transportOptions.auth, {
+    user: 'candidate-user',
+    pass: 'candidate-password',
+  });
+});
+
+test('SMTP candidate verification rejects an unaccepted recipient without exposing provider details', async () => {
+  const email = createEmailService(async () => assert.fail('Candidate verification must not load active settings.'), {
+    createTransport() {
+      return {
+        async verify() {},
+        async sendMail() {
+          const error = new Error('Rejected candidate-password');
+          error.code = 'EENVELOPE';
+          throw error;
+        },
+      };
+    },
+  }, async (_integrationId, operation) => operation({ signal: new AbortController().signal }), {
+    verificationEmail: 'admin@example.test',
+  });
+
+  await assert.rejects(
+    email.verifyCandidate({
+      host: 'smtp.example.test',
+      port: '587',
+      secure: false,
+      sender_email: 'candidate@example.test',
+    }),
+    (error) => error.integrationFailureCode === 'provider_error'
+      && !error.message.includes('candidate-password'),
+  );
+});
+
 test('SMTP provider failures are sanitized, health and audit are recorded once, and a passing test clears health', async () => {
   const state = createDatabase([
     { _id: 'smtp', enabled: true },

@@ -946,6 +946,7 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
     safeError.status = error?.status === 429 ? 429
       : error?.status === 400 ? 400 : 503;
     safeError.code = error?.code;
+    safeError.eventId = error?.eventId;
     throw safeError;
   }
 
@@ -978,6 +979,17 @@ function safeValidationReason(error) {
   if (error?.code === 'network') return 'Could not verify, try again';
   if (error?.code === 'provider_error') return 'Could not verify, try again';
   if (error?.code === 'verification_unavailable') return 'Verification is not available yet.';
+  if (error?.code === 'verification_configuration') return 'SMTP verification recipient is not configured.';
+  if (error?.code === 'calendar_no_event_permission') return 'No permission to edit events on this calendar';
+  if (error?.code === 'calendar_cleanup_failed') {
+    const eventId = /^[a-f0-9]{32}$/i.test(error.eventId || '') ? error.eventId : '';
+    return eventId
+      ? `Test event deletion failed. Event ID for manual cleanup: ${eventId}`
+      : 'Test event deletion failed. Remove the test event manually.';
+  }
+  if (error?.code === 'calendar_invalid_time_zone') {
+    return 'Enter a valid IANA time zone, such as Asia/Manila.';
+  }
   if (error?.status === 429) return 'Please try again shortly';
   if (error?.status === 503) return 'Could not verify, try again';
   return 'Could not verify, try again';

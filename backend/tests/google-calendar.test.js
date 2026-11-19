@@ -35,8 +35,16 @@ function settings(active = true) {
   };
 }
 
-function createHarness({ active = true, calendarFailure = null } = {}) {
+function createHarness({
+  active = true,
+  calendarFailure = null,
+  eventInsertFailure = null,
+  eventDeleteFailure = null,
+  eventResponseMismatch = false,
+  retainEventAfterDelete = false,
+} = {}) {
   const events = new Map();
+  const insertedEvents = [];
   const operations = [];
   const statuses = [];
   const auditEvents = [];
@@ -73,9 +81,11 @@ function createHarness({ active = true, calendarFailure = null } = {}) {
           },
           async insert({ requestBody }) {
             operations.push('event.insert');
+            if (eventInsertFailure) throw { response: { status: eventInsertFailure } };
             if (events.has(requestBody.id)) throw { response: { status: 409 } };
             events.set(requestBody.id, structuredClone(requestBody));
-            return { data: requestBody };
+            insertedEvents.push(structuredClone(requestBody));
+            return { data: eventResponseMismatch ? { id: 'unexpected-event-id' } : requestBody };
           },
           async update({ eventId, requestBody }) {
             operations.push('event.update');
@@ -84,6 +94,8 @@ function createHarness({ active = true, calendarFailure = null } = {}) {
           },
           async delete({ eventId }) {
             operations.push('event.delete');
+            if (eventDeleteFailure) throw { response: { status: eventDeleteFailure } };
+            if (retainEventAfterDelete) return;
             if (!events.delete(eventId)) throw { response: { status: 404 } };
           },
         },
@@ -123,7 +135,7 @@ function createHarness({ active = true, calendarFailure = null } = {}) {
     callIntegration,
     client: googleClient,
   });
-  return { calendar, claim, events, operations, statuses, auditEvents };
+  return { calendar, claim, events, insertedEvents, operations, statuses, auditEvents };
 }
 
 test('calendar sync creates one private-data-free event and retry/reschedule updates it', async () => {
@@ -181,6 +193,98 @@ test('calendar test connection performs only a read and reports a safe sharing h
 
   const failed = createHarness({ calendarFailure: 404 });
   await assert.rejects(failed.calendar.testConnection(), /Calendar not shared with the service account/);
+});
+
+test('calendar candidate verification creates a private short event and confirms deletion', async () => {
+  const harness = createHarness();
+  const candidate = (await settings().getIntegration()).settings;
+  const result = await harness.calendar.verifyCandidate({}, candidate);
+  assert.deepEqual(result, { verified: true, proofType: 'test_event_created_and_removed' });
+  assert.deepEqual(harness.operations, [
+    'calendar.get',
+    'event.insert',
+    'event.delete',
+    'event.get',
+  ]);
+  assert.equal(harness.events.size, 0);
+  const event = harness.insertedEvents[0];
+  assert.equal(event.summary, 'Integration check');
+  assert.equal(event.visibility, 'private');
+  assert.deepEqual(event.attendees, []);
+  assert.deepEqual(event.reminders, { useDefault: false, overrides: [] });
+  assert.equal(event.start.timeZone, 'Asia/Manila');
+  assert.equal(new Date(event.end.dateTime) - new Date(event.start.dateTime), 5 * 60_000);
+  assert.equal(harness.claim.calendar_sync_status, 'pending');
+});
+
+test('calendar candidate verification fails safely when event creation is denied', async () => {
+  const harness = createHarness({ eventInsertFailure: 403 });
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, candidate),
+    (error) => error.code === 'calendar_no_event_permission'
+      && error.message === 'Calendar candidate verification failed.',
+  );
+  assert.deepEqual(harness.operations, ['calendar.get', 'event.insert']);
+});
+
+test('calendar candidate verification reports the event id when cleanup fails', async () => {
+  const harness = createHarness({ eventDeleteFailure: 403 });
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, candidate),
+    (error) => error.code === 'calendar_cleanup_failed'
+      && /^[a-f0-9]{32}$/i.test(error.eventId),
+  );
+  assert.deepEqual(harness.operations, [
+    'calendar.get',
+    'event.insert',
+    'event.delete',
+  ]);
+  assert.equal(harness.events.size, 1);
+});
+
+test('calendar candidate verification fails when deletion cannot be confirmed', async () => {
+  const harness = createHarness({ retainEventAfterDelete: true });
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, candidate),
+    (error) => error.code === 'calendar_cleanup_failed'
+      && /^[a-f0-9]{32}$/i.test(error.eventId),
+  );
+  assert.deepEqual(harness.operations, [
+    'calendar.get',
+    'event.insert',
+    'event.delete',
+    'event.get',
+  ]);
+  assert.equal(harness.events.size, 1);
+});
+
+test('calendar candidate verification cleans up after an unexpected create response', async () => {
+  const harness = createHarness({ eventResponseMismatch: true });
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, candidate),
+    (error) => error.code === 'calendar_event_response_invalid',
+  );
+  assert.deepEqual(harness.operations, [
+    'calendar.get',
+    'event.insert',
+    'event.delete',
+    'event.get',
+  ]);
+  assert.equal(harness.events.size, 0);
+});
+
+test('calendar candidate verification rejects invalid time zones before provider calls', async () => {
+  const harness = createHarness();
+  const candidate = (await settings().getIntegration()).settings;
+  await assert.rejects(
+    harness.calendar.verifyCandidate({}, { ...candidate, time_zone: 'Not/A_Time_Zone' }),
+    (error) => error.code === 'calendar_invalid_time_zone',
+  );
+  assert.deepEqual(harness.operations, []);
 });
 
 test('pickup validation enforces future dates, local hours, and configured weekdays', async () => {

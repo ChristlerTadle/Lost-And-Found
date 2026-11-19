@@ -1,4 +1,4 @@
-const { createPrivateKey } = require('node:crypto');
+const { createPrivateKey, randomBytes } = require('node:crypto');
 const googleClient = require('@googleapis/calendar');
 const {
   IntegrationError,
@@ -45,6 +45,86 @@ function createGoogleCalendar({
       }
       return true;
     }, auditContext, options);
+  }
+
+  async function verifyCandidate(auditContext, settings) {
+    if (!isIanaTimeZone(settings?.time_zone)) {
+      const error = new UserProviderError('Enter a valid IANA time zone, such as Asia/Manila.', 400);
+      error.code = 'calendar_invalid_time_zone';
+      throw error;
+    }
+    return callIntegration('google_calendar', async ({ signal }) => {
+      const calendar = createCalendarClient(settings, client);
+      try {
+        const response = await calendar.calendars.get(
+          { calendarId: settings.calendar_id },
+          { signal },
+        );
+        if (response?.data?.id !== settings.calendar_id) {
+          throw calendarVerificationError('calendar_response_invalid');
+        }
+      } catch (error) {
+        if (error?.code === 'calendar_response_invalid') throw error;
+        throw providerError(error);
+      }
+
+      const eventId = randomBytes(16).toString('hex');
+      const start = new Date(Date.now() + 5 * 60_000);
+      const end = new Date(start.getTime() + 5 * 60_000);
+      const requestBody = {
+        id: eventId,
+        summary: 'Integration check',
+        visibility: 'private',
+        attendees: [],
+        reminders: { useDefault: false, overrides: [] },
+        start: { dateTime: start.toISOString(), timeZone: settings.time_zone },
+        end: { dateTime: end.toISOString(), timeZone: settings.time_zone },
+      };
+      let created = false;
+      let deleted = false;
+      let cleanupAttempted = false;
+      let createAttempted = false;
+      try {
+        let response;
+        createAttempted = true;
+        try {
+          response = await calendar.events.insert({
+            calendarId: settings.calendar_id,
+            requestBody,
+          }, { signal });
+        } catch (error) {
+          const status = Number(error?.response?.status || error?.status);
+          if (status >= 400 && status < 500) createAttempted = false;
+          if (status === 403) {
+            throw calendarVerificationError('calendar_no_event_permission');
+          }
+          throw providerError(error);
+        }
+        created = true;
+        if (response?.data?.id !== eventId) {
+          throw calendarVerificationError('calendar_event_response_invalid', eventId);
+        }
+        cleanupAttempted = true;
+        deleted = await deleteAndConfirm(calendar, settings.calendar_id, eventId, signal);
+        if (!deleted) throw calendarVerificationError('calendar_cleanup_failed', eventId);
+        return { verified: true, proofType: 'test_event_created_and_removed' };
+      } catch (error) {
+        if ((created || createAttempted) && !cleanupAttempted
+          && error?.code !== 'calendar_no_event_permission') {
+          cleanupAttempted = true;
+          deleted = await deleteAndConfirm(
+            calendar,
+            settings.calendar_id,
+            eventId,
+            signal?.aborted ? undefined : signal,
+          );
+          if (!deleted) {
+            throw calendarVerificationError('calendar_cleanup_failed', eventId);
+          }
+        }
+        throw error;
+      }
+    }, auditContext, { candidateValidation: true });
   }
 
   async function syncApprovedClaim(claim, auditContext = {}) {
@@ -262,6 +342,7 @@ function createGoogleCalendar({
 
   return {
     testConnection,
+    verifyCandidate,
     syncApprovedClaim,
     cleanupClaim,
     cleanupForItem,
@@ -297,6 +378,38 @@ function createGoogleCalendar({
     findUserCalendarClaim: (userId, claimId) => items.findCalendarClaimForUser(userId, claimId),
     createIcs: createIcs,
   };
+}
+
+async function deleteAndConfirm(calendar, calendarId, eventId, signal) {
+  try {
+    await calendar.events.delete({ calendarId, eventId }, { signal });
+  } catch (error) {
+    if (!isMissingEvent(error)) return false;
+    return true;
+  }
+  try {
+    const result = await calendar.events.get({ calendarId, eventId }, { signal });
+    return result?.data?.status === 'cancelled';
+  } catch (error) {
+    return isMissingEvent(error);
+  }
+}
+
+function calendarVerificationError(code, eventId = null) {
+  const error = new UserProviderError('Calendar candidate verification failed.', 503);
+  error.code = code;
+  if (eventId) error.eventId = eventId;
+  return error;
+}
+
+function isIanaTimeZone(value) {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function createCalendarClient(settings, googleClient) {

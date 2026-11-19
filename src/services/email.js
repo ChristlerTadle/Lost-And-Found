@@ -1,7 +1,14 @@
 const nodemailer = require('nodemailer');
+const config = require('../config');
+const { providerFailure } = require('./integration-calls');
 const SMTP_TIMEOUT_MS = 10_000;
 
-function createEmailService(getIntegration, mailer = nodemailer, callIntegration = runDirectly) {
+function createEmailService(
+  getIntegration,
+  mailer = nodemailer,
+  callIntegration = runDirectly,
+  { verificationEmail = config.integrationSettingsEmail } = {},
+) {
   async function getTransport(override) {
     const integration = override ? null : await getIntegration('smtp');
     if (!override && !integration.active) return null;
@@ -82,6 +89,33 @@ function createEmailService(getIntegration, mailer = nodemailer, callIntegration
         return true;
       }, auditContext, options);
     },
+
+    async verifyCandidate(settings, auditContext = {}) {
+      if (!verificationEmail) {
+        const error = new Error('SMTP verification recipient is not configured.');
+        error.status = 503;
+        error.code = 'verification_configuration';
+        throw error;
+      }
+      return callIntegration('smtp', async () => {
+        const { transporter, config: candidate } = await getTransport(settings);
+        await transporter.verify();
+        let result;
+        try {
+          result = await transporter.sendMail({
+            from: formatSender(candidate.sender_name, candidate.sender_email),
+            to: verificationEmail,
+            subject: 'SMTP integration verification',
+            text: 'This is a test email confirming the SMTP integration can send mail.',
+          });
+        } catch (error) {
+          if (error?.code === 'EENVELOPE') throw providerFailure('provider_error');
+          throw error;
+        }
+        if (!wasAccepted(result, verificationEmail)) throw providerFailure('provider_error');
+        return { verified: true, proofType: 'test_email_sent' };
+      }, auditContext, { candidateValidation: true });
+    },
   };
 }
 
@@ -102,6 +136,14 @@ function escapeHtml(value) {
     '"': '&quot;',
     "'": '&#39;',
   })[character]);
+}
+
+function wasAccepted(result, recipient) {
+  const expected = String(recipient).trim().toLowerCase();
+  return Array.isArray(result?.accepted) && result.accepted.some((entry) => {
+    const address = typeof entry === 'string' ? entry : entry?.address;
+    return typeof address === 'string' && address.trim().toLowerCase() === expected;
+  });
 }
 
 module.exports = { createEmailService };
