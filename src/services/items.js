@@ -724,7 +724,7 @@ function createItemService(database, notificationService) {
       return claim;
     },
 
-    async updateClaimCalendarStatus(claimId, status, eventId) {
+    async updateClaimCalendarStatus(claimId, status, eventId, reason = null) {
       if (!['synced', 'pending', 'failed', 'skipped'].includes(status)) {
         throw new Error('Choose a valid calendar sync status.');
       }
@@ -735,6 +735,11 @@ function createItemService(database, notificationService) {
         },
       };
       if (eventId) update.$set.calendar_event_id = eventId;
+      if (status === 'failed' && reason === 'rate limited') {
+        update.$set.calendar_sync_reason = reason;
+      } else {
+        update.$unset = { calendar_sync_reason: '' };
+      }
       const result = await claims.updateOne({ _id: String(claimId) }, update);
       if (!result.matchedCount) throw new Error('Claim was not found while updating Calendar sync status.');
     },
@@ -786,7 +791,9 @@ function createItemService(database, notificationService) {
           pickup_time_zone: pickup.pickup_time_zone,
           calendar_sync_status: 'pending',
           updated_at: new Date().toISOString(),
-        } },
+        },
+        $unset: { calendar_sync_reason: '' },
+      },
       );
       if (!result.matchedCount) throw new Error('The claim changed before its pickup could be updated.');
       return this.findCalendarClaim(claimId);

@@ -19,7 +19,7 @@ function createAuthController({
   callIntegration,
 }) {
   const startGoogleAuth = async (req, res) => {
-    await verifyRecaptcha(req, recaptcha, integrationSettings);
+    if (!await verifyRecaptcha(req, res, recaptcha, integrationSettings)) return;
     const google = await integrationSettings.getIntegration('google_auth');
     if (!google.active) {
       const error = new Error('Google sign-in is not enabled.');
@@ -94,14 +94,14 @@ function createAuthController({
     },
 
     postAuthRegister: async (req, res) => {
-        await verifyRecaptcha(req, recaptcha, integrationSettings);
+        if (!await verifyRecaptcha(req, res, recaptcha, integrationSettings)) return;
         const user = await auth.register(req.body);
       await startSession(req, user);
       return res.status(201).json({ user });
     },
 
     postAuthLogin: async (req, res) => {
-      await verifyRecaptcha(req, recaptcha, integrationSettings);
+      if (!await verifyRecaptcha(req, res, recaptcha, integrationSettings)) return;
       let user;
       try {
         user = await auth.login(req.body.email, req.body.password);
@@ -176,7 +176,11 @@ function createAuthController({
         resetUrl.searchParams.set('token', token);
         return email.sendPasswordReset(emailAddress, resetUrl.toString(), requestAuditContext(req, null));
       }).catch((error) => {
-        if (!(error instanceof IntegrationError)) console.error('Password reset request failed.');
+        console.error(error instanceof IntegrationError
+          ? error.code === 'rate_limited'
+            ? 'Password reset delivery was rate limited.'
+            : 'Password reset delivery failed.'
+          : 'Password reset request failed.');
       });
       return res.json({ message: 'If an active account uses that email, reset instructions have been sent.' });
     },
@@ -281,15 +285,21 @@ function createAuthController({
         if (result.adminMfaSetupRequired) return res.redirect(`${frontendOrigin}/?page=admin-security`);
         return res.redirect(frontendOrigin);
       } catch (error) {
-        await logAuthEvent(audit, requestAuditContext(req, 'auth.login_failed', {
-          actor_id: null,
-          actor_role: null,
-          target_type: error.accountId ? 'user' : null,
-          target_id: error.accountId || null,
-          result: 'failed',
-        }));
-        if (!(error instanceof IntegrationError)) console.error('Google sign-in could not be completed.');
-        return res.redirect(`${frontendOrigin}/?authError=${error instanceof IntegrationError ? 'google-unavailable' : 'google'}`);
+        if (!(error instanceof IntegrationError && error.code === 'rate_limited')) {
+          await logAuthEvent(audit, requestAuditContext(req, 'auth.login_failed', {
+            actor_id: null,
+            actor_role: null,
+            target_type: error.accountId ? 'user' : null,
+            target_id: error.accountId || null,
+            result: 'failed',
+          }));
+        }
+        if (error instanceof IntegrationError) {
+          if (error.code !== 'rate_limited') console.error('Google sign-in could not be completed.');
+          return sendSafeIntegrationError(res, error);
+        }
+        console.error('Google sign-in could not be completed.');
+        return res.redirect(`${frontendOrigin}/?authError=google`);
       }
     },
   };
@@ -336,14 +346,31 @@ async function logSuccessfulLogin(audit, req, user) {
   }));
 }
 
-async function verifyRecaptcha(req, recaptcha, integrationSettings) {
+async function verifyRecaptcha(req, res, recaptcha, integrationSettings) {
   const integration = await integrationSettings.getIntegration('recaptcha');
-  if (!integration.enabled) return;
-  await recaptcha.verifyResponse(
-    req.body?.['g-recaptcha-response'],
-    req.ip,
-    requestAuditContext(req, null),
-  );
+  if (!integration.enabled) return true;
+  try {
+    await recaptcha.verifyResponse(
+      req.body?.['g-recaptcha-response'],
+      req.ip,
+      requestAuditContext(req, null),
+    );
+    return true;
+  } catch (error) {
+    if (!(error instanceof IntegrationError)) throw error;
+    sendSafeIntegrationError(res, error);
+    return false;
+  }
+}
+
+function sendSafeIntegrationError(res, error) {
+  const rateLimited = error.code === 'rate_limited';
+  const retryAfter = Number.isInteger(error.retryAfter) && error.retryAfter > 0
+    ? error.retryAfter : 60;
+  res.set('Retry-After', String(retryAfter));
+  return res.status(rateLimited ? 429 : 503).json({
+    error: 'Please try again shortly',
+  });
 }
 
 async function logAuthEvent(audit, event) {

@@ -200,9 +200,11 @@ function createGoogleCalendar({
       return { status: 'synced', eventId };
     } catch (error) {
       if (error instanceof IntegrationError || error instanceof UserProviderError) {
-        await items.updateClaimCalendarStatus(claim.id, 'failed', eventId);
-        await logSyncFailure(auditContext, claim.id, eventId);
-        return { status: 'failed' };
+        const reason = error instanceof IntegrationError && error.code === 'rate_limited'
+          ? 'rate limited' : null;
+        await items.updateClaimCalendarStatus(claim.id, 'failed', eventId, reason);
+        await logSyncFailure(auditContext, claim.id, eventId, reason);
+        return { status: 'failed', ...(reason ? { reason } : {}) };
       }
       throw error;
     }
@@ -249,10 +251,12 @@ function createGoogleCalendar({
       return { status: 'skipped' };
     } catch (error) {
       if (error instanceof IntegrationError || error instanceof UserProviderError) {
-        await items.updateClaimCalendarStatus(claim.id, 'failed', eventId);
-        await logSyncFailure(auditContext, claim.id, eventId);
+        const reason = error instanceof IntegrationError && error.code === 'rate_limited'
+          ? 'rate limited' : null;
+        await items.updateClaimCalendarStatus(claim.id, 'failed', eventId, reason);
+        await logSyncFailure(auditContext, claim.id, eventId, reason);
         if (notify) await notifyCancellation(claim, auditContext);
-        return { status: 'failed' };
+        return { status: 'failed', ...(reason ? { reason } : {}) };
       }
       throw error;
     }
@@ -325,7 +329,7 @@ function createGoogleCalendar({
     }
   }
 
-  async function logSyncFailure(auditContext, claimId, eventId) {
+  async function logSyncFailure(auditContext, claimId, eventId, reason = null) {
     try {
       if (!await integrationSettings.claimCalendarSyncFailureAudit(
         'google_calendar', new Date(Date.now() - FAILURE_AUDIT_WINDOW_MS),
@@ -335,7 +339,7 @@ function createGoogleCalendar({
         action: 'calendar.sync_failed',
         target_type: 'claim',
         target_id: claimId,
-        new_value: { event_id: eventId },
+        new_value: { event_id: eventId, ...(reason ? { reason } : {}) },
         result: 'failed',
       });
     } catch {

@@ -2,12 +2,13 @@ const assert = require('node:assert/strict');
 const { generateKeyPairSync } = require('node:crypto');
 const { test } = require('node:test');
 const { createGoogleCalendar } = require('../../src/services/google-calendar');
-const { createIntegrationCaller } = require('../../src/services/integration-calls');
+const { createIntegrationCaller, IntegrationError } = require('../../src/services/integration-calls');
+const { createItemService } = require('../../src/services/items');
 
 const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   .export({ format: 'pem', type: 'pkcs8' }).toString();
 
-function settings(active = true) {
+function settings(active = true, rateLimit = 30) {
   return {
     async getIntegration() {
       return {
@@ -29,6 +30,7 @@ function settings(active = true) {
           pickup_friday: true,
           pickup_saturday: true,
           pickup_sunday: false,
+          rate_limit_per_minute: rateLimit,
         },
       };
     },
@@ -42,6 +44,9 @@ function createHarness({
   eventDeleteFailure = null,
   eventResponseMismatch = false,
   retainEventAfterDelete = false,
+  rateLimit = 30,
+  now = Date.now,
+  pickupEmailError = null,
 } = {}) {
   const events = new Map();
   const insertedEvents = [];
@@ -56,6 +61,7 @@ function createHarness({
     pickup_time_zone: 'Asia/Manila',
     calendar_event_id: null,
     calendar_sync_status: 'pending',
+    item_status: 'claimed',
     user_id: 'user-123',
     claimant: { email: 'claimant@example.test' },
     claim_details: 'PRIVATE VERIFICATION DETAILS',
@@ -103,11 +109,12 @@ function createHarness({
     },
   };
   const integrationSettings = {
-    ...settings(active),
-    async updateClaimCalendarStatus(id, status, eventId) {
+    ...settings(active, rateLimit),
+    async updateClaimCalendarStatus(id, status, eventId, reason) {
       assert.equal(id, claim.id);
       claim.calendar_sync_status = status;
       if (eventId) claim.calendar_event_id = eventId;
+      claim.calendar_sync_reason = reason || null;
       statuses.push(status);
     },
     async claimCalendarSyncFailureAudit() { return true; },
@@ -116,8 +123,8 @@ function createHarness({
     async claimIntegrationFailureAudit() { return true; },
   };
   const items = {
-    async updateClaimCalendarStatus(id, status, eventId) {
-      await integrationSettings.updateClaimCalendarStatus(id, status, eventId);
+    async updateClaimCalendarStatus(id, status, eventId, reason) {
+      await integrationSettings.updateClaimCalendarStatus(id, status, eventId, reason);
     },
     async findCalendarClaim(id) { return id === claim.id ? claim : null; },
     async findCalendarClaimByItem() { return claim; },
@@ -125,18 +132,86 @@ function createHarness({
   const audit = {
     async logAction(event) { auditEvents.push(event); },
   };
-  const callIntegration = createIntegrationCaller({ integrationSettings, audit, timeoutMs: 200 });
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit, timeoutMs: 200, now });
   const calendar = createGoogleCalendar({
     integrationSettings,
     items,
     notifications: { async create() {} },
-    email: { async sendPickupNotification() { return true; } },
+    email: {
+      async sendPickupNotification() {
+        if (pickupEmailError) throw pickupEmailError;
+        return true;
+      },
+    },
     audit,
     callIntegration,
     client: googleClient,
   });
   return { calendar, claim, events, insertedEvents, operations, statuses, auditEvents };
 }
+
+test('calendar sync reason is stored only while a retryable failure is active', async () => {
+  const updates = [];
+  const database = {
+    collection() {
+      return {
+        async updateOne(filter, update) {
+          updates.push({ filter, update });
+          return { matchedCount: 1 };
+        },
+      };
+    },
+  };
+  const items = createItemService(database, {});
+
+  await items.updateClaimCalendarStatus('claim-1', 'failed', 'event-1', 'rate limited');
+  await items.updateClaimCalendarStatus('claim-1', 'pending', 'event-1');
+
+  assert.equal(updates[0].update.$set.calendar_sync_reason, 'rate limited');
+  assert.deepEqual(updates[1].update.$unset, { calendar_sync_reason: '' });
+});
+
+test('rate-limited Calendar sync is marked failed and can be retried after the bucket refills', async () => {
+  let timestamp = 0;
+  const harness = createHarness({ rateLimit: 1, now: () => timestamp });
+  assert.equal((await harness.calendar.syncApprovedClaim(harness.claim)).status, 'synced');
+
+  const limited = await harness.calendar.syncApprovedClaim(harness.claim);
+  assert.deepEqual(limited, { status: 'failed', reason: 'rate limited' });
+  assert.equal(harness.claim.calendar_sync_status, 'failed');
+  assert.equal(harness.claim.calendar_sync_reason, 'rate limited');
+  assert.equal(harness.operations.filter((operation) => operation === 'event.update').length, 0);
+
+  timestamp += 60_000;
+  assert.equal((await harness.calendar.retryClaim(harness.claim.id)).status, 'synced');
+  assert.equal(harness.claim.calendar_sync_reason, null);
+});
+
+test('rate-limited Calendar cleanup stays retryable and succeeds after the bucket refills', async () => {
+  let timestamp = 0;
+  const harness = createHarness({ rateLimit: 1, now: () => timestamp });
+  const { eventId } = await harness.calendar.syncApprovedClaim(harness.claim);
+  harness.claim.calendar_event_id = eventId;
+  harness.claim.item_status = 'returned';
+
+  const limited = await harness.calendar.cleanupClaim(harness.claim);
+  assert.deepEqual(limited, { status: 'failed', reason: 'rate limited' });
+  assert.equal(harness.claim.calendar_sync_status, 'failed');
+  assert.equal(harness.claim.calendar_sync_reason, 'rate limited');
+  assert.equal(harness.events.size, 1);
+
+  timestamp += 60_000;
+  assert.equal((await harness.calendar.retryClaim(harness.claim.id)).status, 'skipped');
+  assert.equal(harness.claim.calendar_sync_status, 'skipped');
+  assert.equal(harness.events.size, 0);
+});
+
+test('rate-limited pickup email does not fail Calendar notifications', async () => {
+  const harness = createHarness({
+    pickupEmailError: new IntegrationError('smtp', 'rate_limited', { retryAfter: 15 }),
+  });
+  assert.equal(await harness.calendar.sendApprovalEmail(harness.claim), false);
+});
 
 test('calendar sync creates one private-data-free event and retry/reschedule updates it', async () => {
   const harness = createHarness();

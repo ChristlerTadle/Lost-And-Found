@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const { createAdminController } = require('../controllers/admin-controller');
 const { createAuthController } = require('../controllers/auth-controller');
 const { createStaffController } = require('../controllers/staff-controller');
+const { IntegrationError } = require('../../src/services/integration-calls');
 
 function createAuditRecorder() {
   const events = [];
@@ -31,6 +32,8 @@ function createAuditRecorder() {
 function response() {
   return {
     statusCode: 200,
+    headers: {},
+    set(name, value) { this.headers[name] = value; return this; },
     status(code) { this.statusCode = code; return this; },
     json(value) { this.body = value; return this; },
   };
@@ -171,7 +174,7 @@ test('staff claim decisions, status changes, and returns are audited without cla
   assert.equal(JSON.stringify(audit.events).includes('NEVER AUDIT THIS CLAIM VERIFICATION DETAIL'), false);
 });
 
-test('calendar sync failure does not block claim approval', async () => {
+test('rate-limited Calendar sync does not block claim approval', async () => {
   const audit = createAuditRecorder();
   const calls = [];
   const claim = {
@@ -192,9 +195,9 @@ test('calendar sync failure does not block claim approval', async () => {
       },
       async syncApprovedClaim() {
         calls.push('calendar:failed');
-        return { status: 'failed' };
+        return { status: 'failed', reason: 'rate limited' };
       },
-      async sendApprovalEmail() { calls.push('email'); },
+      async sendApprovalEmail() { calls.push('email'); return false; },
       async getPickupFormDefaults() { return {}; },
     },
     items: {
@@ -219,6 +222,67 @@ test('calendar sync failure does not block claim approval', async () => {
 
   assert.equal(res.body.claim.status, 'approved');
   assert.deepEqual(calls, ['calendar:failed', 'email']);
+});
+
+test('public reCAPTCHA provider errors return safe retryable responses', async () => {
+  const makeController = (error) => createAuthController({
+    auth: { async login() { throw new Error('Authentication must not run.'); } },
+    recaptcha: { async verifyResponse() { throw error; } },
+    integrationSettings: { async getIntegration() { return { enabled: true }; } },
+  });
+  const req = { body: { 'g-recaptcha-response': 'private-token' }, ip: '192.0.2.10' };
+
+  const limitedResponse = response();
+  await makeController(new IntegrationError('recaptcha', 'rate_limited', { retryAfter: 12 }))
+    .postAuthLogin(req, limitedResponse);
+  assert.equal(limitedResponse.statusCode, 429);
+  assert.equal(limitedResponse.headers['Retry-After'], '12');
+  assert.deepEqual(limitedResponse.body, { error: 'Please try again shortly' });
+
+  const unavailableResponse = response();
+  await makeController(new IntegrationError('recaptcha', 'network'))
+    .postAuthLogin(req, unavailableResponse);
+  assert.equal(unavailableResponse.statusCode, 503);
+  assert.equal(unavailableResponse.headers['Retry-After'], '60');
+  assert.deepEqual(unavailableResponse.body, { error: 'Please try again shortly' });
+});
+
+test('rate-limited Google sign-in returns HTTP 429 without an auth-failure audit', async () => {
+  const audit = createAuditRecorder();
+  const controller = createAuthController({
+    audit,
+    auth: {},
+    adminMfa: {},
+    googleOAuth: {
+      async verifyAuthorizationResponse() {
+        throw new IntegrationError('google_auth', 'rate_limited', { retryAfter: 9 });
+      },
+    },
+    integrationSettings: {
+      async getIntegration() { return { active: true }; },
+    },
+    frontendOrigin: 'https://frontend.example.test',
+  });
+  const req = {
+    query: { state: 'expected-state', code: 'private-code' },
+    session: {
+      googleOAuth: {
+        state: 'expected-state',
+        codeVerifier: 'private-verifier',
+        nonce: 'private-nonce',
+      },
+      save(callback) { callback(); },
+    },
+    ip: '192.0.2.10',
+  };
+  const res = response();
+
+  await controller.getAuthGoogleCallback(req, res);
+
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.headers['Retry-After'], '9');
+  assert.deepEqual(res.body, { error: 'Please try again shortly' });
+  assert.deepEqual(audit.events, []);
 });
 
 test('admin and staff logins are audited, and failed login never records credentials', async () => {

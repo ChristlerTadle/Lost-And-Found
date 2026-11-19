@@ -5,7 +5,9 @@ function createClaimsController({ items, googleCalendar }) {
       const user = req.user;
       const claims = await items.findClaimsForUser(user.id);
       return res.json({
-        claims: claims.map(({ calendar_event_id, calendar_sync_status, ...claim }) => ({
+        claims: claims.map(({
+          calendar_event_id, calendar_sync_status, calendar_sync_reason, ...claim
+        }) => ({
           ...claim,
           calendar_url: googleCalendar.googleCalendarUrl(claim),
         })),

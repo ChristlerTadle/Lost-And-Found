@@ -181,7 +181,7 @@ async function staffClaimPage(id) {
             </div>`}</div>`
         : claim.status === 'approved' && item.status === 'claimed' && hasPermission('mark_item_returned')
           ? `<div class="staff-verification"><p>Confirm that the verified owner has received the item before recording its return.</p>${formAction('mark-returned', claim.id, 'Mark item as returned', 'primary')}</div>` : ''}
-      ${claim.status === 'approved' && claim.pickup_at ? `<section class="staff-verification pickup-status">
+      ${claim.pickup_at && (claim.status === 'approved' || claim.calendar_sync_status === 'failed') ? `<section class="staff-verification pickup-status">
         <h3>Pickup appointment</h3><p>${h(formatPickup(claim.pickup_at, claim.pickup_time_zone))} · ${h(claim.pickup_location)}</p>
         ${claim.calendar_sync_status === 'failed' ? `<p class="claim-outcome">Calendar not synced</p>${hasPermission('schedule_pickup') ? formAction('retry-calendar-sync', claim.id, 'Retry sync', 'outline') : ''}` : ''}
         ${hasPermission('schedule_pickup') && item.status === 'claimed' && !item.deleted_at ? `<form class="form-grid pickup-schedule-form" data-form="reschedule-pickup" data-id="${h(claim.id)}">

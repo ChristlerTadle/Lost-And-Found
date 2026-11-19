@@ -111,15 +111,17 @@ function safeServerMessage(value) {
 
 function normalizeRequestError(response, data, path, authenticated) {
   const errorBody = data && typeof data === 'object' ? data : {};
-  const retryAfter = response.status === 429
+  const retryAfter = response.status === 429 || response.status === 503
     ? retryDelay(response.headers.get('Retry-After') || errorBody.retryAfter)
     : 0;
   let message;
   let showSignIn = false;
   if (response.status === 429) {
-    message = errorBody.reason === 'rate_limited' && typeof errorBody.error === 'string'
+    message = errorBody.error === 'Please try again shortly'
       ? errorBody.error
       : `Too many attempts. Try again in ${Math.max(1, Math.ceil(retryAfter / 60))} minute${Math.ceil(retryAfter / 60) === 1 ? '' : 's'}.`;
+  } else if (response.status === 503 && errorBody.error === 'Please try again shortly') {
+    message = errorBody.error;
   } else if (response.status === 401 && authenticated && !isAuthRequest(path) && isAuthenticatedPage()) {
     message = 'Your access changed. Please sign in again.';
     showSignIn = true;
@@ -281,8 +283,8 @@ function messageText(error) {
   if (typeof error === 'string') return safeServerMessage(error);
   if (error?.userMessage) return safeServerMessage(error.userMessage);
   if (error?.networkError) return 'Could not reach the server. Check your connection and try again.';
+  if (error?.status === 429 || (error?.status === 503 && error?.retryAfter > 0)) return error.message;
   if (error?.status >= 500) return 'Something went wrong. Please try again.';
-  if (error?.status === 429) return error.message;
   if (error?.showSignIn) return 'Your access changed. Please sign in again.';
   return safeServerMessage(error?.message);
 }
@@ -452,7 +454,9 @@ function showFormError(error, options = {}) {
   const message = messageText(error);
   const anchor = options.anchor || currentInteraction();
   const context = messageContext(anchor);
-  if (error?.status === 429) startRateLimit(anchor, error.retryAfter);
+  if (error?.status === 429 || (error?.status === 503 && error.retryAfter > 0)) {
+    startRateLimit(anchor, error.retryAfter);
+  }
   if (context && error?.showSignIn) {
     const area = createMessageArea(context, anchor);
     if (isInViewport(area) || context.matches('dialog[open]') || context.matches('[data-page-error]')) {
@@ -499,32 +503,40 @@ function showFormSuccess(message, options = {}) {
 
 function startRateLimit(anchor, retryAfter) {
   const control = anchor instanceof Element ? anchor : null;
-  const button = control?.matches('button') ? control
-    : control?.closest('button') || control?.querySelector('button[type="submit"]')
+  const action = control?.matches('button, a') ? control
+    : control?.closest('button, a') || control?.querySelector('button[type="submit"]')
       || control?.closest('form')?.querySelector('button[type="submit"]');
-  if (!button) return;
+  if (!action) return;
   const until = Date.now() + Math.max(1, Number(retryAfter) || 60) * 1000;
-  const previous = rateLimitTimers.get(button);
+  const previous = rateLimitTimers.get(action);
   if (previous) clearInterval(previous);
-  button.dataset.rateLimitUntil = String(until);
-  button.dataset.rateLimitOriginal = button.dataset.rateLimitOriginal || button.innerHTML;
-  button.disabled = true;
+  action.dataset.rateLimitUntil = String(until);
+  action.dataset.rateLimitOriginal = action.dataset.rateLimitOriginal || action.innerHTML;
+  if (action.matches('button')) action.disabled = true;
+  if (action.matches('a')) {
+    action.setAttribute('aria-disabled', 'true');
+    action.classList.add('disabled');
+  }
   const update = () => {
     const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
     if (remaining) {
-      button.textContent = `Retry in ${remaining}s`;
+      action.textContent = `Retry in ${remaining}s`;
       return;
     }
-    clearInterval(rateLimitTimers.get(button));
-    rateLimitTimers.delete(button);
-    delete button.dataset.rateLimitUntil;
-    button.innerHTML = button.dataset.rateLimitOriginal;
-    delete button.dataset.rateLimitOriginal;
-    button.disabled = false;
-    button.dispatchEvent(new CustomEvent('shared-rate-limit-ended', { bubbles: true, detail: button }));
+    clearInterval(rateLimitTimers.get(action));
+    rateLimitTimers.delete(action);
+    delete action.dataset.rateLimitUntil;
+    action.innerHTML = action.dataset.rateLimitOriginal;
+    delete action.dataset.rateLimitOriginal;
+    if (action.matches('button')) action.disabled = false;
+    if (action.matches('a')) {
+      action.removeAttribute('aria-disabled');
+      action.classList.remove('disabled');
+    }
+    action.dispatchEvent(new CustomEvent('shared-rate-limit-ended', { bubbles: true, detail: action }));
   };
   update();
-  rateLimitTimers.set(button, window.setInterval(update, 1000));
+  rateLimitTimers.set(action, window.setInterval(update, 1000));
 }
 
 function isRateLimited(button) {

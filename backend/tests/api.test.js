@@ -1613,20 +1613,26 @@ test('local password login remains available when Google sign-in is disabled', a
   assert.equal((await response.json()).user.role_name, 'admin');
 });
 
-test('password reset returns the same generic response for unknown addresses and SMTP failures', async () => {
+test('password reset keeps responses generic for unknown, inactive, failed, and rate-limited sends', async () => {
   const originalRequestPasswordReset = services.auth.requestPasswordReset;
   const originalSendPasswordReset = services.email.sendPasswordReset;
-  let deliverySettled = Promise.resolve();
+  const originalConsoleError = console.error;
+  const deliveries = [];
+  const serverLogs = [];
   services.auth.requestPasswordReset = async (email, sendEmail) => {
-    if (email === 'known@example.test') {
+    if (email === 'known@example.test' || email === 'limited@example.test') {
       const delivery = sendEmail(email, 'test-reset-token');
-      deliverySettled = delivery.then(() => undefined, () => undefined);
+      deliveries.push(delivery.then(() => undefined, () => undefined));
       await delivery;
     }
   };
-  services.email.sendPasswordReset = async () => {
+  services.email.sendPasswordReset = async (email) => {
+    if (email === 'limited@example.test') {
+      throw new IntegrationError('smtp', 'rate_limited', { retryAfter: 10 });
+    }
     throw new IntegrationError('smtp', 'invalid_credentials');
   };
+  console.error = (...values) => serverLogs.push(values.join(' '));
 
   try {
     const request = (email) => fetch(`${baseUrl}/auth/forgot-password`, {
@@ -1636,17 +1642,31 @@ test('password reset returns the same generic response for unknown addresses and
     });
     const unknownResponse = await request('unknown@example.test');
     const unknownBody = await unknownResponse.json();
+    const inactiveResponse = await request('inactive@example.test');
+    const inactiveBody = await inactiveResponse.json();
     const knownResponse = await request('known@example.test');
     const knownBody = await knownResponse.json();
-    await deliverySettled;
+    const limitedResponse = await request('limited@example.test');
+    const limitedBody = await limitedResponse.json();
+    await Promise.all(deliveries);
 
     assert.equal(unknownResponse.status, 200);
     assert.equal(knownResponse.status, unknownResponse.status);
+    assert.equal(inactiveResponse.status, unknownResponse.status);
+    assert.equal(limitedResponse.status, unknownResponse.status);
+    assert.deepEqual(inactiveBody, unknownBody);
     assert.deepEqual(knownBody, unknownBody);
+    assert.deepEqual(limitedBody, unknownBody);
     assert.equal(knownBody.message, 'If an active account uses that email, reset instructions have been sent.');
+    assert.equal(serverLogs.length, 2);
+    assert.ok(serverLogs.every((entry) => !entry.includes('@example.test')
+      && !entry.includes('test-reset-token')));
+    assert.match(serverLogs.join(' '), /Password reset delivery failed/);
+    assert.match(serverLogs.join(' '), /Password reset delivery was rate limited/);
   } finally {
     services.auth.requestPasswordReset = originalRequestPasswordReset;
     services.email.sendPasswordReset = originalSendPasswordReset;
+    console.error = originalConsoleError;
   }
 });
 

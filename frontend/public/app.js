@@ -530,15 +530,19 @@ async function startGoogleSignIn(event) {
   link.setAttribute('aria-disabled', 'true');
   link.classList.add('disabled');
   const widget = app.querySelector('.g-recaptcha');
-  const token = getRecaptchaResponse(widget);
-  if (!token) {
+  const token = sessionInfo.recaptcha?.active ? getRecaptchaResponse(widget) : '';
+  if (sessionInfo.recaptcha?.active && !token) {
     showNotice('Complete the reCAPTCHA challenge before continuing with Google.', true);
     link.removeAttribute('aria-disabled');
     link.classList.remove('disabled');
     return;
   }
   try {
-    const result = await request('/auth/google', jsonPost({ 'g-recaptcha-response': token }));
+    const body = token ? { 'g-recaptcha-response': token } : {};
+    const result = await request('/auth/google', {
+      ...jsonPost(body),
+      anchor: link,
+    });
     window.location.assign(result.url);
   } catch (error) {
     showNotice(error.message, true);
@@ -546,8 +550,10 @@ async function startGoogleSignIn(event) {
       window.grecaptcha.reset(Number(widget.dataset.widgetId));
       delete widget.dataset.responseToken;
     }
-    link.removeAttribute('aria-disabled');
-    link.classList.remove('disabled');
+    if (!isRateLimited(link)) {
+      link.removeAttribute('aria-disabled');
+      link.classList.remove('disabled');
+    }
   }
 }
 
