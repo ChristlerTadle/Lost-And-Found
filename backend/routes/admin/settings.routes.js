@@ -21,6 +21,11 @@ function createAdminSettingsRoutes({ controllers, guards, frontendOrigin, integr
     windowMs: limits.testWindowMs,
     bucketKey: 'test-connection',
   });
+  const verificationLimit = createIntegrationRouteLimit({
+    limit: limits.testLimit,
+    windowMs: limits.testWindowMs,
+    bucketKey: (req) => `verification:${req.params.integrationId}`,
+  });
   const restoreLimit = createIntegrationRouteLimit({
     limit: limits.restoreLimit,
     windowMs: limits.restoreWindowMs,
@@ -34,6 +39,7 @@ function createAdminSettingsRoutes({ controllers, guards, frontendOrigin, integr
   router.post('/settings/code/verify', manage('POST', '/admin/settings/code/verify'), unlocked, saveLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeVerify));
   router.post('/settings/code/resend', manage('POST', '/admin/settings/code/resend'), unlocked, saveLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeResend));
   router.post('/settings/code/cancel', manage('POST', '/admin/settings/code/cancel'), unlocked, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsCodeCancel));
+  router.post('/settings/:integrationId/verify', manage('POST', '/admin/settings/:integrationId/verify'), unlocked, verificationLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsVerify));
   router.post('/settings/:integrationId/default', manage('POST', '/admin/settings/:integrationId/default'), unlocked, restoreLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsDefault));
   router.post('/settings/:integrationId/restore-default', manage('POST', '/admin/settings/:integrationId/restore-default'), unlocked, restoreLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsRestoreDefault));
   router.post('/settings/smtp/test', manage('POST', '/admin/settings/smtp/test'), unlocked, testLimit, requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsSmtpTest));

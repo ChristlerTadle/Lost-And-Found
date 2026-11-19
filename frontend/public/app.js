@@ -193,13 +193,10 @@ function bindForms() {
   app.querySelectorAll('[data-action="google-signin"]').forEach((link) => link.addEventListener('click', startGoogleSignIn));
   app.querySelectorAll('[data-action="integration-toggle"]').forEach((button) => button.addEventListener('click', toggleIntegration));
   app.querySelectorAll('[data-action="save-integration"]').forEach((button) => button.addEventListener('click', saveIntegrationSettings));
+  app.querySelectorAll('[data-action="integration-verify"], [data-action="smtp-test"], [data-action="calendar-test"]').forEach((button) => button.addEventListener('click', verifyIntegrationCard));
   app.querySelectorAll('[data-action="cancel-integration"]').forEach((button) => button.addEventListener('click', cancelIntegrationChanges));
   app.querySelectorAll('[data-action="set-integration-default"]').forEach((button) => button.addEventListener('click', setIntegrationDefault));
   app.querySelectorAll('[data-action="restore-integration-default"]').forEach((button) => button.addEventListener('click', restoreIntegrationDefault));
-  app.querySelectorAll('[data-action="integration-test"]').forEach((button) => button.addEventListener('click', testIntegrationConnection));
-  app.querySelectorAll('[data-action="smtp-test"]').forEach((button) => button.addEventListener('click', testSmtpConnection));
-  app.querySelectorAll('[data-action="calendar-test"]').forEach((button) => button.addEventListener('click', testCalendarConnection));
-  app.querySelectorAll('[data-action="admin-mfa-test"]').forEach((button) => button.addEventListener('click', testAdminMfa));
   app.querySelectorAll('[data-action="admin-mfa-enrollment-start"]').forEach((button) => button.addEventListener('click', startAdminMfaEnrollment));
   app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
   app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
@@ -692,6 +689,22 @@ function bindIntegrationPinForm(form) {
 function handleIntegrationEdit(event) {
   const form = event.currentTarget;
   const card = event.target.closest('[data-integration]');
+  if (card && !event.target.matches('[data-verification-code]')) {
+    card.dataset.verifiedPayload = '';
+    card.dataset.currentVerification = 'false';
+    const message = card.querySelector('[data-integration-validation]');
+    if (message) {
+      const enabled = card.querySelector('[data-action="integration-toggle"]').dataset.enabled === 'true';
+      const saved = JSON.parse(card.dataset.savedState);
+      const fieldsChanged = JSON.stringify(integrationCardPayload(card).fields) !== JSON.stringify(saved.fields);
+      message.textContent = ['google_auth', 'recaptcha', 'admin_mfa'].includes(card.dataset.integration)
+        && (enabled || fieldsChanged)
+        ? 'Changed settings need verification before saving.'
+        : enabled || fieldsChanged
+          ? 'Settings will be verified when saved.'
+          : 'Disabling does not require verification.';
+    }
+  }
   if (pendingIntegrationCard && card === pendingIntegrationCard) {
     pendingIntegrationCard = null;
     closeIntegrationCodeDialog();
@@ -716,18 +729,28 @@ function integrationCardPayload(card) {
 
 function updateIntegrationSaveState(form) {
   for (const card of form.querySelectorAll('[data-integration]')) {
-    const changed = JSON.stringify(integrationCardPayload(card)) !== card.dataset.savedState;
+    const payload = integrationCardPayload(card);
+    const payloadText = JSON.stringify(payload);
+    const changed = payloadText !== card.dataset.savedState;
+    const savedPayload = card.dataset.savedState ? JSON.parse(card.dataset.savedState) : null;
+    const fieldsChanged = savedPayload
+      && JSON.stringify(payload.fields) !== JSON.stringify(savedPayload.fields);
+    const requiresInteractiveVerification = ['google_auth', 'recaptcha', 'admin_mfa']
+      .includes(card.dataset.integration)
+      && (payload.enabled || fieldsChanged);
+    const save = card.querySelector('[data-action="save-integration"]');
+    if (save) {
+      save.disabled = changed && requiresInteractiveVerification
+        && card.dataset.verifiedPayload !== payloadText;
+    }
     card.querySelector('.integration-card-actions').hidden = !changed;
     const setDefault = card.querySelector('[data-action="set-integration-default"]');
     if (setDefault) {
       setDefault.disabled = changed || card.dataset.active !== 'true'
         || card.dataset.usingDefault === 'true'
-        || card.dataset.currentValidation !== 'true';
+        || card.dataset.currentVerification !== 'true';
     }
-    card.querySelector('[data-action="integration-test"]')?.toggleAttribute('disabled', changed);
-    card.querySelector('[data-action="smtp-test"]')?.toggleAttribute('disabled', changed);
-    card.querySelector('[data-action="calendar-test"]')?.toggleAttribute('disabled', changed);
-    card.querySelector('[data-action="admin-mfa-test"]')?.toggleAttribute('disabled', changed);
+    card.querySelector('[data-action="integration-verify"]')?.removeAttribute('disabled');
     updateIntegrationCardStatus(card);
   }
 }
@@ -885,7 +908,11 @@ async function verifyIntegrationCode(form) {
   } catch (requestError) {
     error.textContent = requestError.message;
     form.querySelector('[name="code"]').value = '';
-    if (requestError.message.includes('pending settings changed')) {
+    if (requestError.message.includes('pending settings changed')
+      || requestError.message.includes('Verify this integration again')) {
+      card.dataset.verifiedPayload = '';
+      card.dataset.currentVerification = 'false';
+      updateIntegrationSaveState(card.closest('form'));
       pendingIntegrationCard = null;
       pendingIntegrationRestore = null;
       closeIntegrationCodeDialog();
@@ -920,6 +947,14 @@ async function resendIntegrationCode(event) {
     startIntegrationCodeResendTimer(dialog, result.resendInSeconds);
     showNotice('A new verification code was sent.');
   } catch (error) {
+    if (error.message.includes('Verify this integration again')) {
+      card.dataset.verifiedPayload = '';
+      card.dataset.currentVerification = 'false';
+      pendingIntegrationCard = null;
+      pendingIntegrationRestore = null;
+      closeIntegrationCodeDialog();
+      updateIntegrationSaveState(card.closest('form'));
+    }
     showNotice(error.message, true);
     if (!isRateLimited(button)) button.disabled = false;
   }
@@ -951,14 +986,7 @@ async function setIntegrationDefault(event) {
   const card = button.closest('[data-integration]');
   const form = card.closest('form');
   const name = card.querySelector('h2').textContent;
-  const confirmation = {
-    google_auth: 'Google accepted the client credentials, but no real login was performed.',
-    recaptcha: 'The secret was accepted, but no real captcha challenge was performed.',
-    smtp: 'The SMTP connection and authentication were verified; no email was sent.',
-    google_calendar: 'The service account read the calendar; no event was created or changed.',
-    admin_mfa: 'The local encryption and generated-code self-test passed.',
-  }[card.dataset.integration];
-  if (!confirm(`Set the current saved ${name} configuration as the default? ${confirmation}`)) return;
+  if (!confirm(`Set the current saved ${name} configuration as the default?`)) return;
   button.disabled = true;
   try {
     const result = await request(`/admin/settings/${encodeURIComponent(card.dataset.integration)}/default`, {
@@ -1026,6 +1054,11 @@ function toggleIntegration(event) {
     && !confirm('Disable administrator MFA? This removes the second sign-in step for all administrators.')) return;
   button.dataset.enabled = String(!wasEnabled);
   button.textContent = wasEnabled ? 'Enable' : 'Disable';
+  card.dataset.verifiedPayload = '';
+  card.dataset.currentVerification = 'false';
+  card.querySelector('[data-integration-validation]').textContent = wasEnabled
+    ? 'Disabling does not require verification.'
+    : 'Changed settings need verification before saving.';
   updateIntegrationSaveState(button.closest('form'));
 }
 
@@ -1055,6 +1088,10 @@ async function saveIntegrationSettings(event) {
     showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
   } catch (error) {
     if (showIntegrationRateLimit(error, button)) return;
+    if (error.message.includes('Verify this integration again')) {
+      card.dataset.verifiedPayload = '';
+      card.dataset.currentVerification = 'false';
+    }
     if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
     if (error.failures) {
       for (const failure of error.failures) {
@@ -1086,13 +1123,15 @@ function applySavedIntegration(card, integration) {
   card.dataset.active = String(integration.active);
   card.dataset.usingDefault = String(integration.usingDefault);
   card.dataset.hasDefault = String(integration.hasDefault);
-  card.dataset.currentValidation = String(integration.isCurrentValidation);
-  card.querySelector('[data-integration-validation]').textContent =
-    integration.lastValidationResult === 'Validated' && integration.lastValidatedAt
-      ? `Validated at ${new Date(integration.lastValidatedAt).toLocaleString()}`
-      : integration.lastValidationResult === 'Failed'
-        ? integration.lastValidationReason || 'Last validation failed'
-        : 'Not validated';
+  card.dataset.currentVerification = String(integration.isCurrentVerification);
+  card.dataset.verificationProof = integration.verification?.proofType || '';
+  card.dataset.verificationAt = integration.verification?.verifiedAt || '';
+  card.dataset.verificationLabel = verificationProofLabel(integration.verification?.proofType);
+  card.dataset.verifiedPayload = integration.isCurrentVerification
+    ? JSON.stringify(integrationCardPayload(card)) : '';
+  card.querySelector('[data-integration-validation]').textContent = integration.verification
+    ? `Verified at ${new Date(integration.verification.verifiedAt).toLocaleString()} · ${card.dataset.verificationLabel}`
+    : 'Not verified';
   updateIntegrationHealth(card, integration);
   card.querySelector('[data-default-status]').textContent = integration.usingDefault
     ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved';
@@ -1162,113 +1201,53 @@ async function cancelIntegrationChanges(event) {
   updateIntegrationSaveState(card.closest('form'));
 }
 
-async function testSmtpConnection(event) {
-  const button = event.currentTarget;
-  const form = button.closest('form');
-  const card = button.closest('[data-integration]');
-  button.disabled = true;
-  try {
-    const result = await request('/admin/settings/smtp/test', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
-      body: JSON.stringify({}),
-    });
-    applySavedIntegration(card, result.integrations.smtp);
-    showNotice('Saved SMTP connection verified.');
-  } catch (error) {
-    if (showIntegrationRateLimit(error, button)) return;
-    if (error.fieldErrors) showIntegrationErrors(form, error.fieldErrors);
-    try {
-      const current = await request('/admin/settings');
-      if (current.integrations?.smtp) applySavedIntegration(card, current.integrations.smtp);
-    } catch {
-      console.warn('Integration health could not be refreshed after the SMTP test.');
-    }
-    showNotice(error.message, true);
-  } finally {
-    if (!button.dataset.rateLimitUntil) button.disabled = false;
-  }
-}
-
-async function testIntegrationConnection(event) {
+async function verifyIntegrationCard(event) {
   const button = event.currentTarget;
   const form = button.closest('form');
   const card = button.closest('[data-integration]');
   const integrationId = card.dataset.integration;
-  const connectionTests = {
-    google_auth: {
-      path: '/admin/settings/google-auth/test',
-      label: 'Google sign-in',
-    },
-    recaptcha: {
-      path: '/admin/settings/recaptcha/test',
-      label: 'reCAPTCHA',
-    },
-  };
-  const connectionTest = connectionTests[integrationId];
-  if (!connectionTest) return;
-
+  const payload = integrationCardPayload(card);
+  const proof = integrationId === 'admin_mfa'
+    ? { code: card.querySelector('[data-verification-code]')?.value || '' }
+    : undefined;
+  card.dataset.verifiedPayload = '';
+  card.dataset.currentVerification = 'false';
+  card.querySelector('[data-integration-validation]').textContent = 'Verification in progress...';
   button.disabled = true;
   try {
-    const result = await request(connectionTest.path, {
+    const result = await request(`/admin/settings/${encodeURIComponent(integrationId)}/verify`, {
       method: 'POST',
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ ...payload, proof }),
     });
-    applySavedIntegration(card, result.integrations[integrationId]);
-    showNotice(`${connectionTest.label} connection verified.`);
+    card.dataset.verifiedPayload = JSON.stringify(payload);
+    card.dataset.currentVerification = 'true';
+    card.dataset.verificationProof = result.verification.proofType;
+    card.dataset.verificationAt = result.verification.verifiedAt;
+    card.dataset.verificationLabel = verificationProofLabel(result.verification.proofType);
+    card.querySelector('[data-integration-validation]').textContent =
+      `Verified at ${new Date(result.verification.verifiedAt).toLocaleString()} · ${card.dataset.verificationLabel}`;
+    showNotice(`Settings verified ${card.dataset.verificationLabel}.`);
   } catch (error) {
+    card.querySelector('[data-integration-validation]').textContent = 'Verification failed. Verify the current settings before saving.';
     if (showIntegrationRateLimit(error, button)) return;
-    try {
-      const current = await request('/admin/settings');
-      if (current.integrations?.[integrationId]) applySavedIntegration(card, current.integrations[integrationId]);
-    } catch {
-      console.warn(`${connectionTest.label} health could not be refreshed after the connection test.`);
-    }
     showNotice(error.message, true);
   } finally {
+    const code = card.querySelector('[data-verification-code]');
+    if (code) code.value = '';
     if (!button.dataset.rateLimitUntil) button.disabled = false;
+    updateIntegrationSaveState(form);
   }
 }
 
-async function testCalendarConnection(event) {
-  const button = event.currentTarget;
-  const form = button.closest('form');
-  const card = button.closest('[data-integration]');
-  button.disabled = true;
-  try {
-    const result = await request('/admin/settings/google-calendar/test', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
-      body: JSON.stringify({}),
-    });
-    applySavedIntegration(card, result.integrations.google_calendar);
-    showNotice('Google Calendar is reachable.');
-  } catch (error) {
-    if (showIntegrationRateLimit(error, button)) return;
-    try {
-      const current = await request('/admin/settings');
-      if (current.integrations?.google_calendar) applySavedIntegration(card, current.integrations.google_calendar);
-    } catch {
-      console.warn('Google Calendar health could not be refreshed after the connection test.');
-    }
-    showNotice(error.message, true);
-  } finally {
-    if (!button.dataset.rateLimitUntil) button.disabled = false;
-  }
-}
-
-async function testAdminMfa(event) {
-  const button = event.currentTarget;
-  button.disabled = true;
-  try {
-    await request('/admin/settings/admin-mfa/test', jsonPost({}));
-    showNotice('Admin MFA encryption and authenticator self-test passed.');
-  } catch (error) {
-    if (!showIntegrationRateLimit(error, button)) showNotice(error.message, true);
-  } finally {
-    if (!button.dataset.rateLimitUntil) button.disabled = false;
-  }
+function verificationProofLabel(proofType) {
+  return {
+    real_sign_in: 'with a real sign-in',
+    real_challenge: 'with a real challenge',
+    test_email_sent: 'test email sent',
+    test_event_created_and_removed: 'test event created and removed',
+    authenticator_code_accepted: 'authenticator code accepted',
+  }[proofType] || 'with verified settings';
 }
 
 async function startAdminMfaEnrollment(event) {

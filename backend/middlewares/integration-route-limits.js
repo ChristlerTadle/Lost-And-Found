@@ -3,7 +3,9 @@ function createIntegrationRouteLimit({ limit, windowMs, overall = false, bucketK
   return (req, res, next) => {
     const adminId = String(req.user?.id || 'anonymous');
     const ip = String(req.ip || req.socket?.remoteAddress || 'unknown');
-    const scope = overall ? 'overall' : bucketKey || req.route?.path || req.path;
+    const scope = overall ? 'overall'
+      : typeof bucketKey === 'function' ? bucketKey(req)
+        : bucketKey || req.route?.path || req.path;
     const key = `${adminId}|${scope}|${ip}`;
     const now = Date.now();
     const record = buckets.get(key);

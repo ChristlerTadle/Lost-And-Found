@@ -3,6 +3,7 @@ const { generateKeyPairSync, randomBytes } = require('node:crypto');
 const { test } = require('node:test');
 const { createAdminController } = require('../controllers/admin-controller');
 const { createIntegrationSettings } = require('../../src/services/integration-settings');
+const { createIntegrationRouteLimit } = require('../middlewares/integration-route-limits');
 const { createIntegrationCaller } = require('../../src/services/integration-calls');
 const { createEmailService } = require('../../src/services/email');
 const { createGoogleOAuth } = require('../../src/services/google-oauth');
@@ -242,6 +243,54 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
       return true;
     },
   };
+  email.verifyCandidate = async (values) => {
+    seen.smtpPassword = values.password;
+    seen.smtpVerifyRequests = (seen.smtpVerifyRequests || 0) + 1;
+    if (values.password === 'smtp-wrong-candidate-secret') {
+      const error = new Error('SMTP credentials rejected.');
+      error.code = 'invalid_credentials';
+      error.status = 503;
+      throw error;
+    }
+    return { verified: true, proofType: 'test_email_sent' };
+  };
+  googleCalendar.verifyCandidate = async (_context, values) => {
+    seen.calendarPrivateKey = values.private_key;
+    if (values.private_key === WRONG_GOOGLE_KEY) {
+      const error = new Error('Calendar credentials rejected.');
+      error.code = 'invalid_credentials';
+      error.status = 503;
+      throw error;
+    }
+    return { verified: true, proofType: 'test_event_created_and_removed' };
+  };
+  googleOAuth.verifyCandidate = async (_context, values) => {
+    seen.googleSecret = values.client_secret;
+    seen.googleRequests = (seen.googleRequests || 0) + 1;
+    if (values.client_secret === 'google-candidate-secret') {
+      const error = new Error('Google credentials rejected.');
+      error.code = 'invalid_credentials';
+      error.status = 503;
+      throw error;
+    }
+    return { verified: true, proofType: 'real_sign_in' };
+  };
+  recaptcha.verifyCandidate = async (_context, values) => {
+    seen.recaptchaSecret = values.secret_key;
+    if (values.secret_key === 'recaptcha-candidate-secret') {
+      const error = new Error('reCAPTCHA credentials rejected.');
+      error.code = 'invalid_credentials';
+      error.status = 503;
+      throw error;
+    }
+    return { verified: true, proofType: 'real_challenge' };
+  };
+  adminMfa.verifyCandidate = async ({ adminId, values, proof }) => {
+    seen.adminMfaCandidate = values;
+    seen.adminMfaCode = proof?.code;
+    if (failAdminMfa) throw new Error('Admin MFA proof failed.');
+    return { verified: true, proofType: 'authenticator_code_accepted', adminId };
+  };
   const integrationSecurity = {
     async sendCode({ payloadHash }) {
       sentHashes.push(payloadHash);
@@ -272,7 +321,7 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
   });
   return {
     state, integrationSettings, audit, seen, sentHashes, controller,
-    callIntegration, baseSettings,
+    callIntegration, baseSettings, email,
   };
 }
 
@@ -291,15 +340,45 @@ function response() {
   };
 }
 
-function request(body) {
+function request(body, params = {}) {
   return {
     body,
+    params,
     user: { id: 'test-admin', role_name: 'admin' },
     ip: '127.0.0.1',
     sessionID: 'test-session',
     session: {},
   };
 }
+
+test('verification route limits are scoped by admin and integration', () => {
+  const limit = createIntegrationRouteLimit({
+    limit: 1,
+    windowMs: 60_000,
+    bucketKey: (req) => `verification:${req.params.integrationId}`,
+  });
+  const hit = (adminId, integrationId) => {
+    let nextCalled = false;
+    const res = {
+      statusCode: 200,
+      set() {},
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    limit({
+      user: { id: adminId },
+      ip: '127.0.0.1',
+      params: { integrationId },
+      path: `/admin/settings/${integrationId}/verify`,
+    }, res, () => { nextCalled = true; });
+    return { res, nextCalled };
+  };
+
+  assert.equal(hit('admin-1', 'smtp').nextCalled, true);
+  assert.equal(hit('admin-1', 'smtp').res.statusCode, 429);
+  assert.equal(hit('admin-1', 'recaptcha').nextCalled, true);
+  assert.equal(hit('admin-2', 'smtp').nextCalled, true);
+});
 
 async function save(harness, integrations) {
   const res = response();
@@ -311,6 +390,14 @@ async function verify(harness, code, integrations) {
   const res = response();
   await harness.controller.postAdminSettingsCodeVerify(
     request({ code, integrations }), res,
+  );
+  return res;
+}
+
+async function verifyCandidate(harness, integrationId, body) {
+  const res = response();
+  await harness.controller.postAdminSettingsVerify(
+    request(body, { integrationId }), res,
   );
   return res;
 }
@@ -363,17 +450,20 @@ test('wrong candidate credentials block every integration save without emailing 
         });
         assert.equal(candidatePlan.updates[0].values.private_key === entry.secret, true);
       }
-      const result = await save(harness, {
-        [entry.id]: {
-          enabled: entry.enabled ?? true,
-          fields: entry.fields,
-        },
-      });
-      assert.equal(result.statusCode, entry.id === 'admin_mfa' ? 400 : 503, entry.id);
-      assert.equal(result.body.failures[0].integration, entry.id);
-      assert.equal(result.body.failures[0].reason, entry.id === 'admin_mfa'
+      const payload = {
+        enabled: entry.enabled ?? true,
+        fields: entry.fields,
+      };
+      const result = ['google_auth', 'recaptcha', 'admin_mfa'].includes(entry.id)
+        ? await verifyCandidate(harness, entry.id, payload)
+        : await save(harness, { [entry.id]: payload });
+      assert.equal(result.statusCode, 503, entry.id);
+      assert.equal(result.body.error, entry.id === 'admin_mfa'
         ? 'Could not verify, try again'
         : 'Credentials rejected by provider');
+      assert.ok(harness.audit.events.some(({ action, target_id }) => (
+        action === 'integration.verify_failed' && target_id === entry.id
+      )));
       assert.equal(harness.sentHashes.length, 0, `${entry.id} must not email a code`);
       assert.equal(harness.seen[entry.observed] !== undefined, true, `${entry.id} must validate candidate values`);
       if (entry.id === 'smtp') assert.equal(harness.seen.smtpPassword === entry.secret, true);
@@ -408,19 +498,37 @@ test('wrong candidate credentials block every integration save without emailing 
   }
 });
 
+test('a provider without an explicit proof verifier fails closed', async () => {
+  const harness = await createHarness();
+  harness.email.verifyCandidate = undefined;
+  const before = await harness.integrationSettings.getIntegration('smtp');
+  const result = await save(harness, {
+    smtp: {
+      enabled: true,
+      fields: { password: 'candidate-password' },
+    },
+  });
+  assert.equal(result.statusCode, 503);
+  assert.equal(result.body.error, 'Verification is not available yet.');
+  assert.equal(harness.sentHashes.length, 0);
+  assert.equal(
+    JSON.stringify((await harness.integrationSettings.getIntegration('smtp')).settings),
+    JSON.stringify(before.settings),
+  );
+  assert.ok(harness.audit.events.some(({ action }) => action === 'integration.verify_failed'));
+});
+
 test('one invalid card in a mixed save leaves every active configuration untouched', async () => {
   const harness = await createHarness();
   const googleBefore = await harness.integrationSettings.getIntegration('google_auth');
   const recaptchaBefore = await harness.integrationSettings.getIntegration('recaptcha');
-  const result = await save(harness, {
-    google_auth: {
-      enabled: true,
-      fields: { client_secret: 'google-valid-candidate-secret' },
-    },
-    recaptcha: {
-      enabled: true,
-      fields: { secret_key: 'recaptcha-candidate-secret' },
-    },
+  await verifyCandidate(harness, 'google_auth', {
+    enabled: true,
+    fields: { client_secret: 'google-valid-candidate-secret' },
+  });
+  const result = await verifyCandidate(harness, 'recaptcha', {
+    enabled: true,
+    fields: { secret_key: 'recaptcha-candidate-secret' },
   });
   assert.equal(result.statusCode, 503);
   assert.equal(
@@ -436,7 +544,7 @@ test('one invalid card in a mixed save leaves every active configuration untouch
   assert.equal(harness.sentHashes.length, 0);
 });
 
-test('valid reCAPTCHA and OAuth candidates pass partial validation before code delivery', async () => {
+test('interactive verification records are required before emailed-code delivery and save', async () => {
   const harness = await createHarness();
   const payload = {
     google_auth: {
@@ -448,6 +556,11 @@ test('valid reCAPTCHA and OAuth candidates pass partial validation before code d
       fields: { secret_key: 'recaptcha-valid-candidate-secret' },
     },
   };
+  for (const [integrationId, candidate] of Object.entries(payload)) {
+    const verified = await verifyCandidate(harness, integrationId, candidate);
+    assert.equal(verified.statusCode, 200);
+    assert.equal(verified.body.verification.verified, true);
+  }
   const issued = await save(harness, payload);
   assert.equal(issued.statusCode, 200);
   assert.equal(issued.body.verificationRequired, true);
@@ -466,6 +579,44 @@ test('valid reCAPTCHA and OAuth candidates pass partial validation before code d
       === 'recaptcha-valid-candidate-secret',
     true,
   );
+  assert.ok(harness.state.documents.get('google_auth').defaults);
+  assert.ok(harness.state.documents.get('recaptcha').defaults);
+});
+
+test('interactive verification cannot be reused for a different or expired candidate', async () => {
+  const harness = await createHarness();
+  const verifiedPayload = {
+    enabled: true,
+    fields: { client_secret: 'google-verified-candidate-secret' },
+  };
+  const verified = await verifyCandidate(harness, 'google_auth', verifiedPayload);
+  assert.equal(verified.statusCode, 200);
+
+  const changed = await save(harness, {
+    google_auth: {
+      enabled: true,
+      fields: { client_secret: 'google-changed-candidate-secret' },
+    },
+  });
+  assert.equal(changed.statusCode, 400);
+  assert.equal(harness.sentHashes.length, 0);
+
+  const expiredHarness = await createHarness();
+  const plan = await expiredHarness.integrationSettings.prepareIntegrationSave({
+    google_auth: verifiedPayload,
+  });
+  await expiredHarness.integrationSettings.recordVerification({
+    adminId: 'test-admin',
+    integrationId: 'google_auth',
+    enabled: true,
+    values: plan.updates[0].values,
+    proofType: 'real_sign_in',
+    result: true,
+    at: new Date(Date.now() - 10 * 60 * 1000 - 1),
+  });
+  const expired = await save(expiredHarness, { google_auth: verifiedPayload });
+  assert.equal(expired.statusCode, 400);
+  assert.equal(expiredHarness.sentHashes.length, 0);
 });
 
 test('unchanged cards are skipped and disabling a card does not validate credentials', async () => {
@@ -478,11 +629,10 @@ test('unchanged cards are skipped and disabling a card does not validate credent
   const disabled = await save(harness, {
     google_auth: {
       enabled: false,
-      fields: { client_secret: 'google-candidate-secret' },
+      fields: {},
     },
   });
   assert.equal(disabled.statusCode, 200);
-  assert.equal(disabled.body.verificationRequired, true);
   assert.equal(harness.seen.googleSecret, undefined);
 });
 
@@ -510,7 +660,7 @@ test('email-code save rejects a payload changed after validation', async () => {
   );
 });
 
-test('valid SMTP candidate is emailed, revalidated after the code, and saved with validation metadata', async () => {
+test('valid SMTP candidate is verified before code delivery and is not revalidated after the code', async () => {
   const harness = await createHarness();
   const candidate = 'smtp-candidate-secret';
   const payload = { smtp: { enabled: true, fields: { password: candidate } } };
@@ -524,11 +674,12 @@ test('valid SMTP candidate is emailed, revalidated after the code, and saved wit
   const saved = await verify(harness, '123456', payload);
   assert.equal(saved.statusCode, 200);
   assert.equal(harness.seen.smtpPassword === candidate, true);
-  assert.equal(harness.seen.smtpVerifyRequests, 2);
+  assert.equal(harness.seen.smtpVerifyRequests, 1);
   assert.equal((await harness.integrationSettings.getIntegration('smtp')).settings.password === candidate, true);
-  assert.equal(saved.body.integrations.smtp.lastValidationResult, 'Validated');
-  assert.ok(saved.body.integrations.smtp.lastValidatedAt);
-  assert.equal(saved.body.integrations.smtp.isCurrentValidation, true);
+  assert.equal(saved.body.integrations.smtp.isCurrentVerification, true);
+  assert.equal(saved.body.integrations.smtp.verification.proofType, 'test_email_sent');
+  const verificationAudit = harness.audit.events.find(({ action }) => action === 'integration.verify_success');
+  assert.deepEqual(verificationAudit.new_value, { proof_type: 'test_email_sent' });
   assert.ok(harness.state.documents.get('smtp').defaults);
 });
 
@@ -538,12 +689,12 @@ test('validation cooldown starts after five failed provider validations', async 
     google_auth: { enabled: true, fields: { client_secret: 'google-candidate-secret' } },
   };
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const result = await save(harness, payload);
+    const result = await verifyCandidate(harness, 'google_auth', payload.google_auth);
     assert.equal(result.statusCode, 503);
   }
-  const blocked = await save(harness, payload);
+  const blocked = await verifyCandidate(harness, 'google_auth', payload.google_auth);
   assert.equal(blocked.statusCode, 429);
-  assert.match(blocked.body.failures[0].reason, /Could not verify/);
+  assert.match(blocked.body.error, /Could not verify/);
   assert.equal(harness.seen.googleRequests, 5);
   assert.equal(harness.sentHashes.length, 0);
 });
@@ -571,17 +722,17 @@ test('integration token bucket returns a typed error without marking health fail
   assert.ok(audit.events.some(({ action }) => action === 'integration.rate_limited'));
 });
 
-test('Set Default requires an active configuration with an exact passing validation hash', async () => {
+test('Set Default requires an active configuration with an exact unexpired verification', async () => {
   const harness = await createHarness();
   await assert.rejects(
     harness.integrationSettings.setIntegrationDefault('google_auth', harness.audit, {}),
-    /has not passed validation/,
+    /no current verification/,
   );
   const testResult = response();
   await harness.controller.postAdminSettingsGoogleAuthTest(request({}), testResult);
   assert.equal(testResult.statusCode, 200);
   assert.equal(testResult.body.verified, true);
-  assert.equal(testResult.body.integrations.google_auth.isCurrentValidation, true);
+  assert.equal(testResult.body.integrations.google_auth.isCurrentVerification, true);
   await harness.integrationSettings.setIntegrationDefault('google_auth', harness.audit, {});
   assert.ok(harness.state.documents.get('google_auth').defaults);
 
@@ -593,7 +744,7 @@ test('Set Default requires an active configuration with an exact passing validat
   }, harness.audit, {});
   await assert.rejects(
     harness.integrationSettings.setIntegrationDefault('google_auth', harness.audit, {}),
-    /has not passed validation/,
+    /no current verification/,
   );
 
   await harness.integrationSettings.saveIntegrations({

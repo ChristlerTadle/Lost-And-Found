@@ -379,10 +379,20 @@ async function adminSettings() {
     google_calendar: 'Schedule item pickups on one shared organization calendar. Share only the dedicated pickup calendar with the service account.',
     admin_mfa: 'Require administrator sign-in codes from an authenticator app. Users and Staff are not affected.',
   };
+  const verificationLabels = {
+    real_sign_in: 'with a real sign-in',
+    real_challenge: 'with a real challenge',
+    test_email_sent: 'test email sent',
+    test_event_created_and_removed: 'test event created and removed',
+    authenticator_code_accepted: 'authenticator code accepted',
+  };
   const cards = Object.values(integrations).map((integration) => `<section class="card integration-setting" data-integration="${h(integration.id)}"
     data-using-default="${integration.usingDefault}" data-has-default="${integration.hasDefault}"
     data-active="${integration.active}"
-    data-current-validation="${integration.isCurrentValidation}"
+    data-current-verification="${integration.isCurrentVerification}"
+    data-verification-proof="${h(integration.verification?.proofType || '')}"
+    data-verification-label="${h(verificationLabels[integration.verification?.proofType] || '')}"
+    data-verification-at="${h(integration.verification?.verifiedAt || '')}"
     data-failing="${integration.status === 'Failing'}">
     <div class="integration-setting-main">
       <div class="integration-setting-copy"><div class="integration-setting-heading"><h2>${h(integration.label)}</h2></div>
@@ -395,11 +405,9 @@ async function adminSettings() {
         </p>
         <p class="integration-default-status">Default: <span data-default-status>${integration.usingDefault ? 'Using default' : integration.hasDefault ? 'Modified' : 'No default saved'}</span></p>
         <p class="integration-validation-status" data-integration-validation>
-          ${integration.lastValidationResult === 'Validated' && integration.lastValidatedAt
-            ? `Validated at ${h(new Date(integration.lastValidatedAt).toLocaleString())}`
-            : integration.lastValidationResult === 'Failed'
-              ? h(integration.lastValidationReason || 'Last validation failed')
-              : 'Not validated'}
+          ${integration.verification
+            ? `Verified at ${h(new Date(integration.verification.verifiedAt).toLocaleString())} · ${h(verificationLabels[integration.verification.proofType] || 'proof recorded')}`
+            : 'Not verified'}
         </p>
         <p class="integration-missing-fields" data-integration-missing>${integration.missingFields.length
           ? `Missing: ${integration.missingFields.map((name) => {
@@ -410,12 +418,16 @@ async function adminSettings() {
       <div class="integration-setting-actions">
         <button class="button button-outline" type="button" data-action="integration-toggle" data-enabled="${integration.enabled}">
           ${integration.enabled ? 'Disable' : 'Enable'}</button>
-        ${integration.id === 'google_auth' || integration.id === 'recaptcha' ? '<button class="button button-outline" type="button" data-action="integration-test">Test Connection</button>' : ''}
-        ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test saved SMTP</button>' : ''}
+        ${['google_auth', 'recaptcha', 'admin_mfa'].includes(integration.id)
+          ? '<button class="button button-outline" type="button" data-action="integration-verify">Verify</button>' : ''}
+        ${integration.id === 'smtp' ? '<button class="button button-outline" type="button" data-action="smtp-test">Test Connection</button>' : ''}
         ${integration.id === 'google_calendar' ? '<button class="button button-outline" type="button" data-action="calendar-test">Test Connection</button>' : ''}
-        ${integration.id === 'admin_mfa' ? '<button class="button button-outline" type="button" data-action="admin-mfa-test">Self-test</button>' : ''}
       </div>
     </div>
+    ${integration.id === 'admin_mfa' ? `<div class="field integration-verification-code">
+      <label for="integration-admin-mfa-code">Current authenticator code</label>
+      <input class="input" id="integration-admin-mfa-code" data-verification-code inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    </div>` : ''}
     ${integration.id === 'admin_mfa' ? `<p class="admin-mfa-enrollment-count">${integration.enrollmentSummary?.enrolledAdmins || 0} of ${integration.enrollmentSummary?.totalAdmins || 0} administrators enrolled</p>
       <p class="admin-mfa-fixed-settings">Authenticator codes: 6 digits · 30-second period · SHA-1 (fixed)</p>` : ''}
     <details class="integration-fields-disclosure">
@@ -436,7 +448,7 @@ async function adminSettings() {
     </details>
     <div class="integration-default-actions">
       <button class="button button-outline" type="button" data-action="set-integration-default"
-        ${integration.active && integration.isCurrentValidation && !integration.usingDefault ? '' : 'disabled'}>
+        ${integration.active && integration.isCurrentVerification && !integration.usingDefault ? '' : 'disabled'}>
         Set current as default</button>
       <button class="button button-outline" type="button" data-action="restore-integration-default" ${integration.hasDefault && !integration.usingDefault ? '' : 'disabled'}>
         Restore default</button>
@@ -493,7 +505,8 @@ async function adminSystemRecords() {
     'integration.enable', 'integration.disable', 'integration.update',
     'integration.unlock', 'integration.unlock_failed', 'integration.unlock_locked',
     'integration.code_sent', 'integration.code_failed', 'integration.restore_default',
-    'integration.set_default', 'integration.validate_failed', 'integration.rate_limited', 'integration.failure',
+    'integration.set_default', 'integration.validate_failed', 'integration.verify_success',
+    'integration.verify_failed', 'integration.rate_limited', 'integration.failure',
     'calendar.event_create', 'calendar.event_update', 'calendar.event_delete', 'calendar.sync_failed',
     'admin.mfa_enroll_start', 'admin.mfa_enrolled', 'admin.mfa_verify_success',
     'admin.mfa_verify_failed', 'admin.mfa_locked', 'admin.mfa_recovery_used',

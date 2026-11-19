@@ -3,7 +3,6 @@ const path = require('node:path');
 const { createHash, randomBytes } = require('node:crypto');
 const { saveSession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
-const { IntegrationError } = require('../../src/services/integration-calls');
 
 function createAdminController({
   auth,
@@ -453,13 +452,48 @@ function createAdminController({
 
     getAdminSettings: async (req, res) => {
       const [integrations, enrollmentSummary] = await Promise.all([
-        integrationSettings.getAdminIntegrations(),
+        integrationSettings.getAdminIntegrations(req.user.id),
         adminMfa.getAdminSummary(),
       ]);
       integrations.admin_mfa.enrollmentSummary = enrollmentSummary;
       return res.json({
         integrations,
       });
+    },
+
+    postAdminSettingsVerify: async (req, res) => {
+      try {
+        const integrationId = req.params.integrationId;
+        const plan = await integrationSettings.prepareIntegrationSave({
+          [integrationId]: req.body,
+        });
+        let candidate = plan.updates.find(({ id }) => id === integrationId);
+        if (!candidate) {
+          const current = await integrationSettings.getIntegration(integrationId);
+          candidate = {
+            id: integrationId,
+            enabled: req.body?.enabled,
+            values: await integrationSettings.validateIntegrationFields(
+              integrationId,
+              req.body?.fields,
+            ),
+          };
+          if (typeof candidate.enabled !== 'boolean') candidate.enabled = current.enabled;
+        }
+        const verification = await verifyIntegrationCandidate(
+          req,
+          candidate.id,
+          candidate.enabled,
+          candidate.values,
+          {
+            integrationSettings, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
+          },
+          req.body?.proof,
+        );
+        return res.json({ verification });
+      } catch (error) {
+        return integrationSettingsError(res, error, 'Integration settings could not be verified.');
+      }
     },
 
     putAdminSettings: async (req, res) => {
@@ -475,7 +509,7 @@ function createAdminController({
           return res.json({ verificationRequired: true, ...result });
         }
         return res.json(await integrationSettings.applyIntegrationSave(
-          plan, audit, requestAuditContext(req, null),
+          plan, audit, requestAuditContext(req, null), req.user.id,
         ));
       } catch (error) {
         return integrationSettingsError(res, error, 'Integration settings could not be saved.');
@@ -499,9 +533,7 @@ function createAdminController({
           error.status = 400;
           throw error;
         }
-        await validateIntegrationSavePlan(req, plan, {
-          integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
-        });
+        await requirePlanVerifications(req, plan, integrationSettings);
         const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
         return res.json({ verificationRequired: true, ...result });
       } catch (error) {
@@ -553,11 +585,9 @@ function createAdminController({
           audit,
           changes: plan.changes,
         });
-        await validateIntegrationSavePlan(req, plan, {
-          integrationSettings, integrationSecurity, adminMfa, googleOAuth, recaptcha, googleCalendar, email, callIntegration, audit,
-        });
+        await requirePlanVerifications(req, plan, integrationSettings);
         return res.json(await integrationSettings.applyIntegrationSave(
-          plan, audit, requestAuditContext(req, null),
+          plan, audit, requestAuditContext(req, null), req.user.id,
         ));
       } catch (error) {
         return integrationSettingsError(res, error, 'Integration settings could not be saved.');
@@ -566,7 +596,7 @@ function createAdminController({
 
     postAdminSettingsDefault: async (req, res) => {
       return res.json(await integrationSettings.setIntegrationDefault(
-        req.params.integrationId, audit, requestAuditContext(req, null),
+        req.params.integrationId, audit, requestAuditContext(req, null), req.user.id,
       ));
     },
 
@@ -600,106 +630,93 @@ function createAdminController({
     },
 
     postAdminSettingsSmtpTest: async (req, res) => {
-      const smtp = await integrationSettings.getIntegration('smtp');
       try {
+        const smtp = await integrationSettings.getIntegration('smtp');
         if (!smtp.configured) {
           const error = new Error('Configure all required saved SMTP fields before testing.');
           error.status = 400;
           throw error;
         }
-        await email.testConnection(smtp.settings, requestAuditContext(req, null));
-        if (integrationSettings.recordCandidateValidation) {
-          await integrationSettings.recordCandidateValidation('smtp', smtp.settings, true, 'Validated');
-        }
-        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+        const verification = await verifyIntegrationCandidate(
+          req, 'smtp', true, smtp.settings,
+          { integrationSettings, email, callIntegration, audit },
+        );
+        return res.json({
+          verified: true,
+          verification,
+          integrations: await integrationSettings.getAdminIntegrations(req.user.id),
+        });
       } catch (error) {
-        await recordSavedValidationFailure(integrationSettings, 'smtp', smtp.settings, error);
-        const safeError = new Error('SMTP connection could not be verified. Check saved SMTP settings and credentials.');
-        safeError.status = error.status || 400;
-        throw safeError;
+        return integrationSettingsError(res, error, 'SMTP configuration could not be verified.');
       }
     },
 
     postAdminSettingsGoogleCalendarTest: async (req, res) => {
-      const current = await integrationSettings.getIntegration('google_calendar');
       try {
-        await googleCalendar.testConnection(requestAuditContext(req, null), current.settings);
-        if (integrationSettings.recordCandidateValidation) {
-          await integrationSettings.recordCandidateValidation('google_calendar', current.settings, true, 'Validated');
-        }
-        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+        const current = await integrationSettings.getIntegration('google_calendar');
+        const verification = await verifyIntegrationCandidate(
+          req, 'google_calendar', true, current.settings,
+          { integrationSettings, googleCalendar, callIntegration, audit },
+        );
+        return res.json({
+          verified: true,
+          verification,
+          integrations: await integrationSettings.getAdminIntegrations(req.user.id),
+        });
       } catch (error) {
-        await recordSavedValidationFailure(integrationSettings, 'google_calendar', current.settings, error);
-        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
-          ? 'Google Calendar credentials were rejected. Check the service-account email and private key.'
-          : error instanceof IntegrationError
-            ? error.message
-            : error.status === 400
-              ? error.message
-              : 'Google Calendar connection could not be verified. Check the saved calendar and service-account settings.';
-        const safeError = new Error(safeMessage);
-        safeError.status = error.status || 503;
-        throw safeError;
+        return integrationSettingsError(res, error, 'Google Calendar could not be verified.');
       }
     },
 
     postAdminSettingsGoogleAuthTest: async (req, res) => {
-      const current = await integrationSettings.getIntegration('google_auth');
       try {
-        await googleOAuth.testConnection(requestAuditContext(req, null), current.settings);
-        if (integrationSettings.recordCandidateValidation) {
-          await integrationSettings.recordCandidateValidation('google_auth', current.settings, true, 'Validated');
-        }
-        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+        const current = await integrationSettings.getIntegration('google_auth');
+        const verification = await verifyIntegrationCandidate(
+          req, 'google_auth', true, current.settings,
+          { integrationSettings, googleOAuth, callIntegration, audit },
+        );
+        return res.json({
+          verified: true,
+          verification,
+          integrations: await integrationSettings.getAdminIntegrations(req.user.id),
+        });
       } catch (error) {
-        await recordSavedValidationFailure(integrationSettings, 'google_auth', current.settings, error);
-        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
-          ? 'Google sign-in credentials were rejected. Check the client ID, client secret, and callback URL.'
-          : error instanceof IntegrationError
-            ? error.message
-            : error.status === 400
-              ? error.message
-              : 'Google sign-in connection could not be verified. Check the saved credentials and callback URL.';
-        const safeError = new Error(safeMessage);
-        safeError.status = error.status || 503;
-        throw safeError;
+        return integrationSettingsError(res, error, 'Google sign-in could not be verified.');
       }
     },
 
     postAdminSettingsRecaptchaTest: async (req, res) => {
-      const current = await integrationSettings.getIntegration('recaptcha');
       try {
-        await recaptcha.testConnection(requestAuditContext(req, null), current.settings);
-        if (integrationSettings.recordCandidateValidation) {
-          await integrationSettings.recordCandidateValidation('recaptcha', current.settings, true, 'Validated');
-        }
-        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+        const current = await integrationSettings.getIntegration('recaptcha');
+        const verification = await verifyIntegrationCandidate(
+          req, 'recaptcha', true, current.settings,
+          { integrationSettings, recaptcha, callIntegration, audit },
+        );
+        return res.json({
+          verified: true,
+          verification,
+          integrations: await integrationSettings.getAdminIntegrations(req.user.id),
+        });
       } catch (error) {
-        await recordSavedValidationFailure(integrationSettings, 'recaptcha', current.settings, error);
-        const safeMessage = error instanceof IntegrationError && error.code === 'invalid_credentials'
-          ? 'reCAPTCHA secret key was rejected. Check the saved secret key.'
-          : error instanceof IntegrationError
-            ? error.message
-            : error.status === 400
-              ? error.message
-              : 'reCAPTCHA connection could not be verified. Check the saved secret key and provider availability.';
-        const safeError = new Error(safeMessage);
-        safeError.status = error.status || 503;
-        throw safeError;
+        return integrationSettingsError(res, error, 'reCAPTCHA could not be verified.');
       }
     },
 
-    postAdminSettingsAdminMfaTest: async (_req, res) => {
-      const current = await integrationSettings.getIntegration('admin_mfa');
+    postAdminSettingsAdminMfaTest: async (req, res) => {
       try {
-        await adminMfa.selfTest(current.settings);
-        if (integrationSettings.recordCandidateValidation) {
-          await integrationSettings.recordCandidateValidation('admin_mfa', current.settings, true, 'Validated');
-        }
-        return res.json({ verified: true, integrations: await integrationSettings.getAdminIntegrations() });
+        const current = await integrationSettings.getIntegration('admin_mfa');
+        const verification = await verifyIntegrationCandidate(
+          req, 'admin_mfa', true, current.settings,
+          { integrationSettings, adminMfa, callIntegration, audit },
+          { code: req.body?.code },
+        );
+        return res.json({
+          verified: true,
+          verification,
+          integrations: await integrationSettings.getAdminIntegrations(req.user.id),
+        });
       } catch (error) {
-        await recordSavedValidationFailure(integrationSettings, 'admin_mfa', current.settings, error);
-        throw error;
+        return integrationSettingsError(res, error, 'Admin MFA could not be verified.');
       }
     },
 
@@ -805,90 +822,149 @@ async function restoreIntegrationDefaultForRequest(req, integrationId, integrati
     }
   }
   const result = await integrationSettings.restoreIntegrationDefault(
-    integrationId, audit, requestAuditContext(req, null),
+    integrationId, audit, requestAuditContext(req, null), req.user.id,
   );
   return { ...result, noticeSent, warning };
 }
 
-async function recordSavedValidationFailure(integrationSettings, integrationId, values, error) {
-  if (!integrationSettings.recordCandidateValidation) return;
-  await integrationSettings.recordCandidateValidation(
-    integrationId, values, false, safeValidationReason(error),
-  );
+async function validateIntegrationSavePlan(req, plan, services) {
+  const verified = [];
+  for (const update of plan.updates || []) {
+    const needsVerification = update.changedFields.length > 0
+      || (update.enabled && update.enabledChanged);
+    if (!needsVerification) continue;
+    if (['smtp', 'google_calendar'].includes(update.id)) {
+      await verifyIntegrationCandidate(
+        req,
+        update.id,
+        update.enabled,
+        update.values,
+        services,
+      );
+    } else {
+      await services.integrationSettings.requireCurrentVerification(
+        req.user.id, update.id, update.enabled, update.values,
+      );
+    }
+    verified.push(update.id);
+  }
+  plan.verifiedIntegrationIds = verified;
 }
 
-async function validateIntegrationSavePlan(req, plan, services) {
-  const {
-    integrationSettings, adminMfa, googleOAuth, recaptcha, googleCalendar, email,
-    callIntegration, audit,
-  } = services;
-  const failures = [];
-  const validated = [];
-  const context = requestAuditContext(req, null);
-  let responseStatus = 400;
-
+async function requirePlanVerifications(req, plan, integrationSettings) {
+  const verified = [];
   for (const update of plan.updates || []) {
-    const shouldValidate = update.enabled
-      && (update.credentialFields.length || update.enabledChanged);
-    if (!shouldValidate) continue;
-
-    try {
-      callIntegration?.checkValidationCooldown?.(update.id);
-      if (update.id === 'smtp') {
-        await email.testConnection(update.values, context, { candidateValidation: true });
-      } else if (update.id === 'google_calendar') {
-        await googleCalendar.testConnection(context, update.values, { candidateValidation: true });
-      } else if (update.id === 'google_auth') {
-        await googleOAuth.testConnection(context, update.values, { candidateValidation: true });
-      } else if (update.id === 'recaptcha') {
-        await recaptcha.testConnection(context, update.values, { candidateValidation: true });
-      } else if (update.id === 'admin_mfa') {
-        await adminMfa.selfTest(update.values);
-      }
-      if (integrationSettings.recordCandidateValidation) {
-        await integrationSettings.recordCandidateValidation(
-          update.id, update.values, true, 'Validated',
-        );
-      }
-      callIntegration?.clearValidationFailures?.(update.id);
-      validated.push(update.id);
-    } catch (error) {
-      if (error?.code !== 'rate_limited'
-        && error?.code !== 'validation_cooldown'
-        && error?.name !== 'IntegrationRateLimitError') {
-        callIntegration?.recordValidationFailure?.(update.id);
-      }
-      if (error?.status === 429) responseStatus = 429;
-      else if (error?.status >= 500 && responseStatus !== 429) responseStatus = 503;
-      const reason = safeValidationReason(error);
-      if (integrationSettings.recordCandidateValidation) {
-        await integrationSettings.recordCandidateValidation(update.id, update.values, false, reason);
-      }
-      try {
-        await audit.logAction({
-          ...context,
-          action: 'integration.validate_failed',
-          target_type: 'integration',
-          target_id: update.id,
-          new_value: {},
-          result: 'failed',
-        });
-      } catch {}
-      failures.push({
-        integration: update.id,
-        label: integrationSettings.getIntegrationLabel(update.id),
-        reason,
-      });
-    }
+    const needsVerification = update.changedFields.length > 0
+      || (update.enabled && update.enabledChanged);
+    if (!needsVerification) continue;
+    await integrationSettings.requireCurrentVerification(
+      req.user.id, update.id, update.enabled, update.values,
+    );
+    verified.push(update.id);
   }
+  plan.verifiedIntegrationIds = verified;
+}
 
-  if (failures.length) {
-    const error = new Error('One or more integration configurations could not be verified.');
-    error.status = responseStatus;
-    error.failures = failures;
+async function verifyIntegrationCandidate(req, integrationId, enabled, values, services, proof) {
+  const { integrationSettings, callIntegration, audit } = services;
+  const proofTypes = {
+    google_auth: 'real_sign_in',
+    recaptcha: 'real_challenge',
+    smtp: 'test_email_sent',
+    google_calendar: 'test_event_created_and_removed',
+    admin_mfa: 'authenticator_code_accepted',
+  };
+  const proofType = proofTypes[integrationId];
+  if (!proofType) {
+    const error = new Error('Unknown integration verification.');
+    error.status = 400;
     throw error;
   }
-  plan.validatedIntegrationIds = validated;
+
+  callIntegration?.checkValidationCooldown?.(integrationId);
+  await integrationSettings.recordVerification({
+    adminId: req.user.id,
+    integrationId,
+    enabled,
+    values,
+    proofType: 'pending',
+    result: false,
+  });
+
+  try {
+    let verification;
+    if (integrationId === 'smtp') {
+      verification = await services.email.verifyCandidate?.(values, requestAuditContext(req, null), proof);
+    } else if (integrationId === 'google_calendar') {
+      verification = await services.googleCalendar.verifyCandidate?.(
+        requestAuditContext(req, null), values, proof,
+      );
+    } else if (integrationId === 'google_auth') {
+      verification = await services.googleOAuth.verifyCandidate?.(
+        requestAuditContext(req, null), values, proof,
+      );
+    } else if (integrationId === 'recaptcha') {
+      verification = await services.recaptcha.verifyCandidate?.(
+        requestAuditContext(req, null), values, proof,
+      );
+    } else if (integrationId === 'admin_mfa') {
+      verification = await services.adminMfa.verifyCandidate?.({
+        adminId: req.user.id,
+        values,
+        proof,
+      });
+    }
+    if (!verification || verification.verified !== true || verification.proofType !== proofType) {
+      const error = new Error('Integration verifier did not return an explicit proof result.');
+      error.status = 503;
+      error.code = 'verification_unavailable';
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code !== 'rate_limited'
+      && error?.code !== 'validation_cooldown'
+      && error?.name !== 'IntegrationRateLimitError') {
+      await callIntegration?.recordValidationFailure?.(integrationId);
+    }
+    const reason = safeValidationReason(error);
+    await integrationSettings.recordVerification({
+      adminId: req.user.id,
+      integrationId,
+      enabled,
+      values,
+      proofType,
+      result: false,
+    });
+    await audit.logAction({
+      ...requestAuditContext(req, 'integration.verify_failed'),
+      target_type: 'integration',
+      target_id: integrationId,
+      new_value: { proof_type: proofType },
+      result: 'failed',
+    });
+    const safeError = new Error(reason);
+    safeError.status = error?.status === 429 ? 429
+      : error?.status === 400 ? 400 : 503;
+    safeError.code = error?.code;
+    throw safeError;
+  }
+
+  await audit.logAction({
+    ...requestAuditContext(req, 'integration.verify_success'),
+    target_type: 'integration',
+    target_id: integrationId,
+    new_value: { proof_type: proofType },
+  });
+  const record = await integrationSettings.recordVerification({
+    adminId: req.user.id,
+    integrationId,
+    enabled,
+    values,
+    proofType,
+    result: true,
+  });
+  callIntegration?.clearValidationFailures?.(integrationId);
+  return record;
 }
 
 function safeValidationReason(error) {
@@ -901,6 +977,7 @@ function safeValidationReason(error) {
   if (error?.code === 'timeout') return 'Connection timed out';
   if (error?.code === 'network') return 'Could not verify, try again';
   if (error?.code === 'provider_error') return 'Could not verify, try again';
+  if (error?.code === 'verification_unavailable') return 'Verification is not available yet.';
   if (error?.status === 429) return 'Please try again shortly';
   if (error?.status === 503) return 'Could not verify, try again';
   return 'Could not verify, try again';

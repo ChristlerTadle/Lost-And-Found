@@ -3,6 +3,7 @@ const config = require('../config');
 const { integrations } = require('../config/integrations');
 
 const MASK = '••••••••';
+const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 
 function parseEncryptionKey(value) {
   if (typeof value !== 'string' || !value) {
@@ -18,6 +19,7 @@ function parseEncryptionKey(value) {
 function createIntegrationSettings(database, { encryptionKey, env = process.env } = {}) {
   const key = parseEncryptionKey(encryptionKey);
   const settings = database.collection('integration_settings');
+  const verifications = database.collection('integration_verifications');
 
   function encryptSecret(value) {
     if (typeof value !== 'string' || !value) throw new Error('A non-empty secret is required.');
@@ -74,11 +76,14 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return definition.label;
   }
 
-  async function getAdminIntegrations() {
+  async function getAdminIntegrations(adminId) {
     const result = {};
     for (const [id, definition] of Object.entries(integrations)) {
       const integration = await getIntegration(id);
       const document = await settings.findOne({ _id: id });
+      const verification = adminId
+        ? await getCurrentVerification(adminId, id, integration.enabled, integration.settings)
+        : null;
       const defaultValues = await decryptSnapshot(id, document?.defaults);
       const hasDefault = Boolean(document?.defaults && typeof document.defaults === 'object');
       const usingDefault = hasDefault
@@ -112,6 +117,8 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
           document?.last_validation?.passed
           && document.last_validation.hash === configHash(id, integration.settings, key),
         ),
+        verification,
+        isCurrentVerification: Boolean(verification),
         fields: definition.fields.map((field) => {
           const value = integration.settings[field.name];
           return {
@@ -353,14 +360,14 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return { updates, changed, credentialChanges, changes, payloadHash };
   }
 
-  async function applyIntegrationSave(plan, audit, auditContext) {
+  async function applyIntegrationSave(plan, audit, auditContext, adminId) {
     const { updates, changed } = plan;
-    if (!updates.length) return { integrations: await getAdminIntegrations(), changed: [] };
+    if (!updates.length) return { integrations: await getAdminIntegrations(adminId), changed: [] };
 
-    const validatedIds = new Set(plan.validatedIntegrationIds || []);
+    const validatedIds = new Set(plan.verifiedIntegrationIds || plan.validatedIntegrationIds || []);
     const defaultSnapshots = new Map();
     for (const { id, values } of updates) {
-      if (validatedIds.has(id) && integrations[id].validationType === 'full') {
+      if (validatedIds.has(id)) {
         defaultSnapshots.set(id, await encryptSnapshot(id, values));
       }
     }
@@ -433,7 +440,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         throw error;
       }
     });
-    return { integrations: await getAdminIntegrations(), changed };
+    return { integrations: await getAdminIntegrations(adminId), changed };
   }
 
   async function getDefaultRestorePreview(integrationId) {
@@ -471,21 +478,68 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     );
   }
 
+  async function recordVerification({
+    adminId, integrationId, enabled, values, proofType, result, at = new Date(),
+  }) {
+    if (!adminId || !integrations[integrationId]) throw validationError('Unknown integration verification.');
+    const createdAt = at instanceof Date ? at : new Date(at);
+    if (Number.isNaN(createdAt.getTime())) throw validationError('Invalid verification time.');
+    const record = {
+      _id: `verification-${integrationId}`,
+      adminId: String(adminId),
+      integrationId,
+      hash: verificationHash(integrationId, enabled, values, key),
+      proofType: String(proofType || 'pending').slice(0, 64),
+      result: Boolean(result),
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + VERIFICATION_TTL_MS),
+    };
+    await verifications.updateOne(
+      { _id: record._id },
+      { $set: record },
+      { upsert: true },
+    );
+    return verificationSummary(record);
+  }
+
+  async function getCurrentVerification(adminId, integrationId, enabled, values, now = new Date()) {
+    if (!integrations[integrationId]) throw validationError('Unknown integration.');
+    const record = await verifications.findOne({ _id: `verification-${integrationId}` });
+    if (!record || record.result !== true
+      || (adminId && record.adminId !== String(adminId))
+      || record.hash !== verificationHash(integrationId, enabled, values, key)
+      || !(new Date(record.expiresAt).getTime() > new Date(now).getTime())) return null;
+    return verificationSummary(record);
+  }
+
+  async function requireCurrentVerification(adminId, integrationId, enabled, values) {
+    const verification = await getCurrentVerification(adminId, integrationId, enabled, values);
+    if (!verification) {
+      const error = new Error('Verify this integration again before saving these settings.');
+      error.status = 400;
+      throw error;
+    }
+    return verification;
+  }
+
+  function getVerificationHash(integrationId, enabled, values) {
+    return verificationHash(integrationId, enabled, values, key);
+  }
+
   function getConfigHash(integrationId, values) {
     return configHash(integrationId, values, key);
   }
 
-  async function setIntegrationDefault(integrationId, audit, auditContext) {
+  async function setIntegrationDefault(integrationId, audit, auditContext, adminId) {
     const current = await getIntegration(integrationId);
     if (!current.active) {
       const error = new Error('Enable and configure the active integration before setting it as the default.');
       error.status = 400;
       throw error;
     }
-    const document = await settings.findOne({ _id: integrationId });
-    const hash = configHash(integrationId, current.settings, key);
-    if (!document?.last_validation?.passed || document.last_validation.hash !== hash) {
-      const error = new Error('The active configuration has not passed validation for exactly this configuration.');
+    const verification = await getCurrentVerification(null, integrationId, true, current.settings);
+    if (!verification) {
+      const error = new Error('The active configuration has no current verification for exactly these settings.');
       error.status = 400;
       throw error;
     }
@@ -502,13 +556,13 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       { $set: { defaults: snapshot, updated_at: new Date().toISOString() } },
       { upsert: true },
     ));
-    return { integrations: await getAdminIntegrations() };
+    return { integrations: await getAdminIntegrations(adminId) };
   }
 
-  async function restoreIntegrationDefault(integrationId, audit, auditContext) {
+  async function restoreIntegrationDefault(integrationId, audit, auditContext, adminId) {
     const preview = await getDefaultRestorePreview(integrationId);
     if (!preview.changedFields.length) {
-      return { integrations: await getAdminIntegrations(), changed: [], restored: false };
+      return { integrations: await getAdminIntegrations(adminId), changed: [], restored: false };
     }
     const persist = await encryptSnapshot(integrationId, preview.values);
     const definition = integrations[integrationId];
@@ -526,7 +580,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       { upsert: true },
     ));
     return {
-      integrations: await getAdminIntegrations(),
+      integrations: await getAdminIntegrations(adminId),
       changed: preview.changedFields,
       restored: true,
     };
@@ -631,6 +685,10 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     validateIntegrationFields,
     recordCandidateValidation,
     getConfigHash,
+    recordVerification,
+    getCurrentVerification,
+    requireCurrentVerification,
+    getVerificationHash,
     migrateEnvironmentValues,
     validateStoredSecrets,
   };
@@ -786,6 +844,25 @@ function configHash(integrationId, values, key) {
   const canonical = {};
   for (const field of definition.fields) canonical[field.name] = normalizeFieldValue(field, values?.[field.name]);
   return createHmac('sha256', key).update(JSON.stringify({ integrationId, values: canonical })).digest('hex');
+}
+
+function verificationHash(integrationId, enabled, values, key) {
+  const definition = integrations[integrationId];
+  if (!definition) return '';
+  const canonical = {};
+  for (const field of definition.fields) canonical[field.name] = normalizeFieldValue(field, values?.[field.name]);
+  return createHmac('sha256', key)
+    .update(JSON.stringify({ integrationId, enabled: Boolean(enabled), values: canonical }))
+    .digest('hex');
+}
+
+function verificationSummary(record) {
+  return {
+    verified: record.result === true,
+    proofType: record.proofType,
+    verifiedAt: record.createdAt,
+    expiresAt: record.expiresAt,
+  };
 }
 
 function validationError(message) {

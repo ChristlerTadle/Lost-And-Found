@@ -253,6 +253,59 @@ test('admin view masks every secret and never returns its full value', async () 
   assert.equal(view.smtp.status, 'Enabled');
 });
 
+test('verification records are admin-bound, value-bound, expiring, and contain no settings', async () => {
+  const state = createDatabase();
+  const integrationSettings = createIntegrationSettings(state.database, { encryptionKey: KEY, env: ENV });
+  const { settings } = await integrationSettings.getIntegration('google_auth');
+  const now = new Date();
+  const record = await integrationSettings.recordVerification({
+    adminId: 'admin-1',
+    integrationId: 'google_auth',
+    enabled: true,
+    values: settings,
+    proofType: 'real_sign_in',
+    result: true,
+    at: now,
+  });
+
+  assert.equal(record.verified, true);
+  assert.equal(record.proofType, 'real_sign_in');
+  assert.equal(
+    (await integrationSettings.getCurrentVerification('admin-1', 'google_auth', true, settings)).verified,
+    true,
+  );
+  assert.equal(await integrationSettings.getCurrentVerification('admin-2', 'google_auth', true, settings), null);
+  assert.equal(await integrationSettings.getCurrentVerification(
+    'admin-1', 'google_auth', false, settings,
+  ), null);
+  assert.equal(await integrationSettings.getCurrentVerification(
+    'admin-1',
+    'google_auth',
+    true,
+    { ...settings, client_secret: 'changed-secret' },
+  ), null);
+  assert.equal(await integrationSettings.getCurrentVerification(
+    'admin-1',
+    'google_auth',
+    true,
+    settings,
+    new Date(now.getTime() + 10 * 60 * 1000),
+  ), null);
+
+  const stored = JSON.stringify(state.documents.get('verification-google_auth'));
+  assert.equal(stored.includes(ENV.GOOGLE_CLIENT_SECRET), false);
+  assert.match(state.documents.get('verification-google_auth').hash, /^[a-f0-9]{64}$/);
+  await integrationSettings.recordVerification({
+    adminId: 'admin-1',
+    integrationId: 'google_auth',
+    enabled: true,
+    values: settings,
+    proofType: 'real_sign_in',
+    result: false,
+  });
+  assert.equal(await integrationSettings.getCurrentVerification('admin-1', 'google_auth', true, settings), null);
+});
+
 test('all submitted cards validate before writes and errors identify fields', async () => {
   const state = createDatabase();
   const integrations = createIntegrationSettings(state.database, { encryptionKey: KEY, env: ENV });

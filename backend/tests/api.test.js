@@ -181,12 +181,14 @@ const services = {
   },
   email: {
     async testConnection() { return true; },
+    async verifyCandidate() { return { verified: true, proofType: 'test_email_sent' }; },
   },
   googleOAuth: {
     async createAuthorizationRequest() {
       return { url: 'https://accounts.google.com/o/oauth2/auth?state=test', state: 'test' };
     },
     async testConnection() { return true; },
+    async verifyCandidate() { return { verified: true, proofType: 'real_sign_in' }; },
   },
   recaptcha: {
     configured: true,
@@ -204,6 +206,7 @@ const services = {
       }
     },
     async testConnection() { return true; },
+    async verifyCandidate() { return { verified: true, proofType: 'real_challenge' }; },
   },
   integrationSettings: {
     async getIntegration(id) {
@@ -253,17 +256,36 @@ const services = {
     async prepareIntegrationSave(input) {
       const card = input.google_auth;
       const credentialChanged = card?.fields?.client_id === 'new-client-id';
+      const enabledChanged = card && card.enabled !== googleEnabled;
       return {
-        updates: credentialChanged || card?.enabled === false ? [{ id: 'google_auth' }] : [],
+        updates: credentialChanged || enabledChanged ? [{
+          id: 'google_auth',
+          enabled: card.enabled,
+          changedFields: credentialChanged ? ['client_id'] : [],
+          credentialFields: credentialChanged ? ['client_id'] : [],
+          enabledChanged,
+          values: { client_id: card.fields?.client_id || 'saved-client-id' },
+        }] : [],
         changed: credentialChanged ? ['google_auth'] : [],
         credentialChanges: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
         changes: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
         payloadHash: credentialChanged ? 'credential-payload-hash' : 'payload-hash',
       };
     },
+    async requireCurrentVerification() {
+      return { verified: true, proofType: 'real_sign_in' };
+    },
     async applyIntegrationSave(plan) {
       integrationSaveCount += 1;
       return { integrations: await this.getAdminIntegrations(), changed: plan.changed };
+    },
+    async recordVerification(input) {
+      return {
+        verified: Boolean(input.result),
+        proofType: input.proofType,
+        verifiedAt: new Date(),
+        expiresAt: new Date(Date.now() + 600_000),
+      };
     },
     getIntegrationLabel(id) { return id; },
     async setIntegrationDefault() { return { integrations: {} }; },
@@ -1144,6 +1166,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
       ['/admin/settings/access', 'GET'],
       ['/admin/settings', 'GET'],
       ['/admin/settings', 'PUT'],
+      ['/admin/settings/google_auth/verify', 'POST'],
       ['/admin/settings/unlock', 'POST'],
       ['/admin/settings/lock', 'POST'],
       ['/admin/settings/code/verify', 'POST'],
@@ -1184,6 +1207,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   assert.equal(lockedSettings.status, 403);
   for (const [path, method] of [
     ['/admin/settings', 'PUT'],
+    ['/admin/settings/google_auth/verify', 'POST'],
     ['/admin/settings/code/verify', 'POST'],
     ['/admin/settings/code/resend', 'POST'],
     ['/admin/settings/code/cancel', 'POST'],
