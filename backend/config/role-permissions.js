@@ -160,6 +160,7 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'POST', path: '/admin/settings/code/verify', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/code/resend', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/code/cancel', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'POST', path: '/admin/settings/verification-email/test', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/:integrationId/verify', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/:integrationId/default', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/:integrationId/restore-default', roles: ['admin'], permission: 'manage_integrations' },

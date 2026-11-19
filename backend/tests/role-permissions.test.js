@@ -165,6 +165,9 @@ test('route permission map has unique method/path entries and records both dynam
   assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
     method === 'POST' && path === '/admin/settings/:integrationId/verify'
     && permission === 'manage_integrations'));
+  assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
+    method === 'POST' && path === '/admin/settings/verification-email/test'
+    && permission === 'manage_integrations'));
 });
 
 test('admin account status actions require disable_user while edits require edit_user', () => {

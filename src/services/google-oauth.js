@@ -158,6 +158,7 @@ function createGoogleOAuth(
         adminId: proof.adminId,
         candidateHash: proof.candidateHash,
         enabled: proof.enabled,
+        popup: proof.popup === true,
         settings: { ...settings },
         expiresAt,
         codeVerifier,
@@ -196,6 +197,7 @@ function createGoogleOAuth(
         adminId: pending.adminId,
         candidateHash: pending.candidateHash,
         enabled: pending.enabled,
+        popup: pending.popup,
         settings: pending.settings,
         status: 'failed',
       };

@@ -12,6 +12,15 @@ let integrationCodeResendTimer;
 let pendingAdminRoleChange = null;
 let roleChangeCodeResendTimer;
 const recaptchaChallengeCancels = new WeakMap();
+let pendingGoogleSavePopup = null;
+
+window.addEventListener('message', (event) => {
+  const pending = pendingGoogleSavePopup;
+  if (!pending || event.origin !== window.location.origin || event.source !== pending.popup
+    || event.data?.type !== 'google-integration-verification') return;
+  const statuses = ['success', 'access_denied', 'redirect_mismatch', 'expired', 'failed'];
+  if (statuses.includes(event.data.status)) pending.finish(event.data.status);
+});
 
 document.addEventListener('shared-rate-limit-ended', (event) => {
   const form = event.detail?.closest?.('form[data-form="integration-settings"]');
@@ -711,12 +720,18 @@ function handleIntegrationEdit(event) {
       const enabled = card.querySelector('[data-action="integration-toggle"]').dataset.enabled === 'true';
       const saved = JSON.parse(card.dataset.savedState);
       const fieldsChanged = JSON.stringify(integrationCardPayload(card).fields) !== JSON.stringify(saved.fields);
-      message.textContent = ['google_auth', 'recaptcha', 'admin_mfa'].includes(card.dataset.integration)
-        && (enabled || fieldsChanged)
-        ? 'Changed settings need verification before saving.'
-        : enabled || fieldsChanged
-          ? 'Settings will be verified when saved.'
-          : 'Disabling does not require verification.';
+      const needsVerification = enabled || fieldsChanged;
+      if (card.dataset.integration === 'recaptcha' && needsVerification) {
+        message.textContent = 'Save changes to verify the candidate keys and complete a challenge.';
+      } else if (card.dataset.integration === 'google_auth' && needsVerification) {
+        message.textContent = 'Save changes to verify by signing in with Google.';
+      } else if (card.dataset.integration === 'admin_mfa' && needsVerification) {
+        message.textContent = 'Enter your current authenticator code, then click Save Changes to verify.';
+      } else if (needsVerification) {
+        message.textContent = 'Settings will be verified when saved.';
+      } else {
+        message.textContent = 'Disabling does not require verification.';
+      }
     }
   }
   if (pendingIntegrationCard && card === pendingIntegrationCard) {
@@ -746,16 +761,12 @@ function updateIntegrationSaveState(form) {
     const payload = integrationCardPayload(card);
     const payloadText = JSON.stringify(payload);
     const changed = payloadText !== card.dataset.savedState;
-    const savedPayload = card.dataset.savedState ? JSON.parse(card.dataset.savedState) : null;
-    const fieldsChanged = savedPayload
-      && JSON.stringify(payload.fields) !== JSON.stringify(savedPayload.fields);
-    const requiresInteractiveVerification = ['google_auth', 'recaptcha', 'admin_mfa']
-      .includes(card.dataset.integration)
-      && (payload.enabled || fieldsChanged);
     const save = card.querySelector('[data-action="save-integration"]');
+    const verify = card.querySelector('[data-action="integration-verify"]');
     if (save) {
-      save.disabled = changed && requiresInteractiveVerification
-        && card.dataset.verifiedPayload !== payloadText;
+      save.disabled = card.dataset.saveInProgress === 'true'
+        || isRateLimited(save)
+        || isRateLimited(verify);
     }
     card.querySelector('.integration-card-actions').hidden = !changed;
     const setDefault = card.querySelector('[data-action="set-integration-default"]');
@@ -1133,22 +1144,122 @@ function toggleIntegration(event) {
   button.textContent = wasEnabled ? 'Enable' : 'Disable';
   card.dataset.verifiedPayload = '';
   card.dataset.currentVerification = 'false';
-  card.querySelector('[data-integration-validation]').textContent = wasEnabled
-    ? 'Disabling does not require verification.'
-    : 'Changed settings need verification before saving.';
+  let validationMessage = 'Changed settings need verification before saving.';
+  if (wasEnabled) validationMessage = 'Disabling does not require verification.';
+  else if (integrationId === 'recaptcha') {
+    validationMessage = 'Save changes to verify the candidate keys and complete a challenge.';
+  } else if (integrationId === 'google_auth') {
+    validationMessage = 'Save changes to verify by signing in with Google.';
+  } else if (integrationId === 'admin_mfa') {
+    validationMessage = 'Enter your current authenticator code, then click Save Changes to verify.';
+  }
+  card.querySelector('[data-integration-validation]').textContent = validationMessage;
   updateIntegrationSaveState(button.closest('form'));
+}
+
+function waitForGoogleOAuthPopup(popup) {
+  let resolveResult;
+  let timeoutId;
+  let closeCheckId;
+  let settled = false;
+  const promise = new Promise((resolve) => {
+    resolveResult = resolve;
+  });
+  const waiter = {
+    popup,
+    finish(status) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      clearInterval(closeCheckId);
+      if (pendingGoogleSavePopup === waiter) pendingGoogleSavePopup = null;
+      resolveResult(status);
+    },
+  };
+  pendingGoogleSavePopup = waiter;
+  timeoutId = setTimeout(() => waiter.finish('expired'), 10 * 60 * 1000);
+  closeCheckId = setInterval(() => {
+    if (popup.closed) waiter.finish('closed');
+  }, 500);
+  return {
+    promise,
+    cancel: () => waiter.finish('cancelled'),
+  };
 }
 
 async function saveIntegrationSettings(event) {
   const button = event.currentTarget;
   const card = button.closest('[data-integration]');
   const form = button.closest('form');
-  const payload = { [card.dataset.integration]: integrationCardPayload(card) };
+  const integrationId = card.dataset.integration;
+  const candidate = integrationCardPayload(card);
+  const payload = { [integrationId]: candidate };
+  let googlePopup = null;
+  let googlePopupWaiter = null;
+  card.dataset.saveInProgress = 'true';
   clearIntegrationErrors(card);
   button.disabled = true;
   card.querySelector('[data-action="cancel-integration"]').disabled = true;
   card.querySelector('[data-integration-validation]').textContent = 'Validating...';
   try {
+    if (['google_auth', 'recaptcha', 'admin_mfa'].includes(integrationId)) {
+      const savedPayload = JSON.parse(card.dataset.savedState);
+      const fieldsChanged = JSON.stringify(candidate.fields) !== JSON.stringify(savedPayload.fields);
+      const requiresVerification = (candidate.enabled || fieldsChanged)
+        && card.dataset.verifiedPayload !== JSON.stringify(candidate);
+      if (requiresVerification) {
+        if (integrationId === 'google_auth') {
+          if (pendingGoogleSavePopup) {
+            throw new Error('Finish the current Google sign-in verification before saving another integration.');
+          }
+          googlePopup = window.open('about:blank', '_blank', 'popup,width=600,height=720');
+          if (!googlePopup) {
+            throw new Error('Allow popups for this site to verify Google sign-in settings from Save Changes.');
+          }
+          googlePopupWaiter = waitForGoogleOAuthPopup(googlePopup);
+        }
+        const verifyButton = card.querySelector('[data-action="integration-verify"]');
+        const verificationResult = await verifyIntegrationCard({
+          currentTarget: verifyButton,
+          autoSave: true,
+          popup: googlePopup,
+        });
+        if (integrationId === 'google_auth' && verificationResult === 'pending') {
+          const status = await googlePopupWaiter.promise;
+          if (status !== 'success') {
+            const messages = {
+              access_denied: 'Google sign-in verification was cancelled.',
+              redirect_mismatch: 'The Google callback URL does not match the candidate settings.',
+              expired: 'Google sign-in verification expired. Save again to retry.',
+              closed: 'The Google sign-in window was closed before verification finished.',
+              failed: 'Google sign-in verification failed. Check the candidate settings and try again.',
+            };
+            showNotice(messages[status] || messages.failed, true);
+            return;
+          }
+          card.dataset.verifiedPayload = JSON.stringify(candidate);
+          card.dataset.currentVerification = 'true';
+          card.dataset.verificationProof = 'real_sign_in';
+          card.dataset.verificationLabel = verificationProofLabel('real_sign_in');
+          card.querySelector('[data-integration-validation]').textContent =
+            'Google sign-in verified. Continuing to save settings...';
+        } else {
+          googlePopupWaiter?.cancel();
+          if (googlePopup && !googlePopup.closed) googlePopup.close();
+          if (!verificationResult) return;
+        }
+        if (JSON.stringify(integrationCardPayload(card)) !== JSON.stringify(candidate)) {
+          card.dataset.verifiedPayload = '';
+          card.dataset.currentVerification = 'false';
+          card.querySelector('[data-integration-validation]').textContent =
+            'Settings changed during verification. Save again to verify the current settings.';
+          showNotice('Settings changed during verification. Save again to verify the current settings.', true);
+          return;
+        }
+        button.disabled = true;
+        card.querySelector('[data-action="cancel-integration"]').disabled = true;
+      }
+    }
     const result = await request('/admin/settings', {
       method: 'PUT',
       headers: { 'X-CSRF-Token': form.closest('.admin-settings').dataset.csrfToken },
@@ -1162,7 +1273,12 @@ async function saveIntegrationSettings(event) {
     }
     applySavedIntegration(card, result.integrations[card.dataset.integration]);
     if (card.dataset.integration === 'admin_mfa') await refreshAdminMfaGate();
-    showNotice(`${result.integrations[card.dataset.integration].label} settings saved.`);
+    const integrationLabel = result.integrations[card.dataset.integration].label;
+    if (Array.isArray(result.changed) && !result.changed.includes(integrationId)) {
+      showNotice(`${integrationLabel} already matches the saved settings. No changes were made, so no email code was needed.`);
+    } else {
+      showNotice(`${integrationLabel} settings saved.`);
+    }
   } catch (error) {
     if (showIntegrationRateLimit(error, button)) return;
     if (error.message.includes('Verify this integration again')) {
@@ -1178,6 +1294,9 @@ async function saveIntegrationSettings(event) {
     }
     showNotice(error.message, true);
   } finally {
+    card.dataset.saveInProgress = 'false';
+    googlePopupWaiter?.cancel();
+    if (googlePopup && !googlePopup.closed) googlePopup.close();
     if (!button.dataset.rateLimitUntil) button.disabled = false;
     card.querySelector('[data-action="cancel-integration"]').disabled = false;
     updateIntegrationSaveState(form);
@@ -1287,6 +1406,8 @@ async function verifyIntegrationCard(event) {
   let proof;
   if (integrationId === 'admin_mfa') {
     proof = { code: card.querySelector('[data-verification-code]')?.value || '' };
+  } else if (integrationId === 'google_auth' && event.autoSave === true) {
+    proof = { popup: true };
   }
   card.dataset.verifiedPayload = '';
   card.dataset.currentVerification = 'false';
@@ -1306,8 +1427,15 @@ async function verifyIntegrationCard(event) {
       if (authorizationUrl.origin !== 'https://accounts.google.com') {
         throw new Error('Google sign-in could not be started. Please try again.');
       }
+      if (event.autoSave === true) {
+        if (!event.popup || event.popup.closed) {
+          throw new Error('The Google sign-in window closed before verification could start.');
+        }
+        event.popup.location.assign(authorizationUrl.toString());
+        return 'pending';
+      }
       window.location.assign(authorizationUrl.toString());
-      return;
+      return false;
     }
     if (JSON.stringify(integrationCardPayload(card)) !== JSON.stringify(payload)) {
       card.dataset.verifiedPayload = '';
@@ -1315,7 +1443,7 @@ async function verifyIntegrationCard(event) {
       card.querySelector('[data-integration-validation]').textContent =
         'Settings changed during verification. Verify the current settings again.';
       showNotice('Settings changed during verification. Verify the current settings again.', true);
-      return;
+      return false;
     }
     card.dataset.verifiedPayload = JSON.stringify(payload);
     card.dataset.currentVerification = 'true';
@@ -1325,10 +1453,12 @@ async function verifyIntegrationCard(event) {
     card.querySelector('[data-integration-validation]').textContent =
       `Verified at ${new Date(result.verification.verifiedAt).toLocaleString()} · ${card.dataset.verificationLabel}`;
     showNotice(`Settings verified ${card.dataset.verificationLabel}.`);
+    return true;
   } catch (error) {
     card.querySelector('[data-integration-validation]').textContent = 'Verification failed. Verify the current settings before saving.';
     if (showIntegrationRateLimit(error, button)) return;
     showNotice(error.message, true);
+    return false;
   } finally {
     const code = card.querySelector('[data-verification-code]');
     if (code) code.value = '';
@@ -1340,10 +1470,18 @@ async function verifyIntegrationCard(event) {
 function showGoogleOAuthVerificationResult(page) {
   const status = param('googleAuthVerification');
   if (page !== 'admin-settings' || !status) return;
+  if (param('googleAuthPopup') === '1' && window.opener) {
+    window.opener.postMessage({
+      type: 'google-integration-verification',
+      status,
+    }, window.location.origin);
+    window.close();
+    return;
+  }
   const messages = {
     success: [document.querySelector('[data-integration="google_auth"]')?.dataset.currentVerification === 'true'
       ? 'Google sign-in settings verified with a real sign-in.'
-      : 'Google sign-in verification completed. Re-enter the exact candidate settings (including any changed secret), then click Verify to continue saving.', false],
+      : 'Google sign-in verification completed. Re-enter the exact candidate settings (including any changed secret), then click Save Changes to continue saving.', false],
     access_denied: ['Google sign-in verification was cancelled.', true],
     redirect_mismatch: ['The Google callback URL does not match the candidate settings.', true],
     expired: ['Google sign-in verification expired. Verify the settings again.', true],
@@ -1353,6 +1491,7 @@ function showGoogleOAuthVerificationResult(page) {
   showNotice(message, isError);
   const url = new URL(window.location.href);
   url.searchParams.delete('googleAuthVerification');
+  url.searchParams.delete('googleAuthPopup');
   window.history.replaceState({}, '', url.toString());
 }
 

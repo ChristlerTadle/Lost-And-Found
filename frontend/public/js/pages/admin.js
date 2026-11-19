@@ -432,7 +432,7 @@ async function adminSettings() {
     ${integration.id === 'admin_mfa' ? `<div class="field integration-verification-code">
       <label for="integration-admin-mfa-code">Current code from your authenticator</label>
       <input class="input" id="integration-admin-mfa-code" data-verification-code inputmode="numeric" autocomplete="one-time-code" maxlength="6">
-      <small>Enter a current code from your own enrolled authenticator, then click Verify.</small>
+      <small>Enter a current code from your own enrolled authenticator, then click Save Changes to verify and save.</small>
     </div>` : ''}
     ${integration.id === 'admin_mfa' ? `<p class="admin-mfa-enrollment-count">${integration.enrollmentSummary?.enrolledAdmins || 0} of ${integration.enrollmentSummary?.totalAdmins || 0} administrators enrolled</p>
       <p class="admin-mfa-fixed-settings">Authenticator codes: 6 digits · 30-second period · SHA-1 (fixed)</p>` : ''}
@@ -472,13 +472,21 @@ async function adminSettings() {
     data-pending-code="${h(JSON.stringify(access.pendingCode || null))}">
     ${pageHeader('Settings', 'Manage system integrations and pickup scheduling.', buttonLink('admin-dashboard', 'Back to dashboard', 'button-secondary'))}
     ${access.verificationEmailConfigured ? '' : `<p class="integration-settings-note integration-verification-warning">${h(access.verificationEmailError)} Credential changes are unavailable until it is configured.</p>`}
+    <section class="card integration-test-email">
+      <h2>Verification email</h2>
+      <p>Send a harmless test email to <strong data-verification-recipient>${h(access.verificationRecipient || 'Not configured')}</strong>.</p>
+      <button class="button button-outline" type="button" data-action="send-verification-test-email"
+        ${access.verificationEmailConfigured ? '' : 'disabled'}>Send test email to the verification address</button>
+      <p class="integration-test-email-result" data-test-email-result role="status" aria-live="polite"></p>
+    </section>
     <form data-form="integration-settings" novalidate>${cards}
-      <p class="integration-settings-note">Changes stay pending until you save that card. Credential changes require an emailed verification code. Secret values remain masked; leave a secret field empty to keep its saved value.</p>
+      <p class="integration-settings-note">Changes stay pending until you save that card. Credential changes and enabling an integration require an emailed verification code. Secret values remain masked; leave a secret field empty to keep its saved value.</p>
     </form>
     <dialog class="integration-code-dialog" data-integration-code-dialog aria-labelledby="integration-code-title">
       <form data-form="integration-code" novalidate>
         <h2 id="integration-code-title">Verify credential changes</h2>
-        <p>Enter the 6-digit code sent to the configured administrator email.</p>
+        <p data-integration-code-recipient>Enter the 6-digit verification code.</p>
+        <p data-integration-code-expiry></p>
         <div class="field"><label for="integration-verification-code">Verification code</label>
           <input class="input" id="integration-verification-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></div>
         <small class="integration-code-error" data-integration-code-error role="alert"></small>

@@ -243,6 +243,41 @@ test('default snapshots only change explicitly and restore encrypted settings sa
   assert.equal(JSON.stringify([...state.documents.values()]).includes(ENV.GOOGLE_CLIENT_SECRET), false);
 });
 
+test('enabling integrations needs an email code while disabling does not', async () => {
+  const enableState = createDatabase([{ _id: 'google_auth', enabled: false }]);
+  const enableIntegrations = createIntegrationSettings(enableState.database, {
+    encryptionKey: KEY,
+    env: ENV,
+  });
+  const enablePlan = await enableIntegrations.prepareIntegrationSave({
+    google_auth: { enabled: true, fields: {} },
+  });
+  assert.deepEqual(enablePlan.credentialChanges, [{
+    integration: 'google_auth',
+    fields: ['enabled'],
+  }]);
+
+  const disableState = createDatabase([{ _id: 'google_auth', enabled: true }]);
+  const disableIntegrations = createIntegrationSettings(disableState.database, {
+    encryptionKey: KEY,
+    env: ENV,
+  });
+  const disablePlan = await disableIntegrations.prepareIntegrationSave({
+    google_auth: { enabled: false, fields: {} },
+  });
+  assert.deepEqual(disablePlan.credentialChanges, []);
+
+  const mfaState = createDatabase([{ _id: 'admin_mfa', enabled: true }]);
+  const mfaIntegrations = createIntegrationSettings(mfaState.database, {
+    encryptionKey: KEY,
+    env: ENV,
+  });
+  const mfaPlan = await mfaIntegrations.prepareIntegrationSave({
+    admin_mfa: { enabled: true, fields: { require_for_all_admins: true } },
+  });
+  assert.deepEqual(mfaPlan.credentialChanges, []);
+});
+
 test('startup validation fails clearly when the key cannot decrypt stored secrets', async () => {
   const state = createDatabase();
   const integrations = createIntegrationSettings(state.database, { encryptionKey: KEY, env: ENV });
@@ -426,7 +461,7 @@ test('Google Calendar settings validate and encrypt the full private key without
   });
   assert.deepEqual(plan.credentialChanges, [{
     integration: 'google_calendar',
-    fields: ['calendar_id', 'service_account_email', 'private_key'],
+    fields: ['calendar_id', 'service_account_email', 'private_key', 'enabled'],
   }]);
 
   await integrationSettings.applyIntegrationSave(plan, createAudit(), {});
@@ -763,6 +798,7 @@ test('candidate Google OAuth verification uses PKCE and candidate credentials wi
     adminId: 'admin-123',
     candidateHash: 'a'.repeat(64),
     enabled: true,
+    popup: true,
   });
   clients[0].authorizationUrl = started.authorizationUrl;
   const authorization = new URL(started.authorizationUrl);
@@ -780,6 +816,7 @@ test('candidate Google OAuth verification uses PKCE and candidate credentials wi
   assert.equal(result.status, 'success');
   assert.equal(result.adminId, 'admin-123');
   assert.equal(result.candidateHash, 'a'.repeat(64));
+  assert.equal(result.popup, true);
   assert.deepEqual(verifierCalls, [{
     code: 'authorization-code',
     codeVerifier: 'candidate-code-verifier',

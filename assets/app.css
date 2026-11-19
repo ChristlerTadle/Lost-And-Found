@@ -702,6 +702,20 @@ svg { flex-shrink: 0; }
 .admin-inventory-table td { font-size: 12px; padding: 10px 12px; white-space: nowrap; }
 .admin-inventory-footnote { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 10px; }
 .admin-settings { max-width: 880px; }
+.admin-settings .integration-test-email {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 16px 20px;
+}
+.integration-test-email h2 { font-size: 15px; margin: 0; }
+.integration-test-email > p { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0; }
+.integration-test-email strong { color: #1f2937; overflow-wrap: anywhere; }
+.integration-test-email .button { justify-self: start; }
+.integration-test-email-result { border-radius: 8px; font-size: 12px; line-height: 1.5; margin: 0; }
+.integration-test-email-result:empty { display: none; }
+.integration-test-email-result.alert-error { color: #b91c1c; padding: 9px 11px; }
+.integration-test-email-result.alert-success { color: #047857; padding: 9px 11px; }
 .integration-pin-dialog { border: 0; border-radius: 14px; box-shadow: 0 20px 60px #0f172a40; max-width: min(440px, calc(100vw - 32px)); padding: 24px; width: 100%; }
 .integration-pin-dialog::backdrop { background: #0f172a70; }
 .integration-pin-dialog form { display: grid; gap: 14px; }

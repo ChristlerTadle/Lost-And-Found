@@ -959,6 +959,7 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
             values,
           ),
           enabled,
+          popup: proof?.popup === true,
         },
       );
     } else if (integrationId === 'recaptcha') {

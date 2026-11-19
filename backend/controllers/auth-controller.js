@@ -256,6 +256,7 @@ function createAuthController({
           const returnUrl = new URL('/', frontendOrigin);
           returnUrl.searchParams.set('page', 'admin-settings');
           returnUrl.searchParams.set('googleAuthVerification', status);
+          if (verification.popup === true) returnUrl.searchParams.set('googleAuthPopup', '1');
           return res.redirect(returnUrl.toString());
         }
         const pending = req.session.googleOAuth;

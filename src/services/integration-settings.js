@@ -321,9 +321,13 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
           credentialFields.push('require_for_all_admins');
         }
       }
+
       if (Object.keys(fieldErrors).length) errors[id] = fieldErrors;
 
       const enabledChanged = submitted.enabled !== current.enabled;
+      if (id !== 'admin_mfa' && enabledChanged && submitted.enabled) {
+        credentialFields.push('enabled');
+      }
       if (changedFields.length || enabledChanged) {
         updates.push({
           id,

@@ -588,6 +588,34 @@ test('saving every integration sends its code through the independent bootstrap 
   assert.equal(bootstrapMessages[5].subject, 'Verification email test');
 });
 
+test('enabling an integration requests an emailed code after candidate verification', async () => {
+  const harness = await createHarness();
+  await harness.integrationSettings.saveIntegrations({
+    google_auth: { enabled: false, fields: {} },
+  }, harness.audit, {});
+  const candidate = {
+    enabled: true,
+    fields: {
+      client_id: 'google-client-id',
+      client_secret: 'google-original-secret',
+      callback_url: 'https://example.test/api/auth/google/callback',
+    },
+  };
+  const verified = response();
+  await harness.controller.postAdminSettingsVerify(
+    request(candidate, { integrationId: 'google_auth' }),
+    verified,
+  );
+  assert.equal(verified.statusCode, 200);
+
+  const saved = response();
+  await harness.controller.putAdminSettings(request({
+    integrations: { google_auth: candidate },
+  }), saved);
+  assert.equal(saved.body.verificationRequired, true);
+  assert.equal(harness.sentHashes.length, 1);
+});
+
 test('reCAPTCHA Verify passes the one-use token and server-configured frontend hostname only to the verifier', async () => {
   const harness = await createHarness();
   const proofToken = 'single-use-recaptcha-token';
@@ -650,11 +678,13 @@ test('Google OAuth Verify starts a pending candidate-bound redirect without reco
   const result = await verifyCandidate(harness, 'google_auth', {
     enabled: true,
     fields: { client_secret: 'google-pending-candidate-secret' },
+    proof: { popup: true },
   });
   assert.equal(result.statusCode, 202);
   assert.equal(result.body.verificationPending, true);
   assert.equal(result.body.authorizationUrl.startsWith('https://accounts.google.com/'), true);
   assert.equal(harness.seen.googleVerificationProof.adminId, 'test-admin');
+  assert.equal(harness.seen.googleVerificationProof.popup, true);
   assert.equal(
     harness.seen.googleVerificationProof.candidateHash,
     harness.integrationSettings.getVerificationHash(
@@ -693,6 +723,7 @@ test('Google verification callback records proof without signing in or mutating 
           enabled: true,
           settings,
           status: 'success',
+          popup: true,
         } : null;
       },
       async verifyAuthorizationResponse({ code, codeVerifier, nonce }) {
@@ -735,6 +766,7 @@ test('Google verification callback records proof without signing in or mutating 
   }, response);
 
   assert.match(response.redirectUrl, /googleAuthVerification=success/);
+  assert.match(response.redirectUrl, /googleAuthPopup=1/);
   assert.equal(response.redirectUrl.includes('verification-state'), false);
   assert.equal(response.redirectUrl.includes('oauth-code'), false);
   assert.equal(authenticateCalls, 0);
@@ -811,6 +843,7 @@ test('Google OAuth callback rejects a mismatched candidate hash and cannot autho
   }, response);
 
   assert.match(response.redirectUrl, /googleAuthVerification=failed/);
+  assert.equal(new URL(response.redirectUrl).searchParams.has('googleAuthPopup'), false);
   assert.equal(response.redirectUrl.includes('verification-state'), false);
   assert.equal(response.redirectUrl.includes('oauth-code'), false);
   assert.equal(response.redirectUrl.includes(settings.client_secret), false);
@@ -1106,6 +1139,7 @@ test('unchanged cards are skipped and disabling a card does not validate credent
     google_auth: { enabled: true, fields: {} },
   });
   assert.equal(unchanged.statusCode, 200);
+  assert.deepEqual(unchanged.body.changed, []);
   assert.equal(harness.seen.googleSecret, undefined);
   const disabled = await save(harness, {
     google_auth: {

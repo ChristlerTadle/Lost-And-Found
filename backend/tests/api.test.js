@@ -1199,6 +1199,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
       ['/admin/settings/code/verify', 'POST'],
       ['/admin/settings/code/resend', 'POST'],
       ['/admin/settings/code/cancel', 'POST'],
+      ['/admin/settings/verification-email/test', 'POST'],
       ['/admin/settings/smtp/test', 'POST'],
       ['/admin/settings/google-auth/test', 'POST'],
       ['/admin/settings/recaptcha/test', 'POST'],
