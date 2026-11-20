@@ -652,7 +652,7 @@ async function mountRecaptchaWidgets() {
   widgets.forEach((widget) => {
     const widgetId = window.grecaptcha.render(widget, {
       sitekey: widget.dataset.sitekey,
-      size: window.matchMedia('(max-width: 640px)').matches ? 'compact' : 'normal',
+      size: widget.clientWidth < 304 ? 'compact' : 'normal',
       callback: (token) => { widget.dataset.responseToken = token; },
       'expired-callback': () => { delete widget.dataset.responseToken; },
       'error-callback': () => { delete widget.dataset.responseToken; },

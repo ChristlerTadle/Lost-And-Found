@@ -181,7 +181,7 @@ function reportPage(type) {
 
 async function reportsPage() {
   const { items } = await request('/items/mine');
-  return `<main class="page"><header class="topbar"><div><h1>My Reports</h1><p>Track, edit, or cancel your submitted reports.</p></div>
+  return `<main class="page reports-page"><header class="topbar reports-page-header"><div><h1>My Reports</h1><p>Track, edit, or cancel your submitted reports.</p></div>
     <div class="nav-actions">${buttonLink('report', 'Report lost item', 'button-primary')}${buttonLink('report-found', 'Report found item', 'button-outline')}</div></header>
     <section class="card">${reportRows(items)}</section></main>`;
 }

@@ -40,9 +40,10 @@ async function staffRecords() {
   const { items, claims } = await request(`/staff/records?${filters}`);
   const selected = (key, value) => params.get(key) === value ? 'selected' : '';
   const statusOptions = ['lost', 'found', 'stored', 'claimed', 'returned', 'cancelled', 'resolved', 'pending', 'approved', 'rejected'];
-  const summaryRows = (records) => records.length ? `<div class="table-wrap"><table><thead><tr>
+  const summaryRows = (records) => records.length ? `<div class="table-wrap"><table class="staff-summary-table"><thead><tr>
     <th>ID</th><th>Item</th><th>Status</th><th>Date</th></tr></thead><tbody>${records.map((record) => `<tr>
-    <td>${h(record.id)}</td><td>${h(record.item_name)}</td><td>${badge(record.status)}</td><td>${date(record.created_at)}</td>
+    <td data-label="ID">${h(record.id)}</td><td data-label="Item">${h(record.item_name)}</td>
+    <td data-label="Status">${badge(record.status)}</td><td data-label="Date">${date(record.created_at)}</td>
     </tr>`).join('')}</tbody></table></div>` : '<p class="empty">No records found.</p>';
   return `<main class="container staff-workspace"><header class="page-header browse-header"><div><h1>View Records</h1><p>${items.length + claims.length} records found</p></div>
     ${staffPageLink('view_staff_dashboard', 'staff-dashboard', 'Staff dashboard')}</header>
