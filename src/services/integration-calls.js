@@ -68,6 +68,7 @@ function providerFailure(code) {
 function createIntegrationCaller({
   integrationSettings,
   audit,
+  rateLimitAudit: persistentRateLimitAudit,
   timeoutMs = PROVIDER_TIMEOUT_MS,
   now = Date.now,
 } = {}) {
@@ -144,7 +145,18 @@ function createIntegrationCaller({
     validationCooldowns.delete(integrationId);
   }
 
-  async function recordRateLimitAudit(integrationId) {
+  async function recordRateLimitAudit(integrationId, bucketKey) {
+    if (persistentRateLimitAudit) {
+      await persistentRateLimitAudit({
+        group: 'integration',
+        keyType: bucketKey ? 'integration+account' : 'integration',
+        identifier: `${integrationId}\0${bucketKey || 'shared'}`,
+        action: 'integration.rate_limited',
+        targetId: integrationId,
+        targetType: 'integration',
+      });
+      return;
+    }
     const timestamp = now();
     const previous = rateLimitAuditWindows.get(integrationId);
     if (previous && timestamp - previous.loggedAt < RATE_LIMIT_AUDIT_WINDOW_MS) {
@@ -190,7 +202,7 @@ function createIntegrationCaller({
       return result;
     } catch (error) {
       if (error instanceof IntegrationError && error.code === 'rate_limited') {
-        await recordRateLimitAudit(integrationId);
+        await recordRateLimitAudit(integrationId, options.bucketKey);
         throw error;
       }
       if (error?.integrationFailure === false) throw error;

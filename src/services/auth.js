@@ -40,6 +40,7 @@ function createAuthService(database) {
       if (!user || user.status !== 'active' || !user.password_hash
         || !(await bcrypt.compare(String(password || ''), user.password_hash))) {
         const error = new Error('Invalid credentials.');
+        error.status = 401;
         if (user) error.accountId = String(user._id);
         throw error;
       }
