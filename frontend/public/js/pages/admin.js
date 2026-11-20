@@ -433,8 +433,8 @@ async function adminSettings() {
     </div>` : ''}
     ${integration.id === 'admin_mfa' ? `<div class="field integration-verification-code">
       <label for="integration-admin-mfa-code">Current code from your authenticator</label>
-      <input class="input" id="integration-admin-mfa-code" data-verification-code inputmode="numeric" autocomplete="one-time-code" maxlength="6">
-      <small>Enter a current code from your own enrolled authenticator, then click Save Changes to verify and save.</small>
+      <input class="input" id="integration-admin-mfa-code" data-verification-code inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6">
+      <small>Enter a fresh code from your enrolled authenticator and click Verify. Each code can be used once; wait for the next 30-second code before testing again.</small>
     </div>` : ''}
     ${integration.id === 'admin_mfa' ? `<p class="admin-mfa-enrollment-count">${integration.enrollmentSummary?.enrolledAdmins || 0} of ${integration.enrollmentSummary?.totalAdmins || 0} administrators enrolled</p>
       <p class="admin-mfa-fixed-settings">Authenticator codes: 6 digits · 30-second period · SHA-1 (fixed)</p>` : ''}

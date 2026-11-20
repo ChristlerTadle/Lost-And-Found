@@ -37,23 +37,35 @@ function createAdminMfa(database, integrationSettings, {
     if (!policy.active) return { action: 'complete' };
     const account = await findAdmin(user.id);
     const enrolled = isEnrolled(account);
-    if (enrolled && await isLocked(user.id, ipAddress)) {
-      return { action: 'locked' };
+    if (enrolled) {
+      const retryAfterSeconds = await getLockRemainingSeconds(user.id, ipAddress);
+      if (retryAfterSeconds) return { action: 'locked', retryAfterSeconds };
     }
     if (enrolled) return { action: 'verify' };
     return { action: policy.requireForAllAdmins ? 'enroll' : 'complete' };
   }
 
-  async function canAccessAdminRoutes(user, session, ipAddress) {
-    if (user.role_name !== 'admin') return true;
-    const policy = await getPolicy();
-    if (!policy.active) return true;
-    const account = await findAdmin(user.id);
-    if (isEnrolled(account)) {
-      return session.adminMfaVerified === String(user.id)
-        && !(await isLocked(user.id, ipAddress));
+  async function getAdminRouteAccess(user, session, ipAddress) {
+    if (user.role_name !== 'admin') return { allowed: true };
+    const action = await getLoginAction(user, ipAddress);
+    if (action.action === 'complete') return { allowed: true };
+    if (action.action === 'locked') {
+      return {
+        allowed: false,
+        reason: 'locked',
+        retryAfterSeconds: action.retryAfterSeconds,
+      };
     }
-    return !policy.requireForAllAdmins;
+    if (action.action === 'enroll') {
+      return { allowed: false, reason: 'setup_required' };
+    }
+    return session.adminMfaVerified === String(user.id)
+      ? { allowed: true }
+      : { allowed: false, reason: 'verification_required' };
+  }
+
+  async function canAccessAdminRoutes(user, session, ipAddress) {
+    return (await getAdminRouteAccess(user, session, ipAddress)).allowed;
   }
 
   async function getAdminSummary() {
@@ -95,13 +107,9 @@ function createAdminMfa(database, integrationSettings, {
     return true;
   }
 
-  async function verifyCandidate({ adminId, ipAddress, proof, audit }) {
-    await assertNotLocked(adminId, ipAddress);
+  async function verifyCandidate({ adminId, proof }) {
     const account = await findAdmin(adminId);
-    if (!isEnrolled(account)) {
-      await recordFailure(adminId, ipAddress, audit);
-      throw genericError();
-    }
+    if (!isEnrolled(account)) throw genericError();
 
     await selfTest();
     const result = await verifyToken(
@@ -110,11 +118,9 @@ function createAdminMfa(database, integrationSettings, {
       (await getPolicy()).window,
     );
     if (!result.valid || !(await claimTimeStep(adminId, result.timeStep))) {
-      await recordFailure(adminId, ipAddress, audit);
       throw genericError();
     }
 
-    await clearAttempts(adminId, ipAddress);
     return { verified: true, proofType: 'authenticator_code_accepted' };
   }
 
@@ -361,9 +367,15 @@ function createAdminMfa(database, integrationSettings, {
   }
 
   async function isLocked(adminId, ipAddress) {
-    if (rateLimitDisabled) return false;
+    return (await getLockRemainingSeconds(adminId, ipAddress)) > 0;
+  }
+
+  async function getLockRemainingSeconds(adminId, ipAddress) {
+    if (rateLimitDisabled) return 0;
     const entry = await attempts.findOne({ _id: attemptKey(adminId, ipAddress) });
-    return Boolean(entry?.locked_until > now());
+    return entry?.locked_until > now()
+      ? Math.ceil((entry.locked_until - now()) / 1000)
+      : 0;
   }
 
   async function clearAttempts(adminId, ipAddress) {
@@ -421,6 +433,7 @@ function createAdminMfa(database, integrationSettings, {
   return {
     getPolicy,
     getLoginAction,
+    getAdminRouteAccess,
     canAccessAdminRoutes,
     getAdminSummary,
     getStatus,

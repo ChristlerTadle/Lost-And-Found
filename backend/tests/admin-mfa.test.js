@@ -306,7 +306,7 @@ test('Admin MFA integration proof fails closed when enrollment or encryption sel
     proof: { code: '123456' },
     audit: notEnrolled.audit,
   }), /could not be verified/);
-  assert.ok(notEnrolled.events.some(({ action }) => action === 'admin.mfa_verify_failed'));
+  assert.deepEqual(notEnrolled.database.dump().admin_mfa_attempts, []);
 
   const selfTestFailure = setup({ enrolled: true });
   selfTestFailure.integrationSettings.selfTestEncryption = () => false;
@@ -337,8 +337,36 @@ test('Admin MFA integration proof rejects an invalid code without consuming its 
 
   assert.equal(encryptionSelfTests, 1);
   assert.equal(state.database.dump().users[0].admin_mfa.last_time_step, undefined);
-  assert.ok(state.events.some(({ action }) => action === 'admin.mfa_verify_failed'));
+  assert.deepEqual(state.database.dump().admin_mfa_attempts, []);
   assert.equal(JSON.stringify(state.events).includes('000000'), false);
+});
+
+test('failed integration proof attempts do not lock an already-verified admin session', async () => {
+  const state = setup({ enrolled: true });
+  const session = { adminMfaVerified: ADMIN._id };
+  await assert.rejects(state.service.verifyLogin({
+    adminId: ADMIN._id, ipAddress: IP, code: 'not-a-code', audit: state.audit,
+  }), /could not be verified/);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await assert.rejects(state.service.verifyCandidate({
+      adminId: ADMIN._id,
+      ipAddress: IP,
+      proof: { code: '000000' },
+      audit: state.audit,
+    }), /could not be verified/);
+  }
+
+  const [attemptRecord] = state.database.dump().admin_mfa_attempts;
+  assert.equal(attemptRecord.failures, 1);
+  const code = await totp('JBSWY3DPEHPK3PXPGEZDGNBVGY3TQOJQ', state.now());
+  await state.service.verifyCandidate({
+    adminId: ADMIN._id,
+    proof: { code },
+  });
+  assert.equal(state.database.dump().admin_mfa_attempts[0].failures, 1);
+  assert.equal(await state.service.canAccessAdminRoutes(
+    { ...ADMIN, id: ADMIN._id }, session, IP,
+  ), true);
 });
 
 test('admin MFA rejects TOTP replay, consumes recovery codes once, and regenerates codes with a fresh TOTP', async () => {
@@ -421,6 +449,9 @@ test('admin MFA requires enrollment for all admins, locks after five failures, t
     { user: { id: 'unenrolled' } },
     IP,
   ), false);
+  assert.deepEqual(await state.service.getAdminRouteAccess(
+    { ...ADMIN, id: 'unenrolled' }, {}, IP,
+  ), { allowed: false, reason: 'setup_required' });
   assert.deepEqual(await state.service.getLoginAction({ ...ADMIN, id: ADMIN._id }, IP), { action: 'verify' });
   for (let attempt = 0; attempt < 5; attempt += 1) {
     await assert.rejects(state.service.verifyLogin({
@@ -429,10 +460,21 @@ test('admin MFA requires enrollment for all admins, locks after five failures, t
   }
   assert.equal(state.events.filter(({ action }) => action === 'admin.mfa_verify_failed').length, 5);
   assert.equal(state.events.filter(({ action }) => action === 'admin.mfa_locked').length, 1);
-  assert.deepEqual(await state.service.getLoginAction({ ...ADMIN, id: ADMIN._id }, IP), { action: 'locked' });
+  assert.deepEqual(await state.service.getLoginAction({ ...ADMIN, id: ADMIN._id }, IP), {
+    action: 'locked',
+    retryAfterSeconds: 15 * 60,
+  });
+  assert.deepEqual(await state.service.getAdminRouteAccess(
+    { ...ADMIN, id: ADMIN._id },
+    { adminMfaVerified: ADMIN._id },
+    IP,
+  ), { allowed: false, reason: 'locked', retryAfterSeconds: 15 * 60 });
   state.setNow(state.now() + 15 * 60 * 1000 + 1);
   assert.deepEqual(await state.service.getLoginAction({ ...ADMIN, id: ADMIN._id }, IP), { action: 'verify' });
   assert.deepEqual(await state.service.getLoginAction({ ...ADMIN, id: 'unenrolled' }, IP), { action: 'enroll' });
+  assert.deepEqual(await state.service.getAdminRouteAccess(
+    { ...ADMIN, id: ADMIN._id }, {}, IP,
+  ), { allowed: false, reason: 'verification_required' });
 });
 
 test('disabled admin MFA bypasses login checks and session route gates', async () => {
@@ -574,7 +616,9 @@ test('MFA verification without a pending attempt does not destroy another signed
 
 test('restricted admin setup sessions can sign out or restart login but cannot access admin resources', async () => {
   const guard = createAdminMfaSessionGuard({
-    async canAccessAdminRoutes() { return false; },
+    async getAdminRouteAccess() {
+      return { allowed: false, reason: 'verification_required' };
+    },
   });
   const adminUser = { id: ADMIN._id, role_name: 'admin', status: 'active' };
   for (const [method, path] of [
@@ -609,6 +653,29 @@ test('restricted admin setup sessions can sign out or restart login but cannot a
     app: { locals: { services: { auth: { async findActiveSessionUser() { return adminUser; } } } } },
   }, {}, (error) => { blockedError = error; });
   assert.equal(blockedError.status, 403);
+  assert.match(blockedError.message, /sign in again to verify/);
+});
+
+test('admin route guard explains setup requirements and temporary MFA lockouts', async () => {
+  const adminUser = { id: ADMIN._id, role_name: 'admin', status: 'active' };
+  for (const [access, expectedMessage] of [
+    [{ allowed: false, reason: 'setup_required' }, /Complete administrator MFA setup/],
+    [{ allowed: false, reason: 'locked', retryAfterSeconds: 75 }, /temporarily locked.*2 minutes/],
+  ]) {
+    const guard = createAdminMfaSessionGuard({
+      async getAdminRouteAccess() { return access; },
+    });
+    let forwardedError;
+    await guard({
+      method: 'GET',
+      path: '/admin/dashboard',
+      ip: IP,
+      session: { user: adminUser },
+      app: { locals: { services: { auth: { async findActiveSessionUser() { return adminUser; } } } } },
+    }, {}, (error) => { forwardedError = error; });
+    assert.equal(forwardedError.status, 403);
+    assert.match(forwardedError.message, expectedMessage);
+  }
 });
 
 function request(userId) {

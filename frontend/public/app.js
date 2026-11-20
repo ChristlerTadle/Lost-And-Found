@@ -344,6 +344,16 @@ function bindForms() {
   app.querySelectorAll('[data-action="read-all"]').forEach((button) => button.addEventListener('click', readAll));
   app.querySelectorAll('[data-action="google-signin"]').forEach((link) => link.addEventListener('click', startGoogleSignIn));
   app.querySelectorAll('[data-action="integration-toggle"]').forEach((button) => button.addEventListener('click', toggleIntegration));
+  app.querySelectorAll('[data-verification-code]').forEach((input) => {
+    const verifyButton = input.closest('[data-integration]')?.querySelector('[data-action="integration-verify"]');
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/\D/g, '').slice(0, 6);
+      if (verifyButton && !verifyButton.dataset.rateLimitUntil) {
+        verifyButton.disabled = input.value.length !== 6;
+      }
+    });
+    if (verifyButton) verifyButton.disabled = input.value.length !== 6;
+  });
   app.querySelectorAll('[data-action="save-integration"]').forEach((button) => button.addEventListener('click', saveIntegrationSettings));
   app.querySelectorAll('[data-action="integration-verify"], [data-action="smtp-test"], [data-action="calendar-test"]').forEach((button) => button.addEventListener('click', verifyIntegrationCard));
   app.querySelectorAll('[data-action="cancel-integration"]').forEach((button) => button.addEventListener('click', cancelIntegrationChanges));
@@ -1630,7 +1640,7 @@ async function verifyIntegrationCard(event) {
   } finally {
     const code = card.querySelector('[data-verification-code]');
     if (code) code.value = '';
-    if (!button.dataset.rateLimitUntil) button.disabled = false;
+    if (!button.dataset.rateLimitUntil) button.disabled = Boolean(code);
     updateIntegrationSaveState(form);
   }
 }

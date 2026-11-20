@@ -72,12 +72,18 @@ function createAuthGuards(auth) {
 function createAdminMfaSessionGuard(adminMfa) {
   return asyncRoute(async (req, _res, next) => {
     const user = await optionalUser(req);
-    if (user?.role_name === 'admin'
-      && !(await adminMfa.canAccessAdminRoutes(user, req.session, req.ip))) {
+    if (user?.role_name === 'admin') {
+      const access = await adminMfa.getAdminRouteAccess(user, req.session, req.ip);
+      if (access.allowed) return next();
       const mfaRoute = req.path === '/admin/mfa' || req.path.startsWith('/admin/mfa/');
       const sessionRoute = req.path === '/auth' || req.path.startsWith('/auth/');
       if (mfaRoute || sessionRoute) return next();
-      const error = new Error('Complete administrator MFA setup or verification before accessing this page.');
+      const messages = {
+        setup_required: 'Complete administrator MFA setup before accessing this page.',
+        verification_required: 'Administrator MFA verification is required. Sign out and sign in again to verify your account.',
+        locked: `Administrator MFA is temporarily locked after failed code attempts. Try again in about ${Math.max(1, Math.ceil(access.retryAfterSeconds / 60))} minute${Math.ceil(access.retryAfterSeconds / 60) === 1 ? '' : 's'}.`,
+      };
+      const error = new Error(messages[access.reason] || 'Administrator MFA is required before accessing this page.');
       error.status = 403;
       throw error;
     }
