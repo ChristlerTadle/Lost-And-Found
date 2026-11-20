@@ -83,7 +83,6 @@ async function start() {
     notifications: notificationService,
     email,
     audit,
-    rateLimits,
     callIntegration,
   });
   const rolePermissions = createRolePermissionService(database);
@@ -101,6 +100,7 @@ async function start() {
     notifications: notificationService,
     rolePermissions,
     audit,
+    rateLimits,
   };
   services.roleChange = createRoleChangeService(database, {
     rolePermissions,
