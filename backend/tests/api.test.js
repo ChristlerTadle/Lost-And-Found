@@ -395,7 +395,7 @@ const services = {
   },
   adminMfa: {
     async getLoginAction() { return { action: 'complete' }; },
-    async canAccessAdminRoutes() { return true; },
+    async getAdminRouteAccess() { return { allowed: true }; },
     async getAdminSummary() {
       return { enabled: false, active: false, enrolledAdmins: 0, totalAdmins: 1 };
     },
