@@ -24,7 +24,8 @@
   display: flex;
   align-items: flex-start;
   gap: 1rem;
-  width: min(42rem, calc(100vw - 2rem));
+  width: min(42rem, calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  max-width: 100%;
   padding: 1rem 1.25rem;
   transform: translateX(-50%);
   border: 1px solid currentColor;
@@ -35,6 +36,8 @@
 .shared-error-banner.alert-error { color: #8d1b1b; }
 .shared-error-banner.alert-success { color: #176b36; }
 .shared-message-dismiss {
+  align-items: center;
+  display: inline-flex;
   flex: 0 0 auto;
   margin-left: auto;
   border: 0;
@@ -44,6 +47,9 @@
   font: inherit;
   font-size: 1.25rem;
   line-height: 1;
+  min-height: 44px;
+  min-width: 44px;
+  justify-content: center;
 }
 .sticky-action-bar {
   position: sticky;
@@ -51,8 +57,17 @@
   bottom: 0;
   display: grid;
   gap: 0.75rem;
-  padding: 1rem 0;
+  padding: 1rem 0 calc(1rem + env(safe-area-inset-bottom));
   background: #fff;
   border-top: 1px solid #d8e2da;
 }
 .sticky-action-bar-buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+
+@media screen and (max-width: 480px) {
+  .sticky-action-bar { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+  .sticky-action-bar-buttons { align-items: stretch; flex-direction: column; }
+  .sticky-action-bar-buttons > * { width: 100%; }
+  .sticky-action-bar-buttons .button,
+  .sticky-action-bar-buttons .btn,
+  .sticky-action-bar-buttons button { min-height: 44px; width: 100%; }
+}

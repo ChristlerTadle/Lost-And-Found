@@ -13,6 +13,126 @@ let pendingAdminRoleChange = null;
 let roleChangeCodeResendTimer;
 const recaptchaChallengeCancels = new WeakMap();
 let pendingGoogleSavePopup = null;
+let mobileMenuPreviousOverflow = '';
+
+function mobileMenuElements() {
+  return {
+    button: app.querySelector('#menu-btn'),
+    overlay: app.querySelector('#overlay'),
+    sidebar: app.querySelector('#sidebar'),
+  };
+}
+
+function setMobileMenuClosedState(sidebar) {
+  if (!sidebar) return;
+  const mobile = window.matchMedia('(max-width: 1023px)').matches;
+  sidebar.classList.remove('open');
+  sidebar.inert = mobile;
+  if (mobile) sidebar.setAttribute('aria-hidden', 'true');
+  else sidebar.removeAttribute('aria-hidden');
+}
+
+function closeMobileMenu(restoreFocus = true) {
+  const { button, overlay, sidebar } = mobileMenuElements();
+  const wasOpen = sidebar?.classList.contains('open');
+  setMobileMenuClosedState(sidebar);
+  overlay?.classList.remove('show');
+  button?.setAttribute('aria-expanded', 'false');
+  button?.setAttribute('aria-label', 'Open menu');
+  if (wasOpen) document.body.style.overflow = mobileMenuPreviousOverflow;
+  if (wasOpen && restoreFocus) button?.focus({ preventScroll: true });
+}
+
+function openMobileMenu() {
+  const { button, overlay, sidebar } = mobileMenuElements();
+  if (!button || !sidebar) return;
+  mobileMenuPreviousOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  sidebar.inert = false;
+  sidebar.removeAttribute('aria-hidden');
+  sidebar.classList.add('open');
+  overlay?.classList.add('show');
+  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-label', 'Close menu');
+  sidebar.querySelector('a[href], button:not([disabled])')?.focus({ preventScroll: true });
+}
+
+function drawerFocusableElements(sidebar) {
+  return [...sidebar.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => element.getClientRects().length > 0 && !element.closest('[inert], [hidden]'));
+}
+
+document.addEventListener('keydown', (event) => {
+  const { sidebar } = mobileMenuElements();
+  if (!sidebar?.classList.contains('open')) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMobileMenu();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = drawerFocusableElements(sidebar);
+  if (!focusable.length) {
+    event.preventDefault();
+    sidebar.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !sidebar.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !sidebar.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
+document.addEventListener('click', (event) => {
+  const { sidebar } = mobileMenuElements();
+  if (sidebar?.classList.contains('open')
+    && event.target instanceof Element
+    && sidebar.contains(event.target)
+    && event.target.closest('a[href]')) {
+    closeMobileMenu();
+  }
+});
+
+document.addEventListener('focusin', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)
+    || !target.matches('input, select, textarea, [contenteditable="true"]')) return;
+  scrollFocusedFieldAboveActionBar(target);
+});
+
+window.visualViewport?.addEventListener('resize', () => {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement) scrollFocusedFieldAboveActionBar(focused);
+});
+
+window.addEventListener('resize', () => {
+  const { sidebar } = mobileMenuElements();
+  if (!sidebar) return;
+  if (!window.matchMedia('(max-width: 1023px)').matches && sidebar.classList.contains('open')) {
+    closeMobileMenu(false);
+  } else if (!sidebar.classList.contains('open')) {
+    setMobileMenuClosedState(sidebar);
+  }
+});
+
+function scrollFocusedFieldAboveActionBar(target) {
+  const bar = document.querySelector('.sticky-action-bar');
+  if (!bar?.getClientRects().length || !target.getClientRects().length) return;
+  const rect = target.getBoundingClientRect();
+  const viewportBottom = window.visualViewport
+    ? Math.min(window.innerHeight, window.visualViewport.offsetTop + window.visualViewport.height)
+    : window.innerHeight;
+  const barTop = Math.min(bar.getBoundingClientRect().top, viewportBottom);
+  const topbarBottom = document.querySelector('.app-topbar')?.getBoundingClientRect().bottom || 0;
+  if (rect.bottom <= barTop - 8 && rect.top >= topbarBottom) return;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ block: 'nearest', behavior: reducedMotion ? 'auto' : 'smooth' });
+}
 
 window.addEventListener('message', (event) => {
   const pending = pendingGoogleSavePopup;
@@ -273,20 +393,13 @@ function bindForms() {
     if (profileActions) profileActions.hidden = true;
     if (profileEdit) profileEdit.hidden = false;
   });
-  const menuButton = app.querySelector('#menu-btn');
-  const sidebar = app.querySelector('#sidebar');
-  const overlay = app.querySelector('#overlay');
-  const closeMenu = () => {
-    sidebar?.classList.remove('open');
-    overlay?.classList.remove('show');
-    menuButton?.setAttribute('aria-expanded', 'false');
-  };
+  const { button: menuButton, overlay, sidebar } = mobileMenuElements();
+  setMobileMenuClosedState(sidebar);
   menuButton?.addEventListener('click', () => {
-    sidebar?.classList.add('open');
-    overlay?.classList.add('show');
-    menuButton.setAttribute('aria-expanded', 'true');
+    if (sidebar?.classList.contains('open')) closeMobileMenu();
+    else openMobileMenu();
   });
-  overlay?.addEventListener('click', closeMenu);
+  overlay?.addEventListener('click', () => closeMobileMenu());
   bindDiscardNavigation();
 }
 
@@ -539,6 +652,7 @@ async function mountRecaptchaWidgets() {
   widgets.forEach((widget) => {
     const widgetId = window.grecaptcha.render(widget, {
       sitekey: widget.dataset.sitekey,
+      size: window.matchMedia('(max-width: 640px)').matches ? 'compact' : 'normal',
       callback: (token) => { widget.dataset.responseToken = token; },
       'expired-callback': () => { delete widget.dataset.responseToken; },
       'error-callback': () => { delete widget.dataset.responseToken; },

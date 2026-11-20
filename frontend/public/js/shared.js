@@ -406,8 +406,8 @@ function showBanner(message, isError, error, autoDismiss) {
     banner = document.createElement('div');
     banner.dataset.sharedErrorBanner = '';
     banner.className = 'shared-error-banner';
-    document.body.append(banner);
   }
+  positionSharedErrorBanner(banner);
   banner.replaceChildren();
   banner.setAttribute('role', isError ? 'alert' : 'status');
   banner.setAttribute('aria-live', isError ? 'assertive' : 'polite');
@@ -438,6 +438,26 @@ function showBanner(message, isError, error, autoDismiss) {
   }
   return banner;
 }
+
+function positionSharedErrorBanner(banner) {
+  const parent = currentDialog() || document.body;
+  if (banner.parentElement !== parent) parent.append(banner);
+  const topbar = document.querySelector('.app-topbar');
+  if (topbar) banner.style.top = `${Math.ceil(topbar.getBoundingClientRect().bottom + 8)}px`;
+  else banner.style.removeProperty('top');
+}
+
+const bannerLayerObserver = new MutationObserver(() => {
+  const banner = document.querySelector('[data-shared-error-banner]');
+  if (!banner) return;
+  positionSharedErrorBanner(banner);
+});
+bannerLayerObserver.observe(document.body, {
+  attributes: true,
+  attributeFilter: ['open'],
+  childList: true,
+  subtree: true,
+});
 
 function setMessage(area, message, isError, error) {
   area.replaceChildren();
@@ -750,18 +770,19 @@ function shell(content, page) {
           : '/?page=admin-users&amp;tab=role-defaults'
       : '/?page=dashboard';
     return `<div class="app">
-      <aside class="sidebar" id="sidebar">
+      <aside class="sidebar" id="sidebar" aria-label="Main navigation" tabindex="-1">
         <a class="sidebar-brand" href="${brandHref}"><span class="brand-mark">${icon('shield', 22)}</span><span><span class="brand-name">BukSU</span><span class="brand-caption">Lost &amp; Found System</span></span></a>
         <nav class="sidebar-nav"><p class="sidebar-label">Navigation</p>${nav}</nav>
         <div class="sidebar-user"><div class="avatar-sm">${initial}</div><div><p class="sidebar-user-name">${h(user.full_name)}</p><p class="sidebar-user-role">${roleLabel(user.role_name)}</p></div></div>
+        <button class="signout signout-drawer" type="button" data-action="logout">Sign Out</button>
       </aside>
       <div class="overlay" id="overlay"></div>
       <div class="main-col"><header class="app-topbar">
-        <button class="menu-btn" id="menu-btn" type="button" aria-label="Open menu" aria-expanded="false">${icon('menu', 20)}</button>
-        <p class="topbar-title">Bukidnon State University — Supreme Student Council</p>
+        <button class="menu-btn" id="menu-btn" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="sidebar">${icon('menu', 20)}</button>
+        <p class="topbar-title"><span class="topbar-full-title">Bukidnon State University — Supreme Student Council</span><span class="topbar-compact-title" aria-hidden="true">BukSU Lost &amp; Found</span></p>
         ${hasPermission('view_profile') ? `<a class="topbar-user" href="/?page=profile"><span class="avatar-sm">${initial}</span><span class="meta"><span class="name">${h(user.full_name)}</span><span class="role">${roleLabel(user.role_name)}</span></span></a>`
           : `<span class="topbar-user"><span class="avatar-sm">${initial}</span><span class="meta"><span class="name">${h(user.full_name)}</span><span class="role">${roleLabel(user.role_name)}</span></span></span>`}
-        <button class="signout" type="button" data-action="logout">Sign Out</button>
+        <button class="signout signout-topbar" type="button" data-action="logout">Sign Out</button>
       </header><main class="content">${content}</main></div>
     </div>`;
   }
