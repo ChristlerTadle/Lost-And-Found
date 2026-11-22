@@ -106,7 +106,10 @@ function createAuthController({
       try {
         user = await auth.login(req.body.email, req.body.password);
       } catch (error) {
-        await logAuthEvent(audit, requestAuditContext(req, 'auth.login_failed', {
+        if (error.message === 'Invalid credentials.' && !Number.isInteger(error.status)) {
+          error.status = 401;
+        }
+        await logAuthEvent(audit, authAuditContext(req, 'auth.login_failed', {
           actor_id: null,
           actor_role: null,
           target_type: error.accountId ? 'user' : null,
@@ -115,6 +118,7 @@ function createAuthController({
         }));
         throw error;
       }
+      await req.rateLimitReset?.();
       const result = await beginLoginSession(req, user, adminMfa);
       if (result.mfaRequired || result.adminMfaSetupRequired) {
         if (result.adminMfaSetupRequired) {
@@ -174,7 +178,7 @@ function createAuthController({
         }
         const resetUrl = new URL('/?page=reset-password', frontendOrigin);
         resetUrl.searchParams.set('token', token);
-        return email.sendPasswordReset(emailAddress, resetUrl.toString(), requestAuditContext(req, null));
+        return email.sendPasswordReset(emailAddress, resetUrl.toString(), authAuditContext(req, null));
       }).catch((error) => {
         console.error(error instanceof IntegrationError
           ? error.code === 'rate_limited'
@@ -202,7 +206,7 @@ function createAuthController({
           state: req.query.state,
           code: req.query.code,
           error: req.query.error,
-        }, requestAuditContext(req, null));
+        }, authAuditContext(req, null));
         if (verification) {
           const candidateHash = verification.settings
             ? integrationSettings.getVerificationHash(
@@ -234,7 +238,7 @@ function createAuthController({
           if (verified) {
             await callIntegration?.clearValidationFailures?.('google_auth');
             await audit.logAction({
-              ...requestAuditContext(req, 'integration.verify_success'),
+              ...authAuditContext(req, 'integration.verify_success'),
               actor_id: String(verification.adminId),
               actor_role: 'admin',
               target_type: 'integration',
@@ -244,7 +248,7 @@ function createAuthController({
           } else {
             await callIntegration?.recordValidationFailure?.('google_auth');
             await audit.logAction({
-              ...requestAuditContext(req, 'integration.verify_failed'),
+              ...authAuditContext(req, 'integration.verify_failed'),
               actor_id: String(verification.adminId),
               actor_role: 'admin',
               target_type: 'integration',
@@ -272,7 +276,7 @@ function createAuthController({
           code: req.query.code,
           codeVerifier: pending.codeVerifier,
           nonce: pending.nonce,
-        }, requestAuditContext(req, null));
+        }, authAuditContext(req, null));
         const user = await auth.authenticateGoogle(profile);
         const result = await beginLoginSession(req, user, adminMfa);
         if (result.adminMfaSetupRequired) {
@@ -287,7 +291,7 @@ function createAuthController({
         return res.redirect(frontendOrigin);
       } catch (error) {
         if (!(error instanceof IntegrationError && error.code === 'rate_limited')) {
-          await logAuthEvent(audit, requestAuditContext(req, 'auth.login_failed', {
+          await logAuthEvent(audit, authAuditContext(req, 'auth.login_failed', {
             actor_id: null,
             actor_role: null,
             target_type: error.accountId ? 'user' : null,
@@ -297,6 +301,7 @@ function createAuthController({
         }
         if (error instanceof IntegrationError) {
           if (error.code !== 'rate_limited') console.error('Google sign-in could not be completed.');
+          if (error.status === 429 || error.status === 503) await req.rateLimitGlobalRollback?.();
           return sendSafeIntegrationError(res, error);
         }
         console.error('Google sign-in could not be completed.');
@@ -339,7 +344,7 @@ async function beginLoginSession(req, user, adminMfa) {
 
 async function logSuccessfulLogin(audit, req, user) {
   if (!['admin', 'staff'].includes(user.role_name)) return;
-  await logAuthEvent(audit, requestAuditContext(req, 'auth.login', {
+  await logAuthEvent(audit, authAuditContext(req, 'auth.login', {
     actor_id: user.id,
     actor_role: user.role_name,
     target_type: 'user',
@@ -354,11 +359,13 @@ async function verifyRecaptcha(req, res, recaptcha, integrationSettings) {
     await recaptcha.verifyResponse(
       req.body?.['g-recaptcha-response'],
       req.ip,
-      requestAuditContext(req, null),
+      authAuditContext(req, null),
     );
     return true;
   } catch (error) {
     if (!(error instanceof IntegrationError)) throw error;
+    await req.rateLimitFinalize?.(error.status);
+    if (error.status === 429 || error.status === 503) await req.rateLimitGlobalRollback?.();
     sendSafeIntegrationError(res, error);
     return false;
   }
@@ -380,6 +387,12 @@ async function logAuthEvent(audit, event) {
   } catch (error) {
     console.error('Unable to write authentication audit event:', error);
   }
+}
+
+function authAuditContext(req, action, fields) {
+  const context = requestAuditContext(req, action, fields);
+  delete context.ip_address;
+  return context;
 }
 
 module.exports = { createAuthController };

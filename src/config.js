@@ -85,6 +85,30 @@ function positiveIntegerEnv(name, fallback, maximum) {
   return Number(raw);
 }
 
+function parseTrustProxy(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.toLowerCase() === 'false') return false;
+  if (/^\d+$/.test(raw)) {
+    const hops = Number(raw);
+    if (Number.isSafeInteger(hops) && hops <= 100) return hops;
+    throw new Error('TRUST_PROXY must be false, a hop count from 0 to 100, or a comma-separated CIDR list.');
+  }
+  const addresses = raw.split(',').map((entry) => entry.trim());
+  const valid = addresses.every((entry) => {
+    const [address, prefix, ...extra] = entry.split('/');
+    const version = isIP(address);
+    if (!version || extra.length) return false;
+    if (prefix === undefined) return true;
+    const bits = Number(prefix);
+    return /^\d+$/.test(prefix) && Number.isInteger(bits)
+      && bits >= 0 && bits <= (version === 4 ? 32 : 128);
+  });
+  if (!valid) {
+    throw new Error('TRUST_PROXY must be false, a hop count from 0 to 100, or a comma-separated CIDR list.');
+  }
+  return addresses;
+}
+
 const bootstrapMail = normalizeBootstrapMail(process.env);
 
 // Shared by integration settings throttles and their route limiter groups.
@@ -120,6 +144,70 @@ const integrationRateLimits = {
 };
 
 const rateLimits = {
+  global_api: {
+    windowMs: 15 * 60 * 1000,
+    max: 1500,
+    keyType: 'ip',
+    store: 'memory',
+    sensitive: false,
+  },
+  register: {
+    windowMs: 60 * 60 * 1000,
+    max: 20,
+    keyType: 'ip',
+    store: 'mongo',
+    sensitive: false,
+  },
+  login: {
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    keyType: 'ip+email',
+    store: 'mongo',
+    sensitive: true,
+    failedStatus: 401,
+  },
+  forgot: {
+    rateLimitedMessage: 'If an active account uses that email, reset instructions have been sent.',
+    rules: [
+      {
+        group: 'forgot_ip',
+        windowMs: 60 * 60 * 1000,
+        max: 10,
+        keyType: 'ip',
+        store: 'mongo',
+        sensitive: true,
+      },
+      {
+        group: 'forgot_email',
+        windowMs: 60 * 60 * 1000,
+        max: 5,
+        keyType: 'email',
+        store: 'mongo',
+        sensitive: true,
+      },
+    ],
+  },
+  reset: {
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    keyType: 'ip',
+    store: 'mongo',
+    sensitive: true,
+  },
+  google_signin: {
+    windowMs: 60 * 1000,
+    max: 20,
+    keyType: 'ip',
+    store: 'mongo',
+    sensitive: false,
+  },
+  mfa_login: {
+    windowMs: 60 * 1000,
+    max: 20,
+    keyType: 'ip',
+    store: 'mongo',
+    sensitive: true,
+  },
   settings_overall: {
     windowMs: integrationRouteLimits.adminSettingsWindowMs,
     max: integrationRouteLimits.adminSettingsLimit,
@@ -244,6 +332,8 @@ module.exports = {
   integrationCodeRequestLimit,
   integrationCodeRequestWindowMs,
   integrationCodeResendMs,
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+  parseTrustProxy,
   recaptchaAllowTestKeys: process.env.RECAPTCHA_ALLOW_TEST_KEYS === 'true'
     && process.env.NODE_ENV !== 'production',
   adminMfaDisabled: process.env.ADMIN_MFA_DISABLED === 'true',

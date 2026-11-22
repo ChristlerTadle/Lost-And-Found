@@ -2,13 +2,47 @@ const crypto = require('node:crypto');
 const net = require('node:net');
 
 function normalizeIp(ipAddress) {
-  let ip = String(ipAddress || '').trim();
-  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
-  if (net.isIP(ip) === 6) {
-    const parts = ip.toLowerCase().split(':');
-    if (parts.length >= 4) return `${parts.slice(0, 4).join(':')}::/64`;
+  const ip = String(ipAddress || '').trim().replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
+  const version = net.isIP(ip);
+  if (version === 4) return ip;
+  if (version !== 6) return ip || 'unknown';
+  const words = ipv6Words(ip);
+  if (!words) return ip;
+  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
+    return [
+      (words[6] >> 8) & 0xff, words[6] & 0xff,
+      (words[7] >> 8) & 0xff, words[7] & 0xff,
+    ].join('.');
   }
-  return ip || 'unknown';
+  return `${words.slice(0, 4).map((word) => word.toString(16)).join(':')}::/64`;
+}
+
+function ipv6Words(address) {
+  const halves = address.split('::');
+  if (halves.length > 2) return null;
+  const parseHalf = (half) => {
+    if (!half) return [];
+    const words = [];
+    for (const part of half.split(':')) {
+      if (part.includes('.')) {
+        const octets = part.split('.').map(Number);
+        if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+          return null;
+        }
+        words.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        if (!/^[\da-f]{1,4}$/i.test(part)) return null;
+        words.push(Number.parseInt(part, 16));
+      }
+    }
+    return words;
+  };
+  const left = parseHalf(halves[0]);
+  const right = parseHalf(halves[1] || '');
+  if (!left || !right) return null;
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return null;
+  return [...left, ...Array(missing).fill(0), ...right];
 }
 
 function createMemoryStore(now = Date.now) {
@@ -38,6 +72,15 @@ function createMemoryStore(now = Date.now) {
   };
 }
 
+function isHealthRequest(req) {
+  const path = req.path || req.url || '';
+  return path === '/health' || path === '/api/health';
+}
+
+function resultDocument(result) {
+  return result?.value && !result._id ? result.value : result;
+}
+
 function createRateLimitService({ database, audit, secret = '', config = {}, now = Date.now } = {}) {
   const memoryStores = new Map();
   let warnedAt = 0;
@@ -53,7 +96,21 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
 
   async function initialize() {
     if (!database || ttlInitialized) return;
-    await collection().createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: 'expiresAt_ttl' });
+    const rateLimitCollection = collection();
+    try {
+      await rateLimitCollection.createIndex(
+        { expiresAt: 1 },
+        { expireAfterSeconds: 0, name: 'rate_limits_expiresAt_ttl' },
+      );
+    } catch (error) {
+      const indexes = await rateLimitCollection.listIndexes().toArray();
+      const existingTtlIndex = indexes.some((index) => (
+        Object.keys(index.key || {}).length === 1
+        && index.key.expiresAt === 1
+        && index.expireAfterSeconds === 0
+      ));
+      if (!existingTtlIndex) throw error;
+    }
     ttlInitialized = true;
   }
 
@@ -79,9 +136,15 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
           type: group,
         },
       }],
-      { upsert: true, returnDocument: 'after' },
+      {
+        upsert: true,
+        returnDocument: 'after',
+        includeResultMetadata: false,
+        maxTimeMS: 200,
+        timeoutMS: 200,
+      },
     );
-    const result = await operation;
+    const result = resultDocument(await withStoreTimeout(operation));
     if (!result) throw new Error('Rate-limit store did not return a counter.');
     return { totalHits: result.count, resetTime: result.expiresAt };
   }
@@ -113,36 +176,88 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     }
   }
 
-  async function recordRateLimitAudit(req, group) {
+  async function recordRateLimitAudit(req, group, keyType, suppliedIdentifier) {
     if (!database || !audit) return;
+    if (keyType && suppliedIdentifier !== undefined) {
+      return recordAudit({
+        group,
+        keyType,
+        identifier: suppliedIdentifier,
+        targetId: group,
+      });
+    }
     const accountId = req.session?.user?.id ? String(req.session.user.id) : '';
     const ip = normalizeIp(req.ip || req.socket?.remoteAddress);
     const identifier = `${accountId || 'anonymous'}\0${ip}`;
-    const id = hashIdentifier('rate_limited', 'audit_dedupe', identifier);
+    return recordAudit({
+      group,
+      keyType: 'account+ip',
+      identifier,
+      action: 'rate_limited',
+      targetId: group,
+    });
+  }
+
+  async function recordAudit({
+    group,
+    keyType,
+    identifier,
+    action = 'rate_limited',
+    targetId = group,
+    targetType = null,
+  }) {
+    if (!database || !audit) return;
+    const dedupeIdentifier = `${group}\0${keyType}\0${identifier}`;
+    const id = hashIdentifier('rate_limited_audit', 'dedupe', dedupeIdentifier);
     if (!auditCollection) auditCollection = collection();
-    const expiresAt = new Date(now() + 10 * 60 * 1000);
-    const result = await auditCollection.findOneAndUpdate(
-      { _id: id },
-      [{
-        $set: {
-          count: { $cond: [{ $lte: ['$expiresAt', '$$NOW'] }, 1, { $add: [{ $ifNull: ['$count', 0] }, 1] }] },
-          expiresAt: { $cond: [{ $lte: ['$expiresAt', '$$NOW'] }, expiresAt, '$expiresAt'] },
-          type: 'audit_dedupe',
-          audit_group: group,
+    try {
+      const expired = { $lte: [{ $ifNull: ['$auditWindowExpiresAt', new Date(0)] }, '$$NOW'] };
+      const result = resultDocument(await withStoreTimeout(auditCollection.findOneAndUpdate(
+        { _id: id },
+        [{
+          $set: {
+            count: {
+              $cond: [expired, 1, { $add: [{ $ifNull: ['$count', 0] }, 1] }],
+            },
+            suppressedCount: {
+              $cond: [expired, 0, { $add: [{ $ifNull: ['$suppressedCount', 0] }, 1] }],
+            },
+            previousSuppressedCount: {
+              $cond: [expired, { $ifNull: ['$suppressedCount', 0] }, '$previousSuppressedCount'],
+            },
+            auditWindowExpiresAt: {
+              $cond: [expired, { $add: ['$$NOW', 10 * 60 * 1000] }, '$auditWindowExpiresAt'],
+            },
+            expiresAt: {
+              $cond: [expired, { $add: ['$$NOW', 24 * 60 * 60 * 1000] }, '$expiresAt'],
+            },
+            type: 'rate_limited_audit',
+          },
+        }],
+        {
+          upsert: true,
+          returnDocument: 'after',
+          includeResultMetadata: false,
+          maxTimeMS: 200,
+          timeoutMS: 200,
         },
-      }],
-      { upsert: true, returnDocument: 'after' },
-    );
-    if (result?.count === 1 && typeof audit.logAction === 'function') {
+      )));
+      if (result?.count !== 1 || typeof audit.logAction !== 'function') return;
       await audit.logAction({
         actor_id: null,
         actor_role: null,
-        action: 'rate_limited',
-        target_type: null,
-        target_id: null,
-        new_value: { group },
-        result: 'denied',
-      }).catch(() => {});
+        action,
+        target_type: targetType,
+        target_id: targetId,
+        new_value: {
+          module: group,
+          action_group: group,
+          suppressed_count: result.previousSuppressedCount || 0,
+        },
+        result: action === 'integration.rate_limited' ? 'failed' : 'denied',
+      });
+    } catch {
+      warnStoreFailure();
     }
   }
 
@@ -150,8 +265,8 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     return config[group] || {};
   }
 
-  function getIdentity(req, group, options = {}) {
-    const rule = groupConfig(group);
+  function getIdentity(req, group, options = {}, configuredRule) {
+    const rule = configuredRule || groupConfig(group);
     const accountId = req.session?.user?.id ? String(req.session.user.id) : null;
     if ((rule.keyType === 'account' || rule.keyType === 'account+ip'
       || rule.keyType === 'account+item' || rule.keyType === 'account+resource') && !accountId) {
@@ -159,6 +274,13 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     }
     let identifier = accountId || '';
     if (rule.keyType === 'ip') identifier = normalizeIp(req.ip || req.socket?.remoteAddress);
+    if (rule.keyType === 'email') {
+      identifier = String(req.body?.email || req.query?.email || '').trim().toLowerCase();
+    }
+    if (rule.keyType === 'ip+email') {
+      const email = String(req.body?.email || req.query?.email || '').trim().toLowerCase();
+      identifier = `${normalizeIp(req.ip || req.socket?.remoteAddress)}\0${email}`;
+    }
     if (rule.keyType === 'account+ip') identifier = `${accountId}\0${normalizeIp(req.ip || req.socket?.remoteAddress)}`;
     if (rule.keyType === 'account+item' || rule.keyType === 'account+resource') {
       const resourceId = typeof options.identifier === 'function' ? options.identifier(req) : req.params?.id;
@@ -170,7 +292,13 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
       if (typeof resourceId !== 'string' || !resourceId || resourceId.length > 128) return null;
       identifier = resourceId;
     }
-    return { rule, id: hashIdentifier(group, rule.keyType, identifier) };
+    const identityGroup = rule.group || group;
+    return {
+      rule,
+      group: identityGroup,
+      identifier,
+      id: hashIdentifier(identityGroup, rule.keyType, identifier),
+    };
   }
 
   function getStore(group, rule) {
@@ -190,13 +318,68 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
 
   async function decrementGroup(group, rule, id) {
     if (rule.store === 'mongo' && database) {
-      await collection().updateOne({ _id: id, count: { $gt: 0 } }, { $inc: { count: -1 } });
+      await withStoreTimeout(collection().updateOne(
+        { _id: id, count: { $gt: 0 } },
+        { $inc: { count: -1 } },
+        { maxTimeMS: 200, timeoutMS: 200 },
+      ));
       return;
     }
     await getStore(group, rule).decrement(id);
   }
 
-  function rateLimitError(req, res, group, rule, value) {
+  async function resetGroup(group, rule, id) {
+    if (rule.store === 'mongo' && database) {
+      await withStoreTimeout(collection().deleteOne(
+        { _id: id },
+        { maxTimeMS: 200, timeoutMS: 200 },
+      ));
+      return;
+    }
+    await getStore(group, rule).resetKey(id);
+  }
+
+  function attachLoginCounterFinalizer(req, counter) {
+    let finalized = false;
+    req.rateLimitReset = async () => {
+      if (finalized) return;
+      finalized = true;
+      try {
+        await resetGroup(counter.group, counter.rule, counter.id);
+      } catch {
+        throw storeUnavailableError();
+      }
+    };
+    req.rateLimitFinalize = async (status) => {
+      if (finalized) return;
+      finalized = true;
+      if (status === counter.rule.failedStatus) return;
+      try {
+        if (status >= 200 && status < 400) {
+          await resetGroup(counter.group, counter.rule, counter.id);
+        } else {
+          await decrementGroup(counter.group, counter.rule, counter.id);
+        }
+      } catch {
+        throw storeUnavailableError();
+      }
+    };
+  }
+
+  function attachGlobalCounterRollback(req, counter) {
+    let rolledBack = false;
+    req.rateLimitGlobalRollback = async () => {
+      if (rolledBack) return;
+      rolledBack = true;
+      try {
+        await decrementGroup(counter.group, counter.rule, counter.id);
+      } catch {
+        warnStoreFailure();
+      }
+    };
+  }
+
+  function rateLimitError(req, res, group, rule, value, messageOverride, auditIdentifier) {
     const resetTime = value.resetTime instanceof Date ? value.resetTime : new Date(value.resetTime);
     const retryAfter = Math.max(1, Math.ceil((resetTime.getTime() - now()) / 1000));
     res.set('RateLimit-Limit', String(rule.max));
@@ -204,10 +387,10 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     res.set('RateLimit-Reset', String(retryAfter));
     if (value.totalHits <= rule.max) return null;
     res.set('Retry-After', String(retryAfter));
-    void recordRateLimitAudit(req, group).catch(() => {});
-    const message = rule.rateLimitedMessage === true
+    void recordRateLimitAudit(req, group, rule.keyType, auditIdentifier).catch(() => {});
+    const message = messageOverride || (rule.rateLimitedMessage === true
       ? `Too many attempts. Try again in ${Math.ceil(retryAfter / 60)} minute${Math.ceil(retryAfter / 60) === 1 ? '' : 's'}.`
-      : 'Please try again shortly';
+      : 'Please try again shortly');
     const error = new Error(message);
     error.status = 429;
     error.code = 'rate_limited';
@@ -228,16 +411,58 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
   }
 
   function limit(group, options = {}) {
-    const rule = groupConfig(group);
-    if (!rule?.windowMs || !rule?.max) throw new TypeError(`Unknown rate-limit group: ${group}`);
-    const middleware = function rateLimit(req, res, next) {
-      if (req.method === 'OPTIONS' || options.skip?.(req)) return next();
-      const identity = getIdentity(req, group, options);
-      if (!identity) return next();
-      return incrementGroup(group, identity.rule, identity.id).then((value) => {
-        const error = rateLimitError(req, res, group, identity.rule, value);
-        return error ? next(error) : next();
-      }).catch(() => failOpen(req, res, next, identity.rule));
+    const definition = groupConfig(group);
+    const rules = definition?.rules
+      ? definition.rules.map((rule) => ({ ...rule, group: rule.group || group }))
+      : [{ ...definition, group }];
+    if (!definition || rules.some((rule) => !rule.windowMs || !rule.max || !rule.keyType)) {
+      throw new TypeError(`Unknown rate-limit group: ${group}`);
+    }
+    const middleware = async function rateLimit(req, res, next) {
+      if (req.method === 'OPTIONS'
+        || (group === 'global_api' && req.method === 'GET' && isHealthRequest(req))
+        || options.skip?.(req)) return next();
+      const applied = [];
+      try {
+        for (const rule of rules) {
+          const identity = getIdentity(req, group, options, rule);
+          if (!identity) continue;
+          const value = await incrementGroup(identity.group, rule, identity.id);
+          applied.push({ ...identity, id: identity.id });
+          const error = rateLimitError(
+            req,
+            res,
+            identity.group,
+            rule,
+            value,
+            definition.rateLimitedMessage,
+            identity.identifier,
+          );
+          if (error) {
+            await Promise.all(applied.map((entry) => (
+              decrementGroup(entry.group, entry.rule, entry.id).catch(() => {})
+            )));
+            return next(error);
+          }
+        }
+        if (group === 'login' && applied.length) attachLoginCounterFinalizer(req, applied[0]);
+        if (group === 'global_api' && applied.length) attachGlobalCounterRollback(req, applied[0]);
+        return next();
+      } catch {
+        await Promise.all(applied.map((entry) => (
+          decrementGroup(entry.group, entry.rule, entry.id).catch(() => {})
+        )));
+        const sensitive = rules.some((rule) => rule.sensitive);
+        if (sensitive) {
+          res.set('Retry-After', '1');
+          const error = new Error('Please try again shortly');
+          error.status = 503;
+          error.retryAfter = 1;
+          return next(error);
+        }
+        warnStoreFailure();
+        return next();
+      }
     };
     middleware.rateLimitGroup = group;
     return middleware;
@@ -408,6 +633,7 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     limit,
     limitTogether,
     recordRateLimitAudit,
+    recordAudit,
     checkValidationCooldown,
     recordValidationFailure,
     clearValidationFailures,

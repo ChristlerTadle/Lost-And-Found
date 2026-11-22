@@ -109,6 +109,7 @@ async function start() {
   const app = express();
   app.locals.services = services;
 
+  app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     const origin = req.get('origin');
@@ -125,6 +126,7 @@ async function start() {
     if (req.method === 'OPTIONS') return res.sendStatus(origin === frontendOrigin ? 204 : 403);
     return next();
   });
+  app.use('/api', rateLimits.limit('global_api'));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
   app.use(session({
@@ -146,14 +148,27 @@ async function start() {
   }));
   app.use('/api', createApiRouter({ services, frontendOrigin }));
   app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
-  app.use((error, req, res, next) => {
+  app.use(async (error, req, res, next) => {
     if (res.headersSent) return next(error);
-    if ((error.status === 429 || error.status === 503) && Number.isInteger(error.retryAfter)) {
+    const uploadError = error instanceof multer.MulterError;
+    let status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
+      : error instanceof Error && error.constructor === Error ? 400 : 500;
+    if (typeof req.rateLimitFinalize === 'function') {
+      try {
+        await req.rateLimitFinalize(status);
+      } catch {
+        error = new Error('Please try again shortly');
+        error.status = 503;
+        error.retryAfter = 1;
+        status = 503;
+      }
+    }
+    if ((status === 429 || status === 503) && req.rateLimitGlobalRollback) {
+      await req.rateLimitGlobalRollback();
+    }
+    if ((status === 429 || status === 503) && Number.isInteger(error.retryAfter)) {
       res.set('Retry-After', String(error.retryAfter));
     }
-    const uploadError = error instanceof multer.MulterError;
-    const status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
-      : error instanceof Error && error.constructor === Error ? 400 : 500;
     if (status === 500) console.error(error);
     if ((status === 401 || status === 403)
       && (req.auditProtectedRoute || req.originalUrl.startsWith('/api/admin/'))) {

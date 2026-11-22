@@ -29,6 +29,7 @@ function createAdminUsersRoutes({ controllers, guards, limit, auth, rateLimits }
       return next(error);
     }
   };
+  editUserLimit.rateLimitGroups = ['admin_user_write', 'role_permission_write'];
   const router = express.Router();
   router.get('/users', limit('admin_reads'), guards.requirePermission('GET', '/admin/users'), asyncRoute(controllers.admin.getAdminUsers));
   router.post('/users', limit('admin_user_write'), guards.requirePermission('POST', '/admin/users'), asyncRoute(controllers.admin.postAdminUsers));

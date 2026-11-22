@@ -1,5 +1,20 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { createAuthRoutes } = require('../routes/auth.routes');
+const { createItemsRoutes } = require('../routes/items.routes');
+const { createClaimsRoutes } = require('../routes/claims.routes');
+const { createProfileRoutes } = require('../routes/profile.routes');
+const { createNotificationsRoutes } = require('../routes/notifications.routes');
+const { createStaffRoutes } = require('../routes/staff.routes');
+const { createAdminDashboardRoutes } = require('../routes/admin/dashboard.routes');
+const { createAdminUsersRoutes } = require('../routes/admin/users.routes');
+const { createAdminItemsRoutes } = require('../routes/admin/items.routes');
+const { createAdminClaimsRoutes } = require('../routes/admin/claims.routes');
+const { createAdminSettingsRoutes } = require('../routes/admin/settings.routes');
+const { createAdminMfaRoutes } = require('../routes/admin/mfa.routes');
+const { createAdminSystemRecordsRoutes } = require('../routes/admin/system-records.routes');
+const { createAdminRolePermissionsRoutes } = require('../routes/admin/role-permissions.routes');
+const { createHealthRoutes } = require('../routes/health.routes');
 const { createRateLimitService, normalizeIp } = require('../../src/services/rate-limits');
 const appConfig = require('../../src/config');
 
@@ -286,3 +301,296 @@ test('settings store failures fail closed for writes and open for reads', async 
   assert.equal(await run(service.limit('settings_read')), null);
   assert.equal(await run(service.limitTogether(['settings_overall', 'settings_read'])), null);
 });
+
+test('global API limiter exempts OPTIONS and GET health only', async () => {
+  const service = createRateLimitService({
+    config: {
+      global_api: { windowMs: 1000, max: 1, keyType: 'ip', store: 'memory', sensitive: false },
+    },
+    now: Date.now,
+  });
+  const limit = service.limit('global_api');
+  const run = (method, path) => new Promise((resolve) => {
+    const req = { ...requestFor(null), method, path };
+    limit(req, responseFor(), (error) => resolve(error || null));
+  });
+
+  assert.equal(await run('OPTIONS', '/items'), null);
+  assert.equal(await run('GET', '/health'), null);
+  assert.equal(await run('GET', '/api/health'), null);
+  assert.equal(await run('GET', '/items'), null);
+  assert.equal((await run('GET', '/items'))?.status, 429);
+});
+
+test('Mongo counters serialize parallel hits and reset expired windows without TTL cleanup', async () => {
+  let timestamp = 10_000;
+  const database = createMongoCounterDatabase(() => timestamp);
+  const service = createRateLimitService({
+    database,
+    secret: 'test-secret',
+    config: {
+      register: { windowMs: 1000, max: 20, keyType: 'ip', store: 'mongo', sensitive: false },
+    },
+    now: () => timestamp,
+  });
+  const middleware = service.limit('register');
+  const run = () => new Promise((resolve) => middleware(
+    { ...requestFor(null), method: 'POST', body: {} },
+    responseFor(),
+    (error) => resolve(error || null),
+  ));
+  const parallel = await Promise.all(Array.from({ length: 20 }, run));
+  assert.equal(parallel.filter(Boolean).length, 0);
+  const [stored] = [...database.documents.values()];
+  assert.equal(stored.count, 20);
+  assert.equal((await run())?.status, 429);
+
+  stored.expiresAt = new Date(timestamp - 1);
+  timestamp += 1000;
+  assert.equal(await run(), null);
+  assert.equal([...database.documents.values()][0].count, 1);
+});
+
+test('rate-limit initialization accepts an existing TTL index under a different name', async () => {
+  let createIndexCalls = 0;
+  const database = {
+    collection() {
+      return {
+        async createIndex() {
+          createIndexCalls += 1;
+          throw new Error('Index already exists with a different name');
+        },
+        listIndexes() {
+          return {
+            async toArray() {
+              return [{
+                name: 'rate_limits_expiresAt_ttl',
+                key: { expiresAt: 1 },
+                expireAfterSeconds: 0,
+              }];
+            },
+          };
+        },
+      };
+    },
+  };
+  const service = createRateLimitService({ database });
+
+  await service.initialize();
+  await service.initialize();
+
+  assert.equal(createIndexCalls, 1);
+});
+
+test('login counts failures, resets after success, and separates email keys', async () => {
+  let timestamp = 5000;
+  const service = createRateLimitService({
+    config: {
+      login: { windowMs: 1000, max: 2, keyType: 'ip+email', store: 'memory', sensitive: true, failedStatus: 401 },
+    },
+    now: () => timestamp,
+  });
+  const middleware = service.limit('login');
+  const run = async (email, resultStatus) => {
+    const req = { ...requestFor(null), method: 'POST', body: { email } };
+    const error = await new Promise((resolve) => middleware(req, responseFor(), resolve));
+    if (!error) await req.rateLimitFinalize(resultStatus);
+    return error || null;
+  };
+
+  assert.equal(await run('Member@example.test', 401), null);
+  assert.equal(await run('member@example.test', 401), null);
+  assert.equal((await run('member@example.test', 401))?.status, 429);
+  assert.equal(await run('other@example.test', 401), null);
+  timestamp += 1000;
+  const successful = { ...requestFor(null), method: 'POST', body: { email: 'member@example.test' } };
+  await new Promise((resolve) => middleware(successful, responseFor(), resolve));
+  await successful.rateLimitReset();
+  assert.equal(await run('member@example.test', 401), null);
+
+  timestamp += 1000;
+  assert.equal(await run('member@example.test', 401), null);
+});
+
+test('auth groups return safe limits and fail closed or open per their policy', async () => {
+  let timestamp = 100;
+  const forgottenResponse = 'If an active account uses that email, reset instructions have been sent.';
+  const definitions = {
+    register: { windowMs: 1000, max: 1, keyType: 'ip', store: 'memory', sensitive: false },
+    forgot: {
+      rateLimitedMessage: forgottenResponse,
+      rules: [
+        { group: 'forgot_ip', windowMs: 1000, max: 2, keyType: 'ip', store: 'memory', sensitive: true },
+        { group: 'forgot_email', windowMs: 1000, max: 1, keyType: 'email', store: 'memory', sensitive: true },
+      ],
+    },
+    reset: { windowMs: 1000, max: 1, keyType: 'ip', store: 'memory', sensitive: true },
+    google_signin: { windowMs: 1000, max: 1, keyType: 'ip', store: 'mongo', sensitive: false },
+    mfa_login: { windowMs: 1000, max: 1, keyType: 'ip', store: 'memory', sensitive: true },
+  };
+  const service = createRateLimitService({ config: definitions, now: () => timestamp });
+  const run = async (group, req) => new Promise((resolve) => (
+    service.limit(group)(req, responseFor(), (error) => resolve(error || null))
+  ));
+  const request = (ip, email) => ({
+    ...requestFor(null, ip), method: 'POST', body: email ? { email } : {},
+  });
+
+  assert.equal(await run('register', request('198.51.100.40')), null);
+  assert.equal((await run('register', request('198.51.100.40')))?.status, 429);
+  const forgotReq = request('198.51.100.41', 'private@example.test');
+  assert.equal(await run('forgot', forgotReq), null);
+  const forgotError = await run('forgot', forgotReq);
+  assert.equal(forgotError.status, 429);
+  assert.equal(forgotError.message, forgottenResponse);
+  for (const group of ['reset', 'google_signin', 'mfa_login']) {
+    const req = request(`198.51.100.${group === 'reset' ? 42 : group === 'google_signin' ? 43 : 44}`);
+    assert.equal(await run(group, req), null);
+    assert.equal((await run(group, req))?.status, 429);
+  }
+  timestamp += 1000;
+  assert.equal(await run('register', request('198.51.100.40')), null);
+});
+
+test('sensitive auth store outages fail closed while global and Google limits fail open', async () => {
+  const database = {
+    collection() {
+      return {
+        async findOneAndUpdate() { throw new Error('simulated outage'); },
+      };
+    },
+  };
+  const groups = {
+    login: { windowMs: 1000, max: 10, keyType: 'ip+email', store: 'mongo', sensitive: true, failedStatus: 401 },
+    forgot: {
+      rules: [{ group: 'forgot_ip', windowMs: 1000, max: 10, keyType: 'ip', store: 'mongo', sensitive: true }],
+    },
+    reset: { windowMs: 1000, max: 10, keyType: 'ip', store: 'mongo', sensitive: true },
+    mfa_login: { windowMs: 1000, max: 10, keyType: 'ip', store: 'mongo', sensitive: true },
+    google_signin: { windowMs: 1000, max: 10, keyType: 'ip', store: 'mongo', sensitive: false },
+    global_api: { windowMs: 1000, max: 10, keyType: 'ip', store: 'memory', sensitive: false },
+  };
+  const service = createRateLimitService({ database, config: groups });
+  for (const group of ['login', 'forgot', 'reset', 'mfa_login']) {
+    const res = responseFor();
+    const error = await new Promise((resolve) => service.limit(group)(
+      { ...requestFor(null), method: 'POST', body: { email: 'private@example.test' } },
+      res,
+      resolve,
+    ));
+    assert.equal(error?.status, 503, group);
+    assert.equal(error?.message, 'Please try again shortly');
+    assert.equal(res.headers['Retry-After'], '1');
+  }
+  for (const group of ['google_signin', 'global_api']) {
+    const error = await new Promise((resolve) => service.limit(group)(
+      { ...requestFor(null), method: 'GET', body: {} },
+      responseFor(),
+      (nextError) => resolve(nextError || null),
+    ));
+    assert.equal(error, null, group);
+  }
+});
+
+test('all registered API routes have a limiter except the three explicit exemptions', () => {
+  const service = createRateLimitService({ config: appConfig.rateLimits });
+  const noop = (_req, _res, next) => next?.();
+  const controllers = new Proxy({}, { get: () => new Proxy({}, { get: () => noop }) });
+  const guards = new Proxy({}, {
+    get: (_target, key) => key === 'requirePermission' || key === 'requireRole' ? () => noop : noop,
+  });
+  const factories = [
+    ['', createHealthRoutes, {}],
+    ['/auth', createAuthRoutes, { controllers: controllers, auth: controllers.auth, frontendOrigin: 'http://localhost' }],
+    ['/items', createItemsRoutes, {}],
+    ['/claims', createClaimsRoutes, {}],
+    ['/profile', createProfileRoutes, {}],
+    ['/notifications', createNotificationsRoutes, {}],
+    ['/staff', createStaffRoutes, { frontendOrigin: 'http://localhost' }],
+    ['/admin', createAdminDashboardRoutes, {}],
+    ['/admin', createAdminUsersRoutes, { auth: {} }],
+    ['/admin', createAdminItemsRoutes, { frontendOrigin: 'http://localhost' }],
+    ['/admin', createAdminClaimsRoutes, {}],
+    ['/admin', createAdminSettingsRoutes, { frontendOrigin: 'http://localhost', integrationSecurity: {} }],
+    ['/admin/mfa', createAdminMfaRoutes, { frontendOrigin: 'http://localhost' }],
+    ['/admin', createAdminSystemRecordsRoutes, {}],
+    ['/admin', createAdminRolePermissionsRoutes, {}],
+  ];
+  const registered = factories.flatMap(([prefix, factory, extra]) => {
+    const router = factory({
+      controllers,
+      guards,
+      limit: service.limit,
+      rateLimits: service,
+      frontendOrigin: 'http://localhost',
+      integrationSecurity: {},
+      auth: {},
+      ...extra,
+    });
+    return router.stack.flatMap((layer) => {
+      if (!layer.route) return [];
+      const path = layer.route.path === '/' ? prefix : `${prefix}${layer.route.path}`;
+      const groups = layer.route.stack.flatMap(({ handle }) => (
+        handle.rateLimitGroup ? [handle.rateLimitGroup] : handle.rateLimitGroups || []
+      ));
+      return Object.keys(layer.route.methods)
+        .filter((method) => method !== '_all')
+        .map((method) => ({ route: `${method.toUpperCase()} ${path}`, groups }));
+    });
+  });
+  const exemptions = ['GET /health', 'GET /auth/me', 'POST /auth/logout'];
+  assert.deepEqual(registered.filter(({ groups }) => groups.length === 0)
+    .map(({ route }) => route).sort(), exemptions.sort());
+  for (const { route, groups } of registered) {
+    assert.ok(groups.every((group) => appConfig.rateLimits[group]), `${route} has an unknown limiter group`);
+  }
+});
+
+function createMongoCounterDatabase(now) {
+  const documents = new Map();
+  let queue = Promise.resolve();
+  const serial = (operation) => {
+    const result = queue.then(operation);
+    queue = result.catch(() => {});
+    return result;
+  };
+  const collection = {
+    findOne({ _id }) {
+      return serial(() => {
+        const document = documents.get(_id);
+        return document ? structuredClone(document) : null;
+      });
+    },
+    findOneAndUpdate({ _id }, pipeline) {
+      const windowMs = pipeline[0].$set.expiresAt.$cond[1].$add[1];
+      return serial(() => {
+        const previous = documents.get(_id);
+        const expired = !previous || new Date(previous.expiresAt).getTime() <= now();
+        const document = {
+          _id,
+          count: expired ? 1 : previous.count + 1,
+          expiresAt: expired ? new Date(now() + windowMs) : previous.expiresAt,
+          type: pipeline[0].$set.type,
+        };
+        documents.set(_id, document);
+        return structuredClone(document);
+      });
+    },
+    updateOne({ _id, count }, update) {
+      return serial(() => {
+        const document = documents.get(_id);
+        if (!document || document.count <= (count?.$gt ?? -Infinity)) return { modifiedCount: 0 };
+        document.count += update.$inc.count;
+        return { modifiedCount: 1 };
+      });
+    },
+    deleteOne({ _id }) {
+      return serial(() => ({ deletedCount: documents.delete(_id) ? 1 : 0 }));
+    },
+    async createIndex() {},
+  };
+  return {
+    documents,
+    collection() { return collection; },
+  };
+}

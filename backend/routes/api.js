@@ -93,9 +93,9 @@ function createApiRouter({ services, frontendOrigin }) {
     }),
   };
 
+  router.use('/auth', createAuthRoutes({ controllers, frontendOrigin, limit }));
   router.use(createAdminMfaSessionGuard(services.adminMfa));
   router.use('/', createHealthRoutes());
-  router.use('/auth', createAuthRoutes({ controllers, frontendOrigin }));
   router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin, limit }));
   router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin, limit }));
   router.use('/claims', createClaimsRoutes({ controllers, guards, limit }));

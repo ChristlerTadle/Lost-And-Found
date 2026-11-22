@@ -127,7 +127,7 @@ If there is no active admin account, create the minimal permission-management ad
 - `FRONTEND_PORT` changes the frontend port (default `5173`).
 - `API_PORT` changes the API port (default `3001`).
 - `TRUST_PROXY` defaults to `false`. Set it to a hop count (for example, `1`) or a comma-separated list of trusted proxy CIDRs only when the API is behind those proxies. Do not set it to `true`; an incorrect value can make client IP-based protections trust forwarded headers.
-- Multiple API instances can share MongoDB-backed auth limits and sessions when they use the same database and session configuration. The global API guard, integration token buckets, and existing settings limits are process-local, so their effective allowance is per instance.
+- The API-wide guard is 1,500 requests per IP per 15 minutes; the global guard and integration-call token buckets are process-local, so their effective allowance is per instance. Auth, settings-write, and session data are stored in MongoDB and shared across API instances using the same database and session configuration. MongoDB outages also disrupt login because sessions are stored there.
 - `API_BASE_URL` changes the API URL used by the frontend.
 - `FRONTEND_ORIGIN` sets the allowed frontend origin for credentialed API requests (default `http://localhost:5173`).
 - `API_GOOGLE_REDIRECT_URI` sets the callback URL for Google sign-in. For compatibility with existing `.env` files, `GOOGLE_REDIRECT_URI` is also accepted. If both are set, `API_GOOGLE_REDIRECT_URI` takes precedence. If neither is set, the API derives the callback from `API_PORT` (default `http://localhost:3001/api/auth/google/callback`).

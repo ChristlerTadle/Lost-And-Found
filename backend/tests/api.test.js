@@ -13,35 +13,9 @@ const {
   ROLE_PERMISSION_ROUTE_MAP,
   normalizeRolePermissions,
 } = require('../config/role-permissions');
-const { createAuthRoutes, createPublicAuthRateLimit } = require('../routes/auth.routes');
+const { createAuthRoutes } = require('../routes/auth.routes');
 const { createHealthRoutes } = require('../routes/health.routes');
 const { IntegrationError } = require('../../src/services/integration-calls');
-
-test('public login, register, and forgot-password share a 20-per-minute IP limit', () => {
-  let timestamp = 0;
-  const limit = createPublicAuthRateLimit({ limit: 20, windowMs: 60_000, now: () => timestamp });
-  let proceeded = 0;
-  const makeResponse = () => ({
-    headers: {},
-    set(name, value) { this.headers[name] = value; return this; },
-    status(value) { this.statusCode = value; return this; },
-    json(value) { this.body = value; return this; },
-  });
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const result = makeResponse();
-    limit({ ip: '192.0.2.10' }, result, () => { proceeded += 1; });
-  }
-  const blocked = makeResponse();
-  limit({ ip: '192.0.2.10' }, blocked, () => { proceeded += 1; });
-  assert.equal(proceeded, 20);
-  assert.equal(blocked.statusCode, 429);
-  assert.equal(blocked.headers['Retry-After'], '60');
-  assert.deepEqual(blocked.body, { error: 'Please try again shortly' });
-  timestamp += 60_000;
-  const recovered = makeResponse();
-  limit({ ip: '192.0.2.10' }, recovered, () => { proceeded += 1; });
-  assert.equal(proceeded, 21);
-});
 
 const user = { id: 'test-user', full_name: 'Test User', role_name: 'user', status: 'active' };
 const staff = { id: 'test-staff', full_name: 'Test Staff', role_name: 'staff', status: 'active' };
@@ -1585,7 +1559,7 @@ test('public health and authentication routes are explicitly listed as permissio
   const declared = [
     ...createHealthRoutes().stack.flatMap((layer) => Object.keys(layer.route.methods)
       .map((method) => `${method.toUpperCase()} ${layer.route.path}`)),
-    ...createAuthRoutes({ controllers }).stack.flatMap((layer) => Object.keys(layer.route.methods)
+    ...createAuthRoutes({ controllers, limit: () => noop }).stack.flatMap((layer) => Object.keys(layer.route.methods)
       .map((method) => `${method.toUpperCase()} /auth${layer.route.path}`)),
   ];
   const exempt = ROLE_PERMISSION_EXEMPT_ROUTES.map(({ method, path }) => `${method} ${path}`);
@@ -1598,7 +1572,7 @@ test('invalid login is returned as a client error', async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: 'unknown@example.com', password: 'bad-password' }),
   });
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 401);
   assert.equal(auditEvents.at(-1).action, 'auth.login_failed');
   assert.equal(auditEvents.at(-1).result, 'failed');
 });
@@ -1711,7 +1685,7 @@ test('enabled reCAPTCHA is verified before password authentication', async () =>
         'g-recaptcha-response': 'verified-test-token',
       }),
     });
-    assert.equal(verifiedResponse.status, 400);
+    assert.equal(verifiedResponse.status, 401);
     assert.equal((await verifiedResponse.json()).error, 'Invalid credentials.');
   } finally {
     recaptchaEnabled = false;

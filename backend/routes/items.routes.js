@@ -20,6 +20,7 @@ function createItemsRoutes({ controllers, guards, frontendOrigin, limit }) {
       ? imageUpload(req, res, next)
       : next()
   );
+  multipartImageUpload.rateLimitGroup = 'image_upload';
   const rejectOversizedUpload = (req, res, next) => {
     const contentLength = Number(req.get('content-length') || 0);
     if (/^multipart\/form-data(?:;|$)/i.test(req.get('content-type') || '')
