@@ -64,6 +64,7 @@ async function start() {
     audit,
     secret: config.sessionSecret,
     config: config.rateLimits,
+    controls: config.rateLimitControls,
   });
   await rateLimits.initialize();
   const callIntegration = createIntegrationCaller({ integrationSettings, audit, rateLimits });

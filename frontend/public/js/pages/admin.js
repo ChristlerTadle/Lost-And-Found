@@ -499,7 +499,66 @@ async function adminSettings() {
         </div>
       </form>
     </dialog>
+    <details class="card rate-limits-panel">
+      <summary>Rate limits</summary>
+      <p class="rate-limits-note">Read-only limits currently configured by the server. Each integration card sets its own Calls per minute value.</p>
+      <button class="button button-outline" type="button" data-action="load-rate-limits">Load rate limits</button>
+      <div class="rate-limits-content" data-rate-limits-content></div>
+    </details>
   </main>`;
+}
+
+function formatRateLimitWindow(windowSeconds) {
+  if (windowSeconds >= 86400 && windowSeconds % 86400 === 0) {
+    const days = windowSeconds / 86400;
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
+  if (windowSeconds >= 3600 && windowSeconds % 3600 === 0) {
+    const hours = windowSeconds / 3600;
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  if (windowSeconds >= 60 && windowSeconds % 60 === 0) {
+    return `${windowSeconds / 60} min`;
+  }
+  return `${windowSeconds} sec`;
+}
+
+function renderRateLimitTable(data) {
+  const moduleOrder = [
+    'Public and auth', 'User', 'Staff', 'Admin',
+    'Settings and security', 'Integrations',
+  ];
+  const grouped = new Map();
+  for (const limit of data.limits || []) {
+    if (!grouped.has(limit.module)) grouped.set(limit.module, []);
+    grouped.get(limit.module).push(limit);
+  }
+  const sections = moduleOrder.filter((module) => grouped.has(module)).map((module) => {
+    const rows = grouped.get(module);
+    const windowLabel = (row) => `<span title="${h(row.windowSeconds)} seconds">${h(formatRateLimitWindow(row.windowSeconds))}</span>`;
+    const tableRows = rows.map((row) => `<tr>
+      <th scope="row">${h(row.label)}</th><td>${h(row.action)}</td>
+      <td>${h(row.max)}</td><td>${windowLabel(row)}</td>
+      <td>${h(row.keyType)}</td><td>${h(row.store)}</td>
+      <td>${h(row.failureMode)}</td><td>${h(row.source)}</td></tr>`).join('');
+    const cards = rows.map((row) => `<article class="rate-limit-card">
+      <h3>${h(row.label)}</h3><p>${h(row.action)}</p>
+      <dl><div><dt>Max</dt><dd>${h(row.max)}</dd></div>
+        <div><dt>Window</dt><dd>${windowLabel(row)}</dd></div>
+        <div><dt>Key</dt><dd>${h(row.keyType)}</dd></div>
+        <div><dt>Store</dt><dd>${h(row.store)}</dd></div>
+        <div><dt>Store outage</dt><dd>${h(row.failureMode)}</dd></div>
+        <div><dt>Source</dt><dd>${h(row.source)}</dd></div></dl></article>`).join('');
+    return `<section class="rate-limit-module"><h3>${h(module)}</h3>
+      <div class="rate-limit-table-wrap"><table class="rate-limit-table">
+        <thead><tr><th>Limit</th><th>Action</th><th>Max</th><th>Window</th>
+          <th>Key</th><th>Store</th><th>Store outage</th><th>Source</th></tr></thead>
+        <tbody>${tableRows}</tbody></table></div>
+      <div class="rate-limit-cards">${cards}</div></section>`;
+  }).join('');
+  const activeProfile = data.activeProfile
+    ? `<p class="rate-limits-note">Active profile: ${h(data.activeProfile)}</p>` : '';
+  return `${activeProfile}${sections}<p class="rate-limits-note">Fail closed: requests are refused if the database is unavailable. Fail open: requests are allowed.</p><p class="rate-limits-note">${h(data.note || '')}</p>`;
 }
 
 async function adminSystemRecords() {
@@ -599,4 +658,7 @@ async function adminSystemRecords() {
   </main>`;
 }
 
-export { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords };
+export {
+  adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims,
+  adminInventory, adminSettings, adminSystemRecords, renderRateLimitTable,
+};

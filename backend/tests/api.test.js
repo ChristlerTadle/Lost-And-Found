@@ -16,6 +16,7 @@ const {
 const { createAuthRoutes } = require('../routes/auth.routes');
 const { createHealthRoutes } = require('../routes/health.routes');
 const { IntegrationError } = require('../../src/services/integration-calls');
+const appConfig = require('../../src/config');
 
 const user = { id: 'test-user', full_name: 'Test User', role_name: 'user', status: 'active' };
 const staff = { id: 'test-staff', full_name: 'Test Staff', role_name: 'staff', status: 'active' };
@@ -1165,6 +1166,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   for (const account of [user, staff]) {
     for (const [path, method] of [
       ['/admin/settings/access', 'GET'],
+      ['/admin/settings/rate-limits', 'GET'],
       ['/admin/settings', 'GET'],
       ['/admin/settings', 'PUT'],
       ['/admin/settings/google_auth/verify', 'POST'],
@@ -1195,6 +1197,8 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
 
   const anonymousResponse = await fetch(`${baseUrl}/admin/settings`);
   assert.equal(anonymousResponse.status, 401);
+  const anonymousRateLimitsResponse = await fetch(`${baseUrl}/admin/settings/rate-limits`);
+  assert.equal(anonymousRateLimitsResponse.status, 401);
 
   const accessResponse = await fetch(`${baseUrl}/admin/settings/access`, {
     headers: { 'x-test-user': admin.id },
@@ -1203,10 +1207,25 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   const access = await accessResponse.json();
   assert.equal(access.unlocked, false);
 
+  const adminPermissions = permissionsByRole.get('admin');
+  permissionsByRole.set('admin', adminPermissions.filter((permission) => permission !== 'manage_integrations'));
+  try {
+    const permissionDenied = await fetch(`${baseUrl}/admin/settings/rate-limits`, {
+      headers: { 'x-test-user': admin.id },
+    });
+    assert.equal(permissionDenied.status, 403);
+  } finally {
+    permissionsByRole.set('admin', adminPermissions);
+  }
+
   const lockedSettings = await fetch(`${baseUrl}/admin/settings`, {
     headers: { 'x-test-user': admin.id },
   });
   assert.equal(lockedSettings.status, 403);
+  const lockedRateLimits = await fetch(`${baseUrl}/admin/settings/rate-limits`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(lockedRateLimits.status, 403);
   for (const [path, method] of [
     ['/admin/settings', 'PUT'],
     ['/admin/settings/google_auth/verify', 'POST'],
@@ -1250,6 +1269,30 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   assert.equal(settingsResponse.status, 200);
   const settings = await settingsResponse.json();
   assert.equal(JSON.stringify(settings).includes('full-secret-value'), false);
+
+  const rateLimitsResponse = await fetch(`${baseUrl}/admin/settings/rate-limits`, {
+    headers: { 'x-test-user': admin.id },
+  });
+  assert.equal(rateLimitsResponse.status, 200);
+  const rateLimitTable = await rateLimitsResponse.json();
+  assert.equal(rateLimitTable.activeProfile, null);
+  assert.match(rateLimitTable.note, /Calls per minute/);
+  const rateLimitRow = (label) => rateLimitTable.limits.find((entry) => entry.label === label);
+  assert.equal(rateLimitRow('User reads').max, appConfig.rateLimits.user_reads.max);
+  assert.equal(rateLimitRow('Settings overall').windowSeconds,
+    appConfig.rateLimits.settings_overall.windowMs / 1000);
+  assert.equal(rateLimitRow('Verification-code requests').max,
+    appConfig.rateLimitControls.integrationSettings.codeRequestLimit);
+  const expectedRateLimitFields = [
+    'action', 'failureMode', 'keyType', 'label', 'max', 'module', 'source', 'store', 'windowSeconds',
+  ].sort();
+  for (const row of rateLimitTable.limits) {
+    assert.deepEqual(Object.keys(row).sort(), expectedRateLimitFields);
+  }
+  const serializedRateLimitTable = JSON.stringify(rateLimitTable);
+  for (const sensitiveValue of ['test-admin', 'test-user', 'full-secret-value', 'saved-password', 'mailer@example.test']) {
+    assert.equal(serializedRateLimitTable.includes(sensitiveValue), false);
+  }
 
   const smtpTestResponse = await fetch(`${baseUrl}/admin/settings/smtp/test`, {
     method: 'POST',

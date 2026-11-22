@@ -81,7 +81,14 @@ function resultDocument(result) {
   return result?.value && !result._id ? result.value : result;
 }
 
-function createRateLimitService({ database, audit, secret = '', config = {}, now = Date.now } = {}) {
+function createRateLimitService({
+  database,
+  audit,
+  secret = '',
+  config = {},
+  controls = {},
+  now = Date.now,
+} = {}) {
   const memoryStores = new Map();
   let warnedAt = 0;
   let auditCollection;
@@ -546,7 +553,7 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     return middleware;
   }
 
-  const validationRule = groupConfig('validation_cooldown');
+  const validationRule = controls.validationCooldown || groupConfig('validation_cooldown');
   const validationId = (integrationId) => hashIdentifier('validation_cooldown', 'resource', integrationId);
 
   function validationStoreError() {

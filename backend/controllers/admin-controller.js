@@ -3,6 +3,7 @@ const path = require('node:path');
 const { createHash, randomBytes } = require('node:crypto');
 const { saveSession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
+const { buildRateLimitRows } = require('../../src/services/rate-limit-catalog');
 
 function createAdminController({
   auth,
@@ -20,6 +21,7 @@ function createAdminController({
   callIntegration,
   audit,
   frontendOrigin,
+  rateLimitConfig,
 }) {
   return {
     getAdminDashboard: async (req, res) => {
@@ -437,6 +439,21 @@ function createAdminController({
         verificationEmailError: state.verificationEmailError,
         verificationRecipient: state.maskedRecipient,
         pendingCode,
+      });
+    },
+
+    getAdminSettingsRateLimits: async (_req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const limits = buildRateLimitRows(rateLimitConfig).map(({
+        kind: _kind,
+        configGroup: _configGroup,
+        controlId: _controlId,
+        ...row
+      }) => row);
+      return res.json({
+        limits,
+        activeProfile: rateLimitConfig.activeRateLimitProfile || null,
+        note: 'Each integration card sets its own Calls per minute value.',
       });
     },
 

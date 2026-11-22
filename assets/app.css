@@ -760,6 +760,37 @@ svg { flex-shrink: 0; }
 .integration-code-dialog h2 { font-size: 18px; }
 .integration-code-dialog p { color: var(--muted); line-height: 1.5; }
 .integration-code-dialog .integration-card-actions { justify-content: flex-end; margin-top: 4px; padding-top: 12px; }
+.rate-limits-panel { margin-top: 18px; padding: 18px 20px; }
+.rate-limits-panel > summary { cursor: pointer; font-size: 17px; font-weight: 700; }
+.rate-limits-panel > summary::marker { color: var(--green); }
+.rate-limits-panel > p, .rate-limits-note { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.rate-limits-panel > p { margin: 10px 0; }
+.rate-limits-panel > .button { margin-bottom: 12px; }
+.rate-limit-module { margin-top: 18px; }
+.rate-limit-module > h3 { border-bottom: 1px solid var(--line); font-size: 15px; margin-bottom: 10px; padding-bottom: 8px; }
+.rate-limit-table-wrap { overflow-x: auto; }
+.rate-limit-table { border-collapse: collapse; font-size: 12px; min-width: 720px; table-layout: fixed; width: 100%; }
+.rate-limit-table th:nth-child(1) { width: 14%; }
+.rate-limit-table th:nth-child(2) { width: 24%; }
+.rate-limit-table th:nth-child(3) { width: 8%; }
+.rate-limit-table th:nth-child(4) { width: 10%; }
+.rate-limit-table th:nth-child(5) { width: 13%; }
+.rate-limit-table th:nth-child(6) { width: 9%; }
+.rate-limit-table th:nth-child(7) { width: 12%; }
+.rate-limit-table th:nth-child(8) { width: 10%; }
+.rate-limit-table th, .rate-limit-table td { border-bottom: 1px solid var(--line); padding: 9px 8px; text-align: left; vertical-align: top; }
+.rate-limit-table thead th { color: var(--muted); font-size: 11px; }
+.rate-limit-table tbody th { color: #1f2937; font-weight: 600; overflow-wrap: anywhere; white-space: normal; }
+.rate-limit-table td { overflow-wrap: anywhere; }
+.rate-limit-cards { display: none; }
+.rate-limit-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.rate-limit-card + .rate-limit-card { margin-top: 10px; }
+.rate-limit-card h3 { font-size: 15px; }
+.rate-limit-card p { color: var(--muted); line-height: 1.5; margin-top: 5px; }
+.rate-limit-card dl { display: grid; gap: 7px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px; }
+.rate-limit-card dl > div { min-width: 0; }
+.rate-limit-card dt { color: var(--muted); font-size: 12px; }
+.rate-limit-card dd { color: #1f2937; font-size: 13px; margin: 2px 0 0; overflow-wrap: anywhere; }
 .admin-items-page { max-width: 900px; }
 .admin-items-page .page-header { align-items: center; }
 .admin-items-page .page-header .button { white-space: nowrap; }
@@ -786,6 +817,13 @@ svg { flex-shrink: 0; }
   .integration-card-actions { justify-content: flex-start; }
   .integration-default-actions { justify-content: flex-start; }
   .integration-fields { grid-template-columns: minmax(0, 1fr); }
+  .rate-limits-panel { padding: 16px; }
+  .rate-limits-panel > p, .rate-limits-note { font-size: 16px; }
+  .rate-limits-panel > .button, .rate-limit-module > h3 { font-size: 16px; }
+  .rate-limit-table-wrap { display: none; }
+  .rate-limit-cards { display: block; }
+  .rate-limit-card h3 { font-size: 16px; }
+  .rate-limit-card p, .rate-limit-card dt, .rate-limit-card dd { font-size: 16px; }
 }
 .dashboard-panel-head { align-items: center; display: flex; justify-content: space-between; margin-bottom: 10px; }
 .dashboard-panel-head h3 { font-size: 15px; }

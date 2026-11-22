@@ -1,22 +1,21 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createAuthRoutes } = require('../routes/auth.routes');
-const { createItemsRoutes } = require('../routes/items.routes');
-const { createClaimsRoutes } = require('../routes/claims.routes');
-const { createProfileRoutes } = require('../routes/profile.routes');
-const { createNotificationsRoutes } = require('../routes/notifications.routes');
-const { createStaffRoutes } = require('../routes/staff.routes');
-const { createAdminDashboardRoutes } = require('../routes/admin/dashboard.routes');
-const { createAdminUsersRoutes } = require('../routes/admin/users.routes');
-const { createAdminItemsRoutes } = require('../routes/admin/items.routes');
-const { createAdminClaimsRoutes } = require('../routes/admin/claims.routes');
-const { createAdminSettingsRoutes } = require('../routes/admin/settings.routes');
-const { createAdminMfaRoutes } = require('../routes/admin/mfa.routes');
-const { createAdminSystemRecordsRoutes } = require('../routes/admin/system-records.routes');
-const { createAdminRolePermissionsRoutes } = require('../routes/admin/role-permissions.routes');
-const { createHealthRoutes } = require('../routes/health.routes');
+const { createApiRouteModules } = require('../routes/api');
 const { createRateLimitService, normalizeIp } = require('../../src/services/rate-limits');
+const { buildRateLimitRows } = require('../../src/services/rate-limit-catalog');
 const appConfig = require('../../src/config');
+
+const keyTypeLabels = {
+  account: 'per account',
+  'account+ip': 'per account and IP',
+  'account+item': 'per account and item',
+  'account+resource': 'per account and integration',
+  email: 'per email',
+  ip: 'per IP',
+  'ip+email': 'per IP and email',
+  resource: 'per integration',
+  session: 'per settings session',
+};
 
 function requestFor(accountId, ip = '192.0.2.10') {
   return {
@@ -32,6 +31,42 @@ function responseFor() {
     headers: {},
     set(name, value) { this.headers[name] = value; return this; },
   };
+}
+
+function assertRateLimitCoverage(registered, rateLimits, tableRows, exemptions, configuredControls = []) {
+  const exemptionSet = new Set(exemptions.map(({ method, path }) => `${method} ${path}`));
+  const ungroupedRoutes = [];
+  const usedGroups = new Set(['global_api']);
+  for (const { route, groups } of registered) {
+    if (!groups.length) {
+      ungroupedRoutes.push(route);
+      continue;
+    }
+    for (const group of groups) {
+      assert.ok(rateLimits[group], `${route} uses unknown limiter group ${group}`);
+      usedGroups.add(group);
+    }
+  }
+  assert.deepEqual(
+    ungroupedRoutes.sort(),
+    [...exemptionSet].sort(),
+    'Ungrouped routes must match the explicit exemption list exactly.',
+  );
+  for (const group of Object.keys(rateLimits)) {
+    assert.ok(usedGroups.has(group), `Rate-limit group ${group} is not used by a route`);
+  }
+  const tableGroups = new Set(tableRows
+    .filter((row) => row.kind === 'route')
+    .map((row) => row.configGroup));
+  for (const group of Object.keys(rateLimits)) {
+    assert.ok(tableGroups.has(group), `Settings table omits rate-limit group ${group}`);
+  }
+  const tableControlIds = new Set(tableRows
+    .filter((row) => row.kind === 'control')
+    .map((row) => row.controlId));
+  for (const control of configuredControls) {
+    assert.ok(tableControlIds.has(control.id), `Settings table omits control ${control.id}`);
+  }
 }
 
 const config = {
@@ -210,10 +245,10 @@ test('validation cooldown persists across service instances and clears on succes
           const result = {
             _id,
             count,
-            expiresAt: new Date(timestamp + appConfig.rateLimits.validation_cooldown.windowMs
-              + appConfig.rateLimits.validation_cooldown.cooldownMs),
-            lockedUntil: count >= appConfig.rateLimits.validation_cooldown.max
-              ? new Date(timestamp + appConfig.rateLimits.validation_cooldown.cooldownMs)
+            expiresAt: new Date(timestamp + appConfig.rateLimitControls.validationCooldown.windowMs
+              + appConfig.rateLimitControls.validationCooldown.cooldownMs),
+            lockedUntil: count >= appConfig.rateLimitControls.validationCooldown.max
+              ? new Date(timestamp + appConfig.rateLimitControls.validationCooldown.cooldownMs)
               : null,
             type: 'validation_cooldown',
           };
@@ -231,11 +266,12 @@ test('validation cooldown persists across service instances and clears on succes
     database,
     secret: 'test-secret',
     config: appConfig.rateLimits,
+    controls: appConfig.rateLimitControls,
     now: () => timestamp,
   });
   const firstService = createService();
   await firstService.initialize();
-  for (let failure = 0; failure < appConfig.rateLimits.validation_cooldown.max; failure += 1) {
+  for (let failure = 0; failure < appConfig.rateLimitControls.validationCooldown.max; failure += 1) {
     await firstService.recordValidationFailure('smtp');
   }
   assert.equal(documents.size, 1);
@@ -246,7 +282,7 @@ test('validation cooldown persists across service instances and clears on succes
     status: 429,
     code: 'validation_cooldown',
   });
-  timestamp += appConfig.rateLimits.validation_cooldown.cooldownMs;
+  timestamp += appConfig.rateLimitControls.validationCooldown.cooldownMs;
   await restartedService.checkValidationCooldown('smtp');
   await restartedService.clearValidationFailures('smtp');
   assert.equal(documents.size, 0);
@@ -492,41 +528,22 @@ test('sensitive auth store outages fail closed while global and Google limits fa
   }
 });
 
-test('all registered API routes have a limiter except the three explicit exemptions', () => {
+test('all registered API routes and Settings table entries have configured limiters', async (t) => {
   const service = createRateLimitService({ config: appConfig.rateLimits });
   const noop = (_req, _res, next) => next?.();
   const controllers = new Proxy({}, { get: () => new Proxy({}, { get: () => noop }) });
   const guards = new Proxy({}, {
     get: (_target, key) => key === 'requirePermission' || key === 'requireRole' ? () => noop : noop,
   });
-  const factories = [
-    ['', createHealthRoutes, {}],
-    ['/auth', createAuthRoutes, { controllers: controllers, auth: controllers.auth, frontendOrigin: 'http://localhost' }],
-    ['/items', createItemsRoutes, {}],
-    ['/claims', createClaimsRoutes, {}],
-    ['/profile', createProfileRoutes, {}],
-    ['/notifications', createNotificationsRoutes, {}],
-    ['/staff', createStaffRoutes, { frontendOrigin: 'http://localhost' }],
-    ['/admin', createAdminDashboardRoutes, {}],
-    ['/admin', createAdminUsersRoutes, { auth: {} }],
-    ['/admin', createAdminItemsRoutes, { frontendOrigin: 'http://localhost' }],
-    ['/admin', createAdminClaimsRoutes, {}],
-    ['/admin', createAdminSettingsRoutes, { frontendOrigin: 'http://localhost', integrationSecurity: {} }],
-    ['/admin/mfa', createAdminMfaRoutes, { frontendOrigin: 'http://localhost' }],
-    ['/admin', createAdminSystemRecordsRoutes, {}],
-    ['/admin', createAdminRolePermissionsRoutes, {}],
-  ];
-  const registered = factories.flatMap(([prefix, factory, extra]) => {
-    const router = factory({
-      controllers,
-      guards,
-      limit: service.limit,
-      rateLimits: service,
-      frontendOrigin: 'http://localhost',
-      integrationSecurity: {},
-      auth: {},
-      ...extra,
-    });
+  const routeModules = createApiRouteModules({
+    services: { auth: {}, integrationSecurity: {} },
+    controllers,
+    guards,
+    limit: service.limit,
+    rateLimits: service,
+    frontendOrigin: 'http://localhost',
+  });
+  const registered = routeModules.flatMap(({ prefix, router }) => {
     return router.stack.flatMap((layer) => {
       if (!layer.route) return [];
       const path = layer.route.path === '/' ? prefix : `${prefix}${layer.route.path}`;
@@ -538,12 +555,91 @@ test('all registered API routes have a limiter except the three explicit exempti
         .map((method) => ({ route: `${method.toUpperCase()} ${path}`, groups }));
     });
   });
-  const exemptions = ['GET /health', 'GET /auth/me', 'POST /auth/logout'];
-  assert.deepEqual(registered.filter(({ groups }) => groups.length === 0)
-    .map(({ route }) => route).sort(), exemptions.sort());
-  for (const { route, groups } of registered) {
-    assert.ok(groups.every((group) => appConfig.rateLimits[group]), `${route} has an unknown limiter group`);
+  const tableRows = buildRateLimitRows(appConfig);
+  assertRateLimitCoverage(
+    registered,
+    appConfig.rateLimits,
+    tableRows,
+    appConfig.rateLimitRouteExemptions,
+    appConfig.rateLimitControlRows,
+  );
+  for (const [configGroup, definition] of Object.entries(appConfig.rateLimits)) {
+    const expectedRules = definition.rules || [definition];
+    const actualRows = tableRows.filter((row) => row.kind === 'route' && row.configGroup === configGroup);
+    assert.equal(actualRows.length, expectedRules.length, `${configGroup} row count`);
+    for (const expected of expectedRules) {
+      assert.ok(actualRows.some((row) => (
+        row.max === expected.max
+        && row.windowSeconds === expected.windowMs / 1000
+        && row.keyType === keyTypeLabels[expected.keyType]
+        && row.store === expected.store
+        && row.failureMode === (expected.store === 'mongo' && expected.sensitive ? 'Fail closed' : 'Fail open')
+      )), `${configGroup} table values match config`);
+    }
   }
+  for (const expected of appConfig.rateLimitControlRows) {
+    const actual = tableRows.find((row) => row.controlId === expected.id);
+    assert.ok(actual, `Settings table includes control ${expected.id}`);
+    assert.equal(actual.max, expected.max);
+    assert.equal(actual.windowSeconds, expected.windowMs / 1000);
+    assert.equal(actual.keyType, keyTypeLabels[expected.keyType]);
+    assert.equal(actual.store, expected.store);
+    assert.equal(actual.failureMode, expected.store === 'mongo' && expected.sensitive ? 'Fail closed' : 'Fail open');
+    assert.equal(actual.source, expected.source || 'default');
+  }
+  await t.test('rejects a route without a limiter', () => {
+    assert.throws(() => assertRateLimitCoverage(
+      [...registered, { route: 'GET /fixture/unlimited', groups: [] }],
+      appConfig.rateLimits,
+      tableRows,
+      appConfig.rateLimitRouteExemptions,
+      appConfig.rateLimitControlRows,
+    ), /explicit exemption/);
+  });
+  await t.test('rejects an orphaned configuration group', () => {
+    assert.throws(() => assertRateLimitCoverage(
+      registered,
+      { ...appConfig.rateLimits, fixture_orphan: { windowMs: 1000, max: 1 } },
+      tableRows,
+      appConfig.rateLimitRouteExemptions,
+      appConfig.rateLimitControlRows,
+    ), /not used by a route/);
+  });
+  await t.test('rejects a route with an unknown group', () => {
+    assert.throws(() => assertRateLimitCoverage(
+      [...registered, { route: 'GET /fixture/unknown', groups: ['fixture_unknown'] }],
+      appConfig.rateLimits,
+      tableRows,
+      appConfig.rateLimitRouteExemptions,
+      appConfig.rateLimitControlRows,
+    ), /unknown limiter group/);
+  });
+  await t.test('rejects a Settings table missing a configured group', () => {
+    assert.throws(() => assertRateLimitCoverage(
+      registered,
+      appConfig.rateLimits,
+      tableRows.filter((row) => row.configGroup !== 'settings_save'),
+      appConfig.rateLimitRouteExemptions,
+      appConfig.rateLimitControlRows,
+    ), /Settings table omits/);
+  });
+  await t.test('rejects a Settings table missing a non-route control', () => {
+    assert.throws(() => assertRateLimitCoverage(
+      registered,
+      appConfig.rateLimits,
+      tableRows.filter((row) => row.controlId !== 'test_email'),
+      appConfig.rateLimitRouteExemptions,
+      appConfig.rateLimitControlRows,
+    ), /Settings table omits control/);
+  });
+  await t.test('rejects missing catalog metadata', () => {
+    assert.throws(() => buildRateLimitRows({
+      ...appConfig,
+      rateLimitMetadata: Object.fromEntries(
+        Object.entries(appConfig.rateLimitMetadata).filter(([group]) => group !== 'settings_save'),
+      ),
+    }), /Missing rate-limit catalog metadata/);
+  });
 });
 
 function createMongoCounterDatabase(now) {

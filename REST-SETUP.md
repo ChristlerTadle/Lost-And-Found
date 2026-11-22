@@ -140,6 +140,25 @@ http://localhost:3001/api/auth/google/callback
 
 If you change `API_PORT` or set either redirect URI variable, register the resulting API callback instead. The Google Console value and the callback sent by the API must match exactly, including protocol, host, port, and path. Restart the backend after changing the environment.
 
+## Rate limits
+
+The API-wide flood guard allows 1,500 requests per IP per 15 minutes. Route-level groups are configured centrally and shown in Admin → Settings → **Rate limits** after an administrator passes the existing `manage_integrations` permission and PIN gate.
+
+| Module | Configured route limits | Storage |
+|---|---|---|
+| Public and auth | Registration 20/IP/hour; login 10 failed attempts/IP+email/15 min; forgot password 10/IP and 5/email/hour; reset 10/IP/hour; Google sign-in 20/IP/min; MFA login 20/IP/min | MongoDB |
+| User | Reads 120/account/min; images 600/account/min; report create 20/account+IP/hour; edit/cancel 30/account+IP/hour; uploads 20/account+IP/hour; claims 10/account+IP/hour and 3/account+item/day; profile edits 10/account+IP/hour; notification reads 120/account/min and writes 60/account+IP/min | Read/image groups in per-instance memory; writes in MongoDB |
+| Staff | Reads 240/account/min; images 600/account/min; writes 60/account+IP/min; calendar retries 10/account+IP/10 min | Read/image groups in per-instance memory; writes in MongoDB |
+| Admin | Reads 240/account/min; images 600/account/min; account writes 30/account+IP/10 min; role/permission writes 20/account+IP/10 min; item writes 30/account+IP/10 min; inventory 10/account/min; System Records 60/account/min | Read/image groups in per-instance memory; writes in MongoDB |
+| Settings and security | Overall 100/account/10 min; saves/code actions and tests 10/account+IP/10 min; verifies 10/account+integration/10 min; defaults 5/account+IP/10 min; reads 60/account/min; MFA enrollment 10/account+IP/10 min | Reads in per-instance memory; write groups and PIN/code/MFA lockouts in MongoDB |
+| Integrations | Five failed validations per integration in 10 min trigger a 5 min cooldown | MongoDB; each integration card’s “Calls per minute” bucket remains per-instance memory |
+
+Authenticated routes key limits to the session user ID, not a request-supplied identity. Read groups are per account; writes generally use account+IP. Public routes use IP, with email additionally used for login and the forgot-password email cap. IPv4-mapped IPv6 addresses are normalized and IPv6 clients are keyed by /64. MongoDB-backed counters are shared across API instances; memory counters are per instance.
+
+Additional MongoDB controls include five failed Settings PIN attempts before a 15-minute lockout; emailed-code requests (default 5/hour, configurable with `SU_CODE_REQUEST_LIMIT` and `SU_CODE_REQUEST_WINDOW_SECONDS`), a resend cooldown (default 60 seconds, configurable with `SU_CODE_RESEND_SECONDS`), five code attempts before expiry, 10 failed code-email sends/hour, and three test emails/hour. Admin MFA locks after five failed attempts in its 15-minute window for 15 minutes. The Settings table displays their effective values and whether they come from defaults or environment configuration. Sessions are also stored in MongoDB, so a MongoDB outage already disrupts login.
+
+`TRUST_PROXY` defaults to `false`. Set it only to the actual trusted proxy hop count or comma-separated trusted proxy CIDRs; plain `true` is not accepted. The explicit route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global flood guard also skips `OPTIONS` and `GET /health`.
+
 ## API examples
 
 - `GET /api/items` lists and searches browseable items for signed-in Users with the corresponding role permissions. Admins can access it; signed-out visitors are directed to sign in.

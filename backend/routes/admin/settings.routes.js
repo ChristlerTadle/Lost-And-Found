@@ -27,6 +27,7 @@ function createAdminSettingsRoutes({ controllers, guards, frontendOrigin, integr
   };
   const settingsOverall = limit('settings_overall');
   router.get('/settings/access', settingsRead, manage('GET', '/admin/settings/access'), asyncRoute(controllers.admin.getAdminSettingsAccess));
+  router.get('/settings/rate-limits', settingsRead, manage('GET', '/admin/settings/rate-limits'), unlocked, asyncRoute(controllers.admin.getAdminSettingsRateLimits));
   router.post('/settings/unlock', settingsOverall, manage('POST', '/admin/settings/unlock'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsUnlock));
   router.post('/settings/lock', settingsOverall, manage('POST', '/admin/settings/lock'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminSettingsLock));
   router.get('/settings', settingsRead, manage('GET', '/admin/settings'), unlocked, asyncRoute(controllers.admin.getAdminSettings));
