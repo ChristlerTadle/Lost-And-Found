@@ -96,18 +96,18 @@ function createApiRouter({ services, frontendOrigin }) {
   router.use(createAdminMfaSessionGuard(services.adminMfa));
   router.use('/', createHealthRoutes());
   router.use('/auth', createAuthRoutes({ controllers, frontendOrigin }));
-  router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin }));
+  router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin, limit }));
   router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin, limit }));
   router.use('/claims', createClaimsRoutes({ controllers, guards, limit }));
   router.use('/profile', createProfileRoutes({ controllers, guards, limit }));
   router.use('/notifications', createNotificationsRoutes({ controllers, guards, limit }));
-  router.use('/staff', createStaffRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/admin', createAdminRolePermissionsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminDashboardRoutes({ controllers, guards }));
-  router.use('/admin', createAdminUsersRoutes({ controllers, guards }));
-  router.use('/admin', createAdminSystemRecordsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminItemsRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/admin', createAdminClaimsRoutes({ controllers, guards }));
+  router.use('/staff', createStaffRoutes({ controllers, guards, frontendOrigin, limit }));
+  router.use('/admin', createAdminRolePermissionsRoutes({ controllers, guards, limit }));
+  router.use('/admin', createAdminDashboardRoutes({ controllers, guards, limit }));
+  router.use('/admin', createAdminUsersRoutes({ controllers, guards, limit, auth: services.auth, rateLimits }));
+  router.use('/admin', createAdminSystemRecordsRoutes({ controllers, guards, limit }));
+  router.use('/admin', createAdminItemsRoutes({ controllers, guards, frontendOrigin, limit }));
+  router.use('/admin', createAdminClaimsRoutes({ controllers, guards, limit }));
   router.use('/admin', createAdminSettingsRoutes({
     controllers,
     guards,

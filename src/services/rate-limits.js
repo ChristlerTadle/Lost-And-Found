@@ -14,6 +14,11 @@ function normalizeIp(ipAddress) {
 function createMemoryStore(now = Date.now) {
   const entries = new Map();
   return {
+    async peek(_id, windowMs) {
+      const entry = entries.get(_id);
+      if (!entry || entry.resetTime <= now()) return { totalHits: 0, resetTime: new Date(now() + windowMs) };
+      return { totalHits: entry.count, resetTime: new Date(entry.resetTime) };
+    },
     async increment(_id, windowMs) {
       const timestamp = now();
       let entry = entries.get(_id);
@@ -34,7 +39,6 @@ function createMemoryStore(now = Date.now) {
 }
 
 function createRateLimitService({ database, audit, secret = '', config = {}, now = Date.now } = {}) {
-  const memoryStore = createMemoryStore(now);
   const memoryStores = new Map();
   let warnedAt = 0;
   let auditCollection;
@@ -146,60 +150,141 @@ function createRateLimitService({ database, audit, secret = '', config = {}, now
     return config[group] || {};
   }
 
+  function getIdentity(req, group, options = {}) {
+    const rule = groupConfig(group);
+    const accountId = req.session?.user?.id ? String(req.session.user.id) : null;
+    if ((rule.keyType === 'account' || rule.keyType === 'account+ip' || rule.keyType === 'account+item') && !accountId) {
+      return null;
+    }
+    let identifier = accountId || '';
+    if (rule.keyType === 'account+ip') identifier = `${accountId}\0${normalizeIp(req.ip || req.socket?.remoteAddress)}`;
+    if (rule.keyType === 'account+item') {
+      const itemId = typeof options.identifier === 'function' ? options.identifier(req) : req.params?.id;
+      if (typeof itemId !== 'string' || !itemId || itemId.length > 128) return null;
+      identifier = `${accountId}\0${itemId}`;
+    }
+    return { rule, id: hashIdentifier(group, rule.keyType, identifier) };
+  }
+
+  function getStore(group, rule) {
+    if (rule.store === 'memory' || !database) {
+      if (!memoryStores.has(group)) memoryStores.set(group, createMemoryStore(now));
+      return memoryStores.get(group);
+    }
+    return null;
+  }
+
+  async function incrementGroup(group, rule, id) {
+    if (rule.store === 'mongo' && database) {
+      return withStoreTimeout(incrementMongo(id, group, rule.windowMs));
+    }
+    return getStore(group, rule).increment(id, rule.windowMs);
+  }
+
+  async function decrementGroup(group, rule, id) {
+    if (rule.store === 'mongo' && database) {
+      await collection().updateOne({ _id: id, count: { $gt: 0 } }, { $inc: { count: -1 } });
+      return;
+    }
+    await getStore(group, rule).decrement(id);
+  }
+
+  function rateLimitError(req, res, group, rule, value) {
+    const resetTime = value.resetTime instanceof Date ? value.resetTime : new Date(value.resetTime);
+    const retryAfter = Math.max(1, Math.ceil((resetTime.getTime() - now()) / 1000));
+    res.set('RateLimit-Limit', String(rule.max));
+    res.set('RateLimit-Remaining', String(Math.max(0, rule.max - value.totalHits)));
+    res.set('RateLimit-Reset', String(retryAfter));
+    if (value.totalHits <= rule.max) return null;
+    res.set('Retry-After', String(retryAfter));
+    void recordRateLimitAudit(req, group).catch(() => {});
+    const error = new Error('Please try again shortly');
+    error.status = 429;
+    error.code = 'rate_limited';
+    error.retryAfter = retryAfter;
+    return error;
+  }
+
+  function failOpen(req, res, next, rule) {
+    if (rule.store === 'mongo' && rule.sensitive) {
+      res.set('Retry-After', '1');
+      const error = new Error('Please try again shortly');
+      error.status = 503;
+      error.retryAfter = 1;
+      return next(error);
+    }
+    warnStoreFailure();
+    return next();
+  }
+
   function limit(group, options = {}) {
     const rule = groupConfig(group);
     if (!rule?.windowMs || !rule?.max) throw new TypeError(`Unknown rate-limit group: ${group}`);
     return function rateLimit(req, res, next) {
       if (req.method === 'OPTIONS') return next();
-      const accountId = req.session?.user?.id ? String(req.session.user.id) : null;
-      if ((rule.keyType === 'account' || rule.keyType === 'account+ip' || rule.keyType === 'account+item') && !accountId) {
-        return next();
-      }
-      let identifier = accountId || '';
-      if (rule.keyType === 'account+ip') identifier = `${accountId}\0${normalizeIp(req.ip || req.socket?.remoteAddress)}`;
-      if (rule.keyType === 'account+item') {
-        const itemId = typeof options.identifier === 'function' ? options.identifier(req) : req.params?.id;
-        if (typeof itemId !== 'string' || !itemId || itemId.length > 128) return next();
-        identifier = `${accountId}\0${itemId}`;
-      }
-      const id = hashIdentifier(group, rule.keyType, identifier);
-      let store = memoryStore;
-      if (rule.store === 'memory') {
-        if (!memoryStores.has(group)) memoryStores.set(group, createMemoryStore(now));
-        store = memoryStores.get(group);
-      }
-      const run = rule.store === 'mongo' && database
-        ? withStoreTimeout(incrementMongo(id, group, rule.windowMs))
-        : store.increment(id, rule.windowMs);
-      return Promise.resolve(run).then((value) => {
-        const resetTime = value.resetTime instanceof Date ? value.resetTime : new Date(value.resetTime);
-        const retryAfter = Math.max(1, Math.ceil((resetTime.getTime() - now()) / 1000));
-        res.set('RateLimit-Limit', String(rule.max));
-        res.set('RateLimit-Remaining', String(Math.max(0, rule.max - value.totalHits)));
-        res.set('RateLimit-Reset', String(retryAfter));
-        if (value.totalHits <= rule.max) return next();
-        res.set('Retry-After', String(retryAfter));
-        void recordRateLimitAudit(req, group).catch(() => {});
-        const error = new Error('Please try again shortly');
-        error.status = 429;
-        error.code = 'rate_limited';
-        error.retryAfter = retryAfter;
-        return next(error);
-      }).catch(() => {
-        if (rule.store === 'mongo' && rule.sensitive) {
-          res.set('Retry-After', '1');
-          const error = new Error('Please try again shortly');
-          error.status = 503;
-          error.retryAfter = 1;
-          return next(error);
-        }
-        warnStoreFailure();
-        return next();
-      });
+      const identity = getIdentity(req, group, options);
+      if (!identity) return next();
+      return incrementGroup(group, identity.rule, identity.id).then((value) => {
+        const error = rateLimitError(req, res, group, identity.rule, value);
+        return error ? next(error) : next();
+      }).catch(() => failOpen(req, res, next, identity.rule));
     };
   }
 
-  return { initialize, limit, recordRateLimitAudit };
+  function limitTogether(groups, condition = () => true) {
+    if (!Array.isArray(groups) || groups.length < 2) throw new TypeError('At least two rate-limit groups are required.');
+    const rules = groups.map((group) => {
+      const rule = groupConfig(group);
+      if (!rule?.windowMs || !rule?.max) throw new TypeError(`Unknown rate-limit group: ${group}`);
+      return { group, rule };
+    });
+    return async function rateLimitTogether(req, res, next) {
+      if (req.method === 'OPTIONS' || !condition(req)) return next();
+      const identities = rules.map(({ group }) => ({ group, ...getIdentity(req, group) }));
+      if (identities.some(({ rule }) => !rule)) return next();
+      try {
+        const previews = await Promise.all(identities.map(async ({ group, rule, id }) => {
+          if (rule.store === 'mongo' && database) {
+            const record = await withStoreTimeout(collection().findOne({ _id: id }));
+            const live = record && record.expiresAt > new Date(now());
+            return { group, rule, id, totalHits: live ? record.count : 0, resetTime: live ? record.expiresAt : new Date(now() + rule.windowMs) };
+          }
+          const value = await getStore(group, rule).peek(id, rule.windowMs);
+          return { group, rule, id, ...value };
+        }));
+        const blocked = previews.find((entry) => entry.totalHits >= entry.rule.max);
+        if (blocked) {
+          const error = rateLimitError(req, res, blocked.group, blocked.rule, {
+            totalHits: blocked.totalHits + 1,
+            resetTime: blocked.resetTime,
+          });
+          return next(error);
+        }
+        const values = [];
+        try {
+          for (const { group, rule, id } of identities) {
+            values.push(await incrementGroup(group, rule, id));
+          }
+        } catch (error) {
+          await Promise.all(identities.slice(0, values.length)
+            .map(({ group, rule, id }) => decrementGroup(group, rule, id).catch(() => {})));
+          throw error;
+        }
+        const blockedAfterRace = values
+          .map((value, index) => ({ ...identities[index], value }))
+          .find(({ rule, value }) => value.totalHits > rule.max);
+        if (blockedAfterRace) {
+          return next(rateLimitError(req, res, blockedAfterRace.group, blockedAfterRace.rule, blockedAfterRace.value));
+        }
+        return next();
+      } catch {
+        for (const { rule } of identities) failOpen(req, res, () => {}, rule);
+        return next();
+      }
+    };
+  }
+
+  return { initialize, limit, limitTogether, recordRateLimitAudit };
 }
 
 module.exports = { createRateLimitService, createMemoryStore, normalizeIp };

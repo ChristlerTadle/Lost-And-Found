@@ -127,6 +127,17 @@ const rateLimits = {
   profile_edit: { windowMs: 60 * 60 * 1000, max: 10, keyType: 'account+ip', store: 'mongo', sensitive: false },
   notification_read: { windowMs: 60 * 1000, max: 120, keyType: 'account', store: 'memory', sensitive: false },
   notification_write: { windowMs: 60 * 1000, max: 60, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  staff_reads: { windowMs: 60 * 1000, max: 240, keyType: 'account', store: 'memory', sensitive: false },
+  staff_item_images: { windowMs: 60 * 1000, max: 600, keyType: 'account', store: 'memory', sensitive: false },
+  staff_writes: { windowMs: 60 * 1000, max: 60, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  staff_calendar_retry: { windowMs: 10 * 60 * 1000, max: 10, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  admin_reads: { windowMs: 60 * 1000, max: 240, keyType: 'account', store: 'memory', sensitive: false },
+  admin_item_images: { windowMs: 60 * 1000, max: 600, keyType: 'account', store: 'memory', sensitive: false },
+  admin_user_write: { windowMs: 10 * 60 * 1000, max: 30, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  role_permission_write: { windowMs: 10 * 60 * 1000, max: 20, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  admin_item_write: { windowMs: 10 * 60 * 1000, max: 30, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  admin_inventory: { windowMs: 60 * 1000, max: 10, keyType: 'account', store: 'memory', sensitive: false },
+  admin_system_records: { windowMs: 60 * 1000, max: 60, keyType: 'account', store: 'memory', sensitive: false },
 };
 
 module.exports = {
