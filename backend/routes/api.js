@@ -113,6 +113,8 @@ function createApiRouter({ services, frontendOrigin }) {
     guards,
     frontendOrigin,
     integrationSecurity: services.integrationSecurity,
+    limit,
+    rateLimits,
   }));
   router.use(guards.denyUnmapped);
 

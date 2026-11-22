@@ -87,7 +87,7 @@ function positiveIntegerEnv(name, fallback, maximum) {
 
 const bootstrapMail = normalizeBootstrapMail(process.env);
 
-// Integration settings route limits are process-local and reset with the API.
+// Shared by integration settings throttles and their route limiter groups.
 const integrationRouteLimits = {
   saveValidationWindowMs: 10 * 60 * 1000,
   saveValidationLimit: 10,
@@ -101,6 +101,10 @@ const integrationRouteLimits = {
   validationFailureCount: 5,
   validationCooldownMs: 5 * 60 * 1000,
 };
+
+const integrationCodeRequestLimit = positiveIntegerEnv('SU_CODE_REQUEST_LIMIT', 5, 100);
+const integrationCodeRequestWindowMs = positiveIntegerEnv('SU_CODE_REQUEST_WINDOW_SECONDS', 3600, 86400) * 1000;
+const integrationCodeResendMs = positiveIntegerEnv('SU_CODE_RESEND_SECONDS', 60, 3600) * 1000;
 
 const integrationRateLimits = {
   bucketWindowMs: 60 * 1000,
@@ -116,6 +120,69 @@ const integrationRateLimits = {
 };
 
 const rateLimits = {
+  settings_overall: {
+    windowMs: integrationRouteLimits.adminSettingsWindowMs,
+    max: integrationRouteLimits.adminSettingsLimit,
+    keyType: 'account',
+    store: 'mongo',
+    sensitive: false,
+    rateLimitedMessage: true,
+  },
+  settings_save: {
+    windowMs: integrationRouteLimits.saveValidationWindowMs,
+    max: integrationRouteLimits.saveValidationLimit,
+    keyType: 'account+ip',
+    store: 'mongo',
+    sensitive: true,
+    rateLimitedMessage: true,
+  },
+  settings_tests: {
+    windowMs: integrationRouteLimits.testWindowMs,
+    max: integrationRouteLimits.testLimit,
+    keyType: 'account+ip',
+    store: 'mongo',
+    sensitive: true,
+    rateLimitedMessage: true,
+  },
+  settings_verify: {
+    windowMs: integrationRouteLimits.testWindowMs,
+    max: integrationRouteLimits.testLimit,
+    keyType: 'account+resource',
+    store: 'mongo',
+    sensitive: true,
+    rateLimitedMessage: true,
+  },
+  settings_default: {
+    windowMs: integrationRouteLimits.restoreWindowMs,
+    max: integrationRouteLimits.restoreLimit,
+    keyType: 'account+ip',
+    store: 'mongo',
+    sensitive: true,
+    rateLimitedMessage: true,
+  },
+  settings_read: {
+    windowMs: 60 * 1000,
+    max: 60,
+    keyType: 'account',
+    store: 'memory',
+    sensitive: false,
+  },
+  mfa_enrollment: {
+    windowMs: 10 * 60 * 1000,
+    max: 10,
+    keyType: 'account+ip',
+    store: 'mongo',
+    sensitive: true,
+    rateLimitedMessage: true,
+  },
+  validation_cooldown: {
+    windowMs: integrationRouteLimits.validationFailureWindowMs,
+    max: integrationRouteLimits.validationFailureCount,
+    cooldownMs: integrationRouteLimits.validationCooldownMs,
+    keyType: 'resource',
+    store: 'mongo',
+    sensitive: true,
+  },
   user_reads: { windowMs: 60 * 1000, max: 120, keyType: 'account', store: 'memory', sensitive: false },
   item_images: { windowMs: 60 * 1000, max: 600, keyType: 'account', store: 'memory', sensitive: false },
   report_create: { windowMs: 60 * 60 * 1000, max: 20, keyType: 'account+ip', store: 'mongo', sensitive: false },
@@ -140,6 +207,27 @@ const rateLimits = {
   admin_system_records: { windowMs: 60 * 1000, max: 60, keyType: 'account', store: 'memory', sensitive: false },
 };
 
+const rateLimitControls = {
+  integrationSettings: {
+    accessWindowMs: 10 * 60 * 1000,
+    pinAttemptLimit: 5,
+    pinLockMs: 15 * 60 * 1000,
+    codeTtlMs: 10 * 60 * 1000,
+    codeAttemptLimit: 5,
+    codeRequestLimit: integrationCodeRequestLimit,
+    codeRequestWindowMs: integrationCodeRequestWindowMs,
+    codeResendMs: integrationCodeResendMs,
+    codeSendFailureLimit: 10,
+    testEmailRequestLimit: 3,
+    emailRequestWindowMs: 60 * 60 * 1000,
+  },
+  adminMfa: {
+    attemptWindowMs: 15 * 60 * 1000,
+    maxAttempts: 5,
+    lockMs: 15 * 60 * 1000,
+  },
+};
+
 module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'replace-this-session-secret-before-deployment',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017',
@@ -152,9 +240,10 @@ module.exports = {
   integrationRouteLimits,
   integrationRateLimits,
   rateLimits,
-  integrationCodeRequestLimit: positiveIntegerEnv('SU_CODE_REQUEST_LIMIT', 5, 100),
-  integrationCodeRequestWindowMs: positiveIntegerEnv('SU_CODE_REQUEST_WINDOW_SECONDS', 3600, 86400) * 1000,
-  integrationCodeResendMs: positiveIntegerEnv('SU_CODE_RESEND_SECONDS', 60, 3600) * 1000,
+  rateLimitControls,
+  integrationCodeRequestLimit,
+  integrationCodeRequestWindowMs,
+  integrationCodeResendMs,
   recaptchaAllowTestKeys: process.env.RECAPTCHA_ALLOW_TEST_KEYS === 'true'
     && process.env.NODE_ENV !== 'production',
   adminMfaDisabled: process.env.ADMIN_MFA_DISABLED === 'true',

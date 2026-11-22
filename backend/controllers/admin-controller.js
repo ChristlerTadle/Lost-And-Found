@@ -919,7 +919,7 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
     throw error;
   }
 
-  callIntegration?.checkValidationCooldown?.(integrationId);
+  await callIntegration?.checkValidationCooldown?.(integrationId);
   if (integrationId === 'google_auth'
     && typeof integrationSettings.getCurrentVerification === 'function') {
     const existing = await integrationSettings.getCurrentVerification(
@@ -1035,7 +1035,7 @@ async function verifyIntegrationCandidate(req, integrationId, enabled, values, s
     proofType,
     result: true,
   });
-  callIntegration?.clearValidationFailures?.(integrationId);
+  await callIntegration?.clearValidationFailures?.(integrationId);
   return record;
 }
 

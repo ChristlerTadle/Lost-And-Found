@@ -56,6 +56,7 @@ async function start() {
     codeRequestLimit: config.integrationCodeRequestLimit,
     codeRequestWindowMs: config.integrationCodeRequestWindowMs,
     codeResendMs: config.integrationCodeResendMs,
+    ...config.rateLimitControls.integrationSettings,
   });
   const audit = createAuditLogService(database, getMongoClient());
   const rateLimits = createRateLimitService({
@@ -65,11 +66,12 @@ async function start() {
     config: config.rateLimits,
   });
   await rateLimits.initialize();
-  const callIntegration = createIntegrationCaller({ integrationSettings, audit });
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit, rateLimits });
   const adminMfa = createAdminMfa(database, integrationSettings, {
     disabled: config.adminMfaDisabled,
     rateLimitDisabled: config.adminMfaRateLimitDisabled,
     callIntegration,
+    ...config.rateLimitControls.adminMfa,
   });
   await integrationSettings.validateStoredSecrets();
   const items = createItemService(database, notificationService);
@@ -146,7 +148,7 @@ async function start() {
   app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
-    if (error.code === 'rate_limited' && Number.isInteger(error.retryAfter)) {
+    if ((error.status === 429 || error.status === 503) && Number.isInteger(error.retryAfter)) {
       res.set('Retry-After', String(error.retryAfter));
     }
     const uploadError = error instanceof multer.MulterError;

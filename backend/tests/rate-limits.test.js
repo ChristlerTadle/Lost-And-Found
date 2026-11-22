@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRateLimitService, normalizeIp } = require('../../src/services/rate-limits');
+const appConfig = require('../../src/config');
 
 function requestFor(accountId, ip = '192.0.2.10') {
   return {
@@ -175,4 +176,113 @@ test('staff and admin accounts do not share counters, and missing sessions skip 
   assert.equal(await run(requestFor('staff-b')), null);
   const noSession = { ...requestFor(null) };
   assert.equal(await run(noSession), null);
+});
+
+test('validation cooldown persists across service instances and clears on success', async () => {
+  let timestamp = 20_000;
+  const documents = new Map();
+  const database = {
+    collection() {
+      return {
+        async findOne({ _id }) {
+          const entry = documents.get(_id);
+          return entry ? structuredClone(entry) : null;
+        },
+        async findOneAndUpdate({ _id }, _pipeline, { upsert }) {
+          const entry = documents.get(_id);
+          if (!entry && !upsert) return null;
+          const count = entry && entry.expiresAt > timestamp ? entry.count + 1 : 1;
+          const result = {
+            _id,
+            count,
+            expiresAt: new Date(timestamp + appConfig.rateLimits.validation_cooldown.windowMs
+              + appConfig.rateLimits.validation_cooldown.cooldownMs),
+            lockedUntil: count >= appConfig.rateLimits.validation_cooldown.max
+              ? new Date(timestamp + appConfig.rateLimits.validation_cooldown.cooldownMs)
+              : null,
+            type: 'validation_cooldown',
+          };
+          documents.set(_id, result);
+          return structuredClone(result);
+        },
+        async deleteOne({ _id }) {
+          return { deletedCount: documents.delete(_id) ? 1 : 0 };
+        },
+        async createIndex() {},
+      };
+    },
+  };
+  const createService = () => createRateLimitService({
+    database,
+    secret: 'test-secret',
+    config: appConfig.rateLimits,
+    now: () => timestamp,
+  });
+  const firstService = createService();
+  await firstService.initialize();
+  for (let failure = 0; failure < appConfig.rateLimits.validation_cooldown.max; failure += 1) {
+    await firstService.recordValidationFailure('smtp');
+  }
+  assert.equal(documents.size, 1);
+  assert.equal([...documents.keys()][0].includes('smtp'), false);
+
+  const restartedService = createService();
+  await assert.rejects(restartedService.checkValidationCooldown('smtp'), {
+    status: 429,
+    code: 'validation_cooldown',
+  });
+  timestamp += appConfig.rateLimits.validation_cooldown.cooldownMs;
+  await restartedService.checkValidationCooldown('smtp');
+  await restartedService.clearValidationFailures('smtp');
+  assert.equal(documents.size, 0);
+});
+
+test('settings overall and shared groups are paired without spending blocked counters', async () => {
+  const service = createRateLimitService({
+    config: appConfig.rateLimits,
+    secret: 'test-secret',
+    now: Date.now,
+  });
+  const req = requestFor('admin-a');
+  const run = (middleware) => new Promise((resolve) => (
+    middleware(req, responseFor(), (error) => resolve(error || null))
+  ));
+  const save = service.limitTogether(['settings_overall', 'settings_save']);
+  const testConnection = service.limitTogether(['settings_overall', 'settings_tests']);
+
+  for (let attempt = 0; attempt < appConfig.rateLimits.settings_save.max; attempt += 1) {
+    assert.equal(await run(save), null);
+  }
+  assert.equal((await run(save))?.status, 429);
+  for (let attempt = appConfig.rateLimits.settings_save.max; attempt < 100; attempt += 1) {
+    assert.equal(await run(service.limit('settings_overall')), null);
+  }
+  assert.equal((await run(testConnection))?.status, 429);
+});
+
+test('settings store failures fail closed for writes and open for reads', async () => {
+  const database = {
+    collection() {
+      return {
+        async findOneAndUpdate() { throw new Error('simulated outage'); },
+        async findOne() { throw new Error('simulated outage'); },
+      };
+    },
+  };
+  const service = createRateLimitService({
+    database,
+    config: appConfig.rateLimits,
+    secret: 'test-secret',
+  });
+  const req = requestFor('admin-a');
+  const response = responseFor();
+  const run = (middleware, res = response) => new Promise((resolve) => (
+    middleware(req, res, (error) => resolve(error || null))
+  ));
+
+  const writeError = await run(service.limit('settings_save'));
+  assert.equal(writeError?.status, 503);
+  assert.equal(response.headers['Retry-After'], '1');
+  assert.equal(await run(service.limit('settings_read')), null);
+  assert.equal(await run(service.limitTogether(['settings_overall', 'settings_read'])), null);
 });

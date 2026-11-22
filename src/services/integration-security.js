@@ -25,12 +25,20 @@ function createIntegrationSecurity(database, {
   codeRequestLimit = DEFAULT_CODE_REQUEST_LIMIT,
   codeRequestWindowMs = DEFAULT_CODE_REQUEST_WINDOW_MS,
   codeResendMs = DEFAULT_CODE_RESEND_MS,
+  accessWindowMs = ACCESS_WINDOW_MS,
+  pinAttemptLimit = 5,
+  pinLockMs = PIN_LOCK_MS,
+  codeTtlMs = CODE_TTL_MS,
+  codeAttemptLimit = MAX_CODE_ATTEMPTS,
+  codeSendFailureLimit = CODE_SEND_FAILURE_LIMIT,
+  testEmailRequestLimit = TEST_EMAIL_REQUEST_LIMIT,
+  emailRequestWindowMs = EMAIL_REQUEST_WINDOW_MS,
 } = {}) {
-  const attempts = database.collection('integration_settings_pin_attempts');
-  const codes = database.collection('integration_settings_pending_codes');
-  const requests = database.collection('integration_settings_code_requests');
-  const failedCodeSends = database.collection('integration_settings_code_send_failures');
-  const testEmailRequests = database.collection('integration_settings_test_email_requests');
+  const attempts = createLimitedCollection(database, 'integration_settings_pin_attempts');
+  const codes = createLimitedCollection(database, 'integration_settings_pending_codes');
+  const requests = createLimitedCollection(database, 'integration_settings_code_requests');
+  const failedCodeSends = createLimitedCollection(database, 'integration_settings_code_send_failures');
+  const testEmailRequests = createLimitedCollection(database, 'integration_settings_test_email_requests');
   const codeSendsInProgress = new Set();
 
   function configuration() {
@@ -94,11 +102,11 @@ function createIntegrationSecurity(database, {
       { upsert: true },
     );
     const updatedAttempt = await attempts.findOne({ _id: accessId });
-    const locked = Number(updatedAttempt?.count || 0) >= 5;
+    const locked = Number(updatedAttempt?.count || 0) >= pinAttemptLimit;
     if (locked) {
       await attempts.updateOne(
         { _id: accessId },
-        { $set: { lockedUntil: timestamp + PIN_LOCK_MS } },
+        { $set: { lockedUntil: timestamp + pinLockMs } },
       );
     }
     await auditEvent(audit, auditContext, locked ? 'integration.unlock_locked' : 'integration.unlock_failed');
@@ -108,7 +116,7 @@ function createIntegrationSecurity(database, {
   function touchSession(session, adminId) {
     const state = session.integrationSettingsAccess;
     const timestamp = now();
-    if (!state || state.adminId !== String(adminId) || timestamp - state.lastActivityAt >= ACCESS_WINDOW_MS) {
+    if (!state || state.adminId !== String(adminId) || timestamp - state.lastActivityAt >= accessWindowMs) {
       delete session.integrationSettingsAccess;
       return false;
     }
@@ -178,10 +186,10 @@ function createIntegrationSecurity(database, {
       );
     }
     const failed = (await failedCodeSends.findOne({ _id: adminKey }))?.timestamps || [];
-    const recentFailures = failed.filter((entry) => timestamp - entry < EMAIL_REQUEST_WINDOW_MS);
-    if (recentFailures.length >= CODE_SEND_FAILURE_LIMIT) {
+    const recentFailures = failed.filter((entry) => timestamp - entry < emailRequestWindowMs);
+    if (recentFailures.length >= codeSendFailureLimit) {
       const retryAfter = Math.max(1, Math.ceil(
-        (recentFailures[0] + EMAIL_REQUEST_WINDOW_MS - timestamp) / 1000,
+        (recentFailures[0] + emailRequestWindowMs - timestamp) / 1000,
       ));
       return failCodeSend(
         `Too many failed verification email sends. Try again in ${retryAfter} seconds.`,
@@ -198,7 +206,7 @@ function createIntegrationSecurity(database, {
       status: 'sending',
       integrationIds: [...new Set((changes || []).map(({ integration }) => integration).filter(Boolean))],
       restoreDefault: null,
-      expiresAt: timestamp + CODE_TTL_MS,
+      expiresAt: timestamp + codeTtlMs,
       sentAt: timestamp,
       attempts: 0,
     };
@@ -220,14 +228,14 @@ function createIntegrationSecurity(database, {
       const failedAt = now();
       await failedCodeSends.findOneAndUpdate(
         { _id: adminKey },
-        { $push: { timestamps: { $each: [failedAt], $slice: -CODE_SEND_FAILURE_LIMIT } } },
+        { $push: { timestamps: { $each: [failedAt], $slice: -codeSendFailureLimit } } },
         { upsert: true, returnDocument: 'after', includeResultMetadata: false },
       );
       await logCodeSendFailure(audit, auditContext, category);
       throw codeSendError(category, state.maskedRecipient);
     }
     const sentAt = now();
-    const expiresAt = sentAt + CODE_TTL_MS;
+    const expiresAt = sentAt + codeTtlMs;
     await codes.updateOne(
       { _id: entry._id, adminId: adminKey },
       { $set: { status: 'sent', sentAt, expiresAt } },
@@ -239,7 +247,7 @@ function createIntegrationSecurity(database, {
     );
     await auditEvent(audit, auditContext, 'integration.code_sent', changes);
     return {
-      expiresInSeconds: CODE_TTL_MS / 1000,
+      expiresInSeconds: codeTtlMs / 1000,
       resendInSeconds: codeResendMs / 1000,
       maskedRecipient: state.maskedRecipient,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -285,11 +293,11 @@ function createIntegrationSecurity(database, {
     const candidateCode = typeof candidate === 'string' && /^\d{6}$/.test(candidate) ? candidate : '';
     if (!constantTimeMatch(keyedHash(`code\u0000${candidateCode}`), entry.codeHash)) {
       await codes.updateOne(
-        { _id: id, adminId: String(adminId), usedAt: { $exists: false }, attempts: { $lt: MAX_CODE_ATTEMPTS } },
+        { _id: id, adminId: String(adminId), usedAt: { $exists: false }, attempts: { $lt: codeAttemptLimit } },
         { $inc: { attempts: 1 } },
       );
       const current = await codes.findOne({ _id: id });
-      if (current && current.attempts >= MAX_CODE_ATTEMPTS) {
+      if (current && current.attempts >= codeAttemptLimit) {
         await codes.deleteOne({ _id: id });
       }
       await auditEvent(audit, auditContext, 'integration.code_failed', changes);
@@ -324,10 +332,10 @@ function createIntegrationSecurity(database, {
     const id = String(adminId);
     const timestamp = now();
     const recent = (await testEmailRequests.findOne({ _id: id }))?.timestamps || [];
-    const recentAttempts = recent.filter((entry) => timestamp - entry < EMAIL_REQUEST_WINDOW_MS);
-    if (recentAttempts.length >= TEST_EMAIL_REQUEST_LIMIT) {
+    const recentAttempts = recent.filter((entry) => timestamp - entry < emailRequestWindowMs);
+    if (recentAttempts.length >= testEmailRequestLimit) {
       const retryAfter = Math.max(1, Math.ceil(
-        (recentAttempts[0] + EMAIL_REQUEST_WINDOW_MS - timestamp) / 1000,
+        (recentAttempts[0] + emailRequestWindowMs - timestamp) / 1000,
       ));
       const error = new Error(`Test email limit reached. Try again in ${retryAfter} seconds.`);
       error.status = 429;
@@ -338,7 +346,7 @@ function createIntegrationSecurity(database, {
     }
     await testEmailRequests.findOneAndUpdate(
       { _id: id },
-      { $push: { timestamps: { $each: [timestamp], $slice: -TEST_EMAIL_REQUEST_LIMIT } } },
+      { $push: { timestamps: { $each: [timestamp], $slice: -testEmailRequestLimit } } },
       { upsert: true, returnDocument: 'after', includeResultMetadata: false },
     );
     try {
@@ -563,6 +571,37 @@ function codeError() {
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function createLimitedCollection(database, name) {
+  const collection = database.collection(name);
+  return new Proxy(collection, {
+    get(target, property) {
+      const method = target[property];
+      if (typeof method !== 'function') return method;
+      return (...args) => {
+        let timer;
+        const operation = Promise.resolve().then(() => method.apply(target, args));
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(storeUnavailableError()), 200);
+        });
+        return Promise.race([operation, timeout])
+          .catch((error) => {
+            if (error?.status === 503 && error?.code === 'rate_limit_store_unavailable') throw error;
+            throw storeUnavailableError();
+          })
+          .finally(() => clearTimeout(timer));
+      };
+    },
+  });
+}
+
+function storeUnavailableError() {
+  const error = new Error('Please try again shortly');
+  error.status = 503;
+  error.retryAfter = 1;
+  error.code = 'rate_limit_store_unavailable';
+  return error;
 }
 
 module.exports = {

@@ -232,7 +232,7 @@ function createAuthController({
             });
           }
           if (verified) {
-            callIntegration?.clearValidationFailures?.('google_auth');
+            await callIntegration?.clearValidationFailures?.('google_auth');
             await audit.logAction({
               ...requestAuditContext(req, 'integration.verify_success'),
               actor_id: String(verification.adminId),

@@ -9,9 +9,10 @@ function createAdminMfaRoutes({ controllers, guards, frontendOrigin, limit }) {
     next();
   });
   router.get('/', limit('admin_reads'), guards.requirePermission('GET', '/admin/mfa'), asyncRoute(controllers.admin.getAdminMfaStatus));
-  router.post('/enrollment/start', guards.requirePermission('POST', '/admin/mfa/enrollment/start'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaEnrollmentStart));
-  router.post('/enrollment/confirm', guards.requirePermission('POST', '/admin/mfa/enrollment/confirm'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaEnrollmentConfirm));
-  router.post('/recovery/regenerate', guards.requirePermission('POST', '/admin/mfa/recovery/regenerate'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaRecoveryRegenerate));
+  const enrollmentLimit = limit('mfa_enrollment');
+  router.post('/enrollment/start', enrollmentLimit, guards.requirePermission('POST', '/admin/mfa/enrollment/start'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaEnrollmentStart));
+  router.post('/enrollment/confirm', enrollmentLimit, guards.requirePermission('POST', '/admin/mfa/enrollment/confirm'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaEnrollmentConfirm));
+  router.post('/recovery/regenerate', enrollmentLimit, guards.requirePermission('POST', '/admin/mfa/recovery/regenerate'), requireCsrf(frontendOrigin), asyncRoute(controllers.admin.postAdminMfaRecoveryRegenerate));
   return router;
 }
 
