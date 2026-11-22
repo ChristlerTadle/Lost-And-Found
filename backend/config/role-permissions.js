@@ -155,6 +155,7 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'GET', path: '/admin/settings/access', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/unlock', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/lock', roles: ['admin'], permission: 'manage_integrations' },
+  { method: 'GET', path: '/admin/settings/rate-limits', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'GET', path: '/admin/settings', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'PUT', path: '/admin/settings', roles: ['admin'], permission: 'manage_integrations' },
   { method: 'POST', path: '/admin/settings/code/verify', roles: ['admin'], permission: 'manage_integrations' },

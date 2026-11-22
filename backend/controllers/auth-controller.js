@@ -106,6 +106,9 @@ function createAuthController({
       try {
         user = await auth.login(req.body.email, req.body.password);
       } catch (error) {
+        if (error.message === 'Invalid credentials.' && !Number.isInteger(error.status)) {
+          error.status = 401;
+        }
         await logAuthEvent(audit, authAuditContext(req, 'auth.login_failed', {
           actor_id: null,
           actor_role: null,
@@ -115,7 +118,7 @@ function createAuthController({
         }));
         throw error;
       }
-      if (req.rateLimitReset) await req.rateLimitReset();
+      await req.rateLimitReset?.();
       const result = await beginLoginSession(req, user, adminMfa);
       if (result.mfaRequired || result.adminMfaSetupRequired) {
         if (result.adminMfaSetupRequired) {
@@ -233,7 +236,7 @@ function createAuthController({
             });
           }
           if (verified) {
-            callIntegration?.clearValidationFailures?.('google_auth');
+            await callIntegration?.clearValidationFailures?.('google_auth');
             await audit.logAction({
               ...authAuditContext(req, 'integration.verify_success'),
               actor_id: String(verification.adminId),
@@ -298,6 +301,7 @@ function createAuthController({
         }
         if (error instanceof IntegrationError) {
           if (error.code !== 'rate_limited') console.error('Google sign-in could not be completed.');
+          if (error.status === 429 || error.status === 503) await req.rateLimitGlobalRollback?.();
           return sendSafeIntegrationError(res, error);
         }
         console.error('Google sign-in could not be completed.');
@@ -361,6 +365,7 @@ async function verifyRecaptcha(req, res, recaptcha, integrationSettings) {
   } catch (error) {
     if (!(error instanceof IntegrationError)) throw error;
     await req.rateLimitFinalize?.(error.status);
+    if (error.status === 429 || error.status === 503) await req.rateLimitGlobalRollback?.();
     sendSafeIntegrationError(res, error);
     return false;
   }

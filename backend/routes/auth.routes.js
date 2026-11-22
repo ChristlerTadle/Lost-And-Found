@@ -12,7 +12,7 @@ function createAuthRoutes({
   router.get('/me', asyncRoute(controllers.auth.getAuthMe));
   router.post('/register', limit('register'), asyncRoute(controllers.auth.postAuthRegister));
   router.post('/login', limit('login'), asyncRoute(controllers.auth.postAuthLogin));
-  router.post('/mfa/verify', requireCsrf(frontendOrigin), asyncRoute(controllers.auth.postAuthMfaVerify));
+  router.post('/mfa/verify', limit('mfa_login'), requireCsrf(frontendOrigin), asyncRoute(controllers.auth.postAuthMfaVerify));
   router.post('/logout', asyncRoute(controllers.auth.postAuthLogout));
   router.post('/forgot-password', limit('forgot'), asyncRoute(controllers.auth.postAuthForgotpassword));
   router.get('/reset-password/:token', limit('reset'), asyncRoute(controllers.auth.getAuthResetpasswordByToken));

@@ -68,7 +68,7 @@ function providerFailure(code) {
 function createIntegrationCaller({
   integrationSettings,
   audit,
-  rateLimitAudit: persistentRateLimitAudit,
+  rateLimits,
   timeoutMs = PROVIDER_TIMEOUT_MS,
   now = Date.now,
 } = {}) {
@@ -119,6 +119,7 @@ function createIntegrationCaller({
   }
 
   async function recordValidationFailure(integrationId) {
+    if (rateLimits) return rateLimits.recordValidationFailure(integrationId);
     const timestamp = now();
     let failures = (validationFailures.get(integrationId) || []).filter(
       (at) => timestamp - at < integrationRouteLimits.validationFailureWindowMs,
@@ -126,11 +127,12 @@ function createIntegrationCaller({
     failures.push(timestamp);
     validationFailures.set(integrationId, failures);
     if (failures.length >= integrationRouteLimits.validationFailureCount) {
-      validationCooldowns.set(integrationId, timestamp + integrationRouteLimits.validationCooldownMs);
+    validationCooldowns.set(integrationId, timestamp + integrationRouteLimits.validationCooldownMs);
     }
   }
 
-  function checkValidationCooldown(integrationId) {
+  async function checkValidationCooldown(integrationId) {
+    if (rateLimits) return rateLimits.checkValidationCooldown(integrationId);
     const until = validationCooldowns.get(integrationId);
     if (until && now() < until) {
       const error = new Error('Could not verify, try again');
@@ -140,21 +142,15 @@ function createIntegrationCaller({
     }
   }
 
-  function clearValidationFailures(integrationId) {
+  async function clearValidationFailures(integrationId) {
+    if (rateLimits) return rateLimits.clearValidationFailures(integrationId);
     validationFailures.delete(integrationId);
     validationCooldowns.delete(integrationId);
   }
 
   async function recordRateLimitAudit(integrationId, bucketKey) {
-    if (persistentRateLimitAudit) {
-      await persistentRateLimitAudit({
-        group: 'integration',
-        keyType: bucketKey ? 'integration+account' : 'integration',
-        identifier: `${integrationId}\0${bucketKey || 'shared'}`,
-        action: 'integration.rate_limited',
-        targetId: integrationId,
-        targetType: 'integration',
-      });
+    if (rateLimits?.recordIntegrationRateLimitAudit) {
+      await rateLimits.recordIntegrationRateLimitAudit(integrationId, bucketKey);
       return;
     }
     const timestamp = now();
@@ -186,7 +182,7 @@ function createIntegrationCaller({
       if (options.purpose !== 'admin_check') {
         await consumeIntegrationBucket(integrationId, options);
       }
-      if (options.candidateValidation) checkValidationCooldown(integrationId);
+      if (options.candidateValidation) await checkValidationCooldown(integrationId);
       const operationPromise = Promise.resolve().then(() => operation({ signal: controller.signal }));
       const timeoutPromise = new Promise((_, reject) => {
         timer = setTimeout(() => {

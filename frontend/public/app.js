@@ -2,7 +2,7 @@ import * as shared from './js/shared.js';
 import { homePage, loginPage, authForm } from './js/pages/public.js';
 import { dashboardPage, browsePage, itemPage, reportPage, reportsPage, editReportPage, claimPage, claimsPage, profilePage, notificationsPage } from './js/pages/user.js';
 import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItemPage, staffClaims, staffClaimPage } from './js/pages/staff.js';
-import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords } from './js/pages/admin.js';
+import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords, renderRateLimitTable } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
 const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, otherLocationValue, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo } = shared;
@@ -363,6 +363,9 @@ function bindForms() {
   app.querySelectorAll('[data-action="resend-integration-code"]').forEach((button) => button.addEventListener('click', resendIntegrationCode));
   app.querySelectorAll('[data-action="cancel-integration-code"]').forEach((button) => button.addEventListener('click', cancelIntegrationCode));
   app.querySelector('[data-action="send-verification-test-email"]')?.addEventListener('click', sendVerificationTestEmail);
+  app.querySelectorAll('[data-action="load-rate-limits"]').forEach((button) => (
+    button.addEventListener('click', loadRateLimits)
+  ));
   app.querySelector('[data-action="resend-role-change-code"]')?.addEventListener('click', resendAdminRoleChangeCode);
   app.querySelector('[data-action="close-role-change-code"]')?.addEventListener('click', closeAdminRoleChangeCodeDialog);
   app.querySelector('[data-role-change-code-dialog]')?.addEventListener('cancel', (event) => {
@@ -1222,6 +1225,26 @@ async function sendVerificationTestEmail(event) {
     resultElement.textContent = `Test email to ${recipient} failed: ${error.message}`;
     resultElement.classList.add('alert-error');
   } finally {
+    if (!isRateLimited(button)) button.disabled = false;
+  }
+}
+
+async function loadRateLimits(event) {
+  const button = event.currentTarget;
+  const panel = button.closest('.rate-limits-panel');
+  const content = panel?.querySelector('[data-rate-limits-content]');
+  if (!panel || !content || panel.dataset.loading === 'true' || panel.dataset.loaded === 'true') return;
+  panel.dataset.loading = 'true';
+  button.disabled = true;
+  try {
+    const data = await request('/admin/settings/rate-limits', { anchor: button });
+    content.innerHTML = renderRateLimitTable(data);
+    panel.dataset.loaded = 'true';
+    button.hidden = true;
+  } catch (error) {
+    content.textContent = error.message;
+  } finally {
+    delete panel.dataset.loading;
     if (!isRateLimited(button)) button.disabled = false;
   }
 }

@@ -106,6 +106,8 @@ Set `SU_SMTP_SECURE=false` explicitly when the old value is unset but the server
 
 Verification-code throttling can be adjusted with `SU_CODE_REQUEST_LIMIT` (default `5` requests), `SU_CODE_REQUEST_WINDOW_SECONDS` (default `3600` seconds), and `SU_CODE_RESEND_SECONDS` (default `60` seconds between sends). For local testing, for example, set them to `20`, `60`, and `1`; restore the defaults before deployment. Values must be positive whole numbers, and changing them requires restarting the API.
 
+Settings write and test limits are stored in MongoDB and shared across API instances: 100 settings requests per account per 10 minutes overall; 10 saves/code actions, 10 connection tests, and 5 default/restore actions per account+IP; 10 verifies per account+integration. Those specific limits use 10-minute windows. Settings reads are limited to 60 per account per minute in memory. PIN, emailed-code, failed-send, test-email, and MFA lockouts retain their existing thresholds and use MongoDB. Five failed integration validations in 10 minutes trigger a 5-minute per-integration cooldown. Write-control store failures return a safe retryable error; settings reads fail open. Login sessions are also stored in MongoDB, so a MongoDB outage already prevents normal login.
+
 Integration card changes remain pending until saved. Credential changes (including client IDs and SMTP usernames) require a one-use six-digit email code before any values in that Save Changes request are written. PIN unlocks expire after 10 minutes of inactivity and are cleared when leaving the settings page or signing out. Environment migration creates an encrypted-secret default snapshot; later defaults are only set by a successful saved SMTP test or an explicit admin action. Restoring a default sends a field-name-only notice through the bootstrap account when configured.
 
 The **Admin MFA** card uses locally generated TOTP codes; no external MFA service is involved. Admins enroll from **Security** with an authenticator app and must save the eight recovery codes somewhere safe because they are shown only once. The server stores encrypted TOTP secrets and hashed recovery codes. Turning MFA off, or changing **Require for all admins** from on to off, requires both the Integration Settings PIN and an emailed verification code. `ADMIN_MFA_DISABLED=true` is an emergency login bypass (default `false`); it skips MFA enforcement but does not delete enrollments. `ADMIN_MFA_RATE_LIMIT_DISABLED=true` temporarily disables MFA attempt limits for local testing only; it is ignored when `NODE_ENV=production`. The API prints a warning when either bypass applies. Keep both settings `false` outside local testing and return them to `false` after testing.
@@ -125,7 +127,7 @@ If there is no active admin account, create the minimal permission-management ad
 - `FRONTEND_PORT` changes the frontend port (default `5173`).
 - `API_PORT` changes the API port (default `3001`).
 - `TRUST_PROXY` defaults to `false`. Set it to a hop count (for example, `1`) or a comma-separated list of trusted proxy CIDRs only when the API is behind those proxies. Do not set it to `true`; an incorrect value can make client IP-based protections trust forwarded headers.
-- Multiple API instances can share MongoDB-backed auth limits and sessions when they use the same database and session configuration. The global API guard, integration token buckets, and existing settings limits are process-local, so their effective allowance is per instance.
+- The API-wide guard is 1,500 requests per IP per 15 minutes; the global guard and integration-call token buckets are process-local, so their effective allowance is per instance. Auth, settings-write, and session data are stored in MongoDB and shared across API instances using the same database and session configuration. MongoDB outages also disrupt login because sessions are stored there.
 - `API_BASE_URL` changes the API URL used by the frontend.
 - `FRONTEND_ORIGIN` sets the allowed frontend origin for credentialed API requests (default `http://localhost:5173`).
 - `API_GOOGLE_REDIRECT_URI` sets the callback URL for Google sign-in. For compatibility with existing `.env` files, `GOOGLE_REDIRECT_URI` is also accepted. If both are set, `API_GOOGLE_REDIRECT_URI` takes precedence. If neither is set, the API derives the callback from `API_PORT` (default `http://localhost:3001/api/auth/google/callback`).
@@ -137,6 +139,25 @@ http://localhost:3001/api/auth/google/callback
 ```
 
 If you change `API_PORT` or set either redirect URI variable, register the resulting API callback instead. The Google Console value and the callback sent by the API must match exactly, including protocol, host, port, and path. Restart the backend after changing the environment.
+
+## Rate limits
+
+The API-wide flood guard allows 1,500 requests per IP per 15 minutes. Route-level groups are configured centrally and shown in Admin → Settings → **Rate limits** after an administrator passes the existing `manage_integrations` permission and PIN gate.
+
+| Module | Configured route limits | Storage |
+|---|---|---|
+| Public and auth | Registration 20/IP/hour; login 10 failed attempts/IP+email/15 min; forgot password 10/IP and 5/email/hour; reset 10/IP/hour; Google sign-in 20/IP/min; MFA login 20/IP/min | MongoDB |
+| User | Reads 120/account/min; images 600/account/min; report create 20/account+IP/hour; edit/cancel 30/account+IP/hour; uploads 20/account+IP/hour; claims 10/account+IP/hour and 3/account+item/day; profile edits 10/account+IP/hour; notification reads 120/account/min and writes 60/account+IP/min | Read/image groups in per-instance memory; writes in MongoDB |
+| Staff | Reads 240/account/min; images 600/account/min; writes 60/account+IP/min; calendar retries 10/account+IP/10 min | Read/image groups in per-instance memory; writes in MongoDB |
+| Admin | Reads 240/account/min; images 600/account/min; account writes 30/account+IP/10 min; role/permission writes 20/account+IP/10 min; item writes 30/account+IP/10 min; inventory 10/account/min; System Records 60/account/min | Read/image groups in per-instance memory; writes in MongoDB |
+| Settings and security | Overall 100/account/10 min; saves/code actions and tests 10/account+IP/10 min; verifies 10/account+integration/10 min; defaults 5/account+IP/10 min; reads 60/account/min; MFA enrollment 10/account+IP/10 min | Reads in per-instance memory; write groups and PIN/code/MFA lockouts in MongoDB |
+| Integrations | Five failed validations per integration in 10 min trigger a 5 min cooldown | MongoDB; each integration card’s “Calls per minute” bucket remains per-instance memory |
+
+Authenticated routes key limits to the session user ID, not a request-supplied identity. Read groups are per account; writes generally use account+IP. Public routes use IP, with email additionally used for login and the forgot-password email cap. IPv4-mapped IPv6 addresses are normalized and IPv6 clients are keyed by /64. MongoDB-backed counters are shared across API instances; memory counters are per instance.
+
+Additional MongoDB controls include five failed Settings PIN attempts before a 15-minute lockout; emailed-code requests (default 5/hour, configurable with `SU_CODE_REQUEST_LIMIT` and `SU_CODE_REQUEST_WINDOW_SECONDS`), a resend cooldown (default 60 seconds, configurable with `SU_CODE_RESEND_SECONDS`), five code attempts before expiry, 10 failed code-email sends/hour, and three test emails/hour. Admin MFA locks after five failed attempts in its 15-minute window for 15 minutes. The Settings table displays their effective values and whether they come from defaults or environment configuration. Sessions are also stored in MongoDB, so a MongoDB outage already disrupts login.
+
+`TRUST_PROXY` defaults to `false`. Set it only to the actual trusted proxy hop count or comma-separated trusted proxy CIDRs; plain `true` is not accepted. The explicit route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global flood guard also skips `OPTIONS` and `GET /health`.
 
 ## API examples
 

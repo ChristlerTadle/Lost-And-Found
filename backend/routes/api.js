@@ -1,4 +1,6 @@
 const express = require('express');
+const config = require('../../src/config');
+const { createRateLimitService } = require('../../src/services/rate-limits');
 const { createAuthGuards, createAdminMfaSessionGuard } = require('../middlewares/session-auth');
 const { createRolePermissionGuard } = require('../middlewares/role-permissions');
 const { createAuthController } = require('../controllers/auth-controller');
@@ -24,8 +26,49 @@ const { createAdminMfaRoutes } = require('./admin/mfa.routes');
 const { createAdminSystemRecordsRoutes } = require('./admin/system-records.routes');
 const { createAdminRolePermissionsRoutes } = require('./admin/role-permissions.routes');
 
+function createApiRouteModules({ services, controllers, guards, frontendOrigin, limit, rateLimits }) {
+  return [
+    { prefix: '/auth', router: createAuthRoutes({ controllers, frontendOrigin, limit }) },
+    { prefix: '', router: createHealthRoutes() },
+    { prefix: '/admin/mfa', router: createAdminMfaRoutes({ controllers, guards, frontendOrigin, limit }) },
+    { prefix: '/items', router: createItemsRoutes({ controllers, guards, frontendOrigin, limit }) },
+    { prefix: '/claims', router: createClaimsRoutes({ controllers, guards, limit }) },
+    { prefix: '/profile', router: createProfileRoutes({ controllers, guards, limit }) },
+    { prefix: '/notifications', router: createNotificationsRoutes({ controllers, guards, limit }) },
+    { prefix: '/staff', router: createStaffRoutes({ controllers, guards, frontendOrigin, limit }) },
+    { prefix: '/admin', router: createAdminRolePermissionsRoutes({ controllers, guards, limit }) },
+    { prefix: '/admin', router: createAdminDashboardRoutes({ controllers, guards, limit }) },
+    {
+      prefix: '/admin',
+      router: createAdminUsersRoutes({ controllers, guards, limit, auth: services.auth, rateLimits }),
+    },
+    { prefix: '/admin', router: createAdminSystemRecordsRoutes({ controllers, guards, limit }) },
+    { prefix: '/admin', router: createAdminItemsRoutes({ controllers, guards, frontendOrigin, limit }) },
+    { prefix: '/admin', router: createAdminClaimsRoutes({ controllers, guards, limit }) },
+    {
+      prefix: '/admin',
+      router: createAdminSettingsRoutes({
+        controllers,
+        guards,
+        frontendOrigin,
+        integrationSecurity: services.integrationSecurity,
+        limit,
+        rateLimits,
+      }),
+    },
+  ];
+}
+
 function createApiRouter({ services, frontendOrigin }) {
   const router = express.Router();
+  const rateLimits = services.rateLimits || createRateLimitService({
+    database: undefined,
+    audit: services.audit,
+    secret: config.sessionSecret,
+    config: config.rateLimits,
+    controls: config.rateLimitControls,
+  });
+  const limit = rateLimits.limit;
   const { authenticated, requireRole } = createAuthGuards(services.auth);
   const roleGuard = createRolePermissionGuard({
     auth: services.auth,
@@ -81,37 +124,27 @@ function createApiRouter({ services, frontendOrigin }) {
       callIntegration: services.callIntegration,
       audit: services.audit,
       frontendOrigin,
+      rateLimitConfig: config,
     }),
   };
 
-  router.use('/auth', createAuthRoutes({
-    controllers,
-    frontendOrigin,
-    limit: services.rateLimits.limit,
-  }));
-  router.use(createAdminMfaSessionGuard(services.adminMfa));
-  router.use('/', createHealthRoutes());
-  router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/claims', createClaimsRoutes({ controllers, guards }));
-  router.use('/profile', createProfileRoutes({ controllers, guards }));
-  router.use('/notifications', createNotificationsRoutes({ controllers, guards }));
-  router.use('/staff', createStaffRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/admin', createAdminRolePermissionsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminDashboardRoutes({ controllers, guards }));
-  router.use('/admin', createAdminUsersRoutes({ controllers, guards }));
-  router.use('/admin', createAdminSystemRecordsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminItemsRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/admin', createAdminClaimsRoutes({ controllers, guards }));
-  router.use('/admin', createAdminSettingsRoutes({
+  const routeModules = createApiRouteModules({
+    services,
     controllers,
     guards,
     frontendOrigin,
-    integrationSecurity: services.integrationSecurity,
-  }));
+    limit,
+    rateLimits,
+  });
+  const [authModule, ...protectedModules] = routeModules;
+  router.use(authModule.prefix, authModule.router);
+  router.use(createAdminMfaSessionGuard(services.adminMfa));
+  for (const { prefix, router: moduleRouter } of protectedModules) {
+    router.use(prefix || '/', moduleRouter);
+  }
   router.use(guards.denyUnmapped);
 
   return router;
 }
 
-module.exports = { createApiRouter };
+module.exports = { createApiRouter, createApiRouteModules };

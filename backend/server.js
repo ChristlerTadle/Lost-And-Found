@@ -56,23 +56,23 @@ async function start() {
     codeRequestLimit: config.integrationCodeRequestLimit,
     codeRequestWindowMs: config.integrationCodeRequestWindowMs,
     codeResendMs: config.integrationCodeResendMs,
+    ...config.rateLimitControls.integrationSettings,
   });
   const audit = createAuditLogService(database, getMongoClient());
   const rateLimits = createRateLimitService({
     database,
     audit,
     secret: config.sessionSecret,
+    config: config.rateLimits,
+    controls: config.rateLimitControls,
   });
   await rateLimits.initialize();
-  const callIntegration = createIntegrationCaller({
-    integrationSettings,
-    audit,
-    rateLimitAudit: rateLimits.recordRateLimitAudit,
-  });
+  const callIntegration = createIntegrationCaller({ integrationSettings, audit, rateLimits });
   const adminMfa = createAdminMfa(database, integrationSettings, {
     disabled: config.adminMfaDisabled,
     rateLimitDisabled: config.adminMfaRateLimitDisabled,
     callIntegration,
+    ...config.rateLimitControls.adminMfa,
   });
   await integrationSettings.validateStoredSecrets();
   const items = createItemService(database, notificationService);
@@ -154,18 +154,18 @@ async function start() {
     const uploadError = error instanceof multer.MulterError;
     let status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
       : error instanceof Error && error.constructor === Error ? 400 : 500;
-    if ((status === 429 || status === 503) && req.rateLimitGlobalRollback) {
-      await req.rateLimitGlobalRollback();
-    }
     if (typeof req.rateLimitFinalize === 'function') {
       try {
         await req.rateLimitFinalize(status);
       } catch {
-        error = new Error('Service temporarily unavailable. Please try again shortly.');
+        error = new Error('Please try again shortly');
         error.status = 503;
         error.retryAfter = 1;
         status = 503;
       }
+    }
+    if ((status === 429 || status === 503) && req.rateLimitGlobalRollback) {
+      await req.rateLimitGlobalRollback();
     }
     if ((status === 429 || status === 503) && Number.isInteger(error.retryAfter)) {
       res.set('Retry-After', String(error.retryAfter));

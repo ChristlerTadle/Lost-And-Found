@@ -13,12 +13,15 @@ function createAdminMfa(database, integrationSettings, {
   rateLimitDisabled = false,
   now = Date.now,
   callIntegration,
+  attemptWindowMs = ATTEMPT_WINDOW_MS,
+  maxAttempts = MAX_ATTEMPTS,
+  lockMs = LOCK_TTL_MS,
 } = {}) {
   if (typeof callIntegration !== 'function') {
     throw new Error('callIntegration is required for Admin MFA verification.');
   }
   const users = database.collection('users');
-  const attempts = database.collection('admin_mfa_attempts');
+  const attempts = createLimitedCollection(database, 'admin_mfa_attempts');
 
   async function getPolicy() {
     const integration = await integrationSettings.getIntegration('admin_mfa');
@@ -314,7 +317,7 @@ function createAdminMfa(database, integrationSettings, {
     const key = attemptKey(adminId, ipAddress);
     const timestamp = now();
     const existing = await attempts.findOne({ _id: key });
-    if (existing?.window_started_at && existing.window_started_at <= timestamp - ATTEMPT_WINDOW_MS) {
+    if (existing?.window_started_at && existing.window_started_at <= timestamp - attemptWindowMs) {
       await attempts.updateOne(
         { _id: key, window_started_at: existing.window_started_at },
         { $set: { window_started_at: timestamp, failures: 0, starts: 0 }, $unset: { locked_until: '' } },
@@ -327,10 +330,10 @@ function createAdminMfa(database, integrationSettings, {
     );
     const updated = await attempts.findOne({ _id: key });
     await logMfa(audit, 'admin.mfa_verify_failed', adminId, ipAddress, 'failed');
-    if (updated.failures >= MAX_ATTEMPTS && !(updated.locked_until > timestamp)) {
+    if (updated.failures >= maxAttempts && !(updated.locked_until > timestamp)) {
       await attempts.updateOne(
         { _id: key },
-        { $set: { locked_until: timestamp + LOCK_TTL_MS } },
+        { $set: { locked_until: timestamp + lockMs } },
       );
       await logMfa(audit, 'admin.mfa_locked', adminId, ipAddress, 'denied');
       return true;
@@ -343,7 +346,7 @@ function createAdminMfa(database, integrationSettings, {
     const key = attemptKey(adminId, ipAddress);
     const timestamp = now();
     const existing = await attempts.findOne({ _id: key });
-    if (existing?.window_started_at && existing.window_started_at <= timestamp - ATTEMPT_WINDOW_MS) {
+    if (existing?.window_started_at && existing.window_started_at <= timestamp - attemptWindowMs) {
       await attempts.updateOne(
         { _id: key, window_started_at: existing.window_started_at },
         { $set: { window_started_at: timestamp, failures: 0, starts: 0 }, $unset: { locked_until: '' } },
@@ -355,8 +358,8 @@ function createAdminMfa(database, integrationSettings, {
       { upsert: true },
     );
     const updated = await attempts.findOne({ _id: key });
-    if (updated.starts >= MAX_ATTEMPTS) {
-      await attempts.updateOne({ _id: key }, { $set: { locked_until: timestamp + LOCK_TTL_MS } });
+    if (updated.starts >= maxAttempts) {
+      await attempts.updateOne({ _id: key }, { $set: { locked_until: timestamp + lockMs } });
       await logMfa(audit, 'admin.mfa_locked', adminId, ipAddress, 'denied');
       throw lockError();
     }
@@ -455,6 +458,37 @@ function genericError() {
 function lockError() {
   const error = new Error('The authentication code could not be verified. Try again later.');
   error.status = 429;
+  return error;
+}
+
+function createLimitedCollection(database, name) {
+  const collection = database.collection(name);
+  return new Proxy(collection, {
+    get(target, property) {
+      const method = target[property];
+      if (typeof method !== 'function') return method;
+      return (...args) => {
+        let timer;
+        const operation = Promise.resolve().then(() => method.apply(target, args));
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(storeUnavailableError()), 200);
+        });
+        return Promise.race([operation, timeout])
+          .catch((error) => {
+            if (error?.status === 503 && error?.code === 'rate_limit_store_unavailable') throw error;
+            throw storeUnavailableError();
+          })
+          .finally(() => clearTimeout(timer));
+      };
+    },
+  });
+}
+
+function storeUnavailableError() {
+  const error = new Error('Please try again shortly');
+  error.status = 503;
+  error.retryAfter = 1;
+  error.code = 'rate_limit_store_unavailable';
   return error;
 }
 
