@@ -1,4 +1,6 @@
 const express = require('express');
+const config = require('../../src/config');
+const { createRateLimitService } = require('../../src/services/rate-limits');
 const { createAuthGuards, createAdminMfaSessionGuard } = require('../middlewares/session-auth');
 const { createRolePermissionGuard } = require('../middlewares/role-permissions');
 const { createAuthController } = require('../controllers/auth-controller');
@@ -26,6 +28,13 @@ const { createAdminRolePermissionsRoutes } = require('./admin/role-permissions.r
 
 function createApiRouter({ services, frontendOrigin }) {
   const router = express.Router();
+  const rateLimits = services.rateLimits || createRateLimitService({
+    database: undefined,
+    audit: services.audit,
+    secret: config.sessionSecret,
+    config: config.rateLimits,
+  });
+  const limit = rateLimits.limit;
   const { authenticated, requireRole } = createAuthGuards(services.auth);
   const roleGuard = createRolePermissionGuard({
     auth: services.auth,
@@ -88,10 +97,10 @@ function createApiRouter({ services, frontendOrigin }) {
   router.use('/', createHealthRoutes());
   router.use('/auth', createAuthRoutes({ controllers, frontendOrigin }));
   router.use('/admin/mfa', createAdminMfaRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin }));
-  router.use('/claims', createClaimsRoutes({ controllers, guards }));
-  router.use('/profile', createProfileRoutes({ controllers, guards }));
-  router.use('/notifications', createNotificationsRoutes({ controllers, guards }));
+  router.use('/items', createItemsRoutes({ controllers, guards, frontendOrigin, limit }));
+  router.use('/claims', createClaimsRoutes({ controllers, guards, limit }));
+  router.use('/profile', createProfileRoutes({ controllers, guards, limit }));
+  router.use('/notifications', createNotificationsRoutes({ controllers, guards, limit }));
   router.use('/staff', createStaffRoutes({ controllers, guards, frontendOrigin }));
   router.use('/admin', createAdminRolePermissionsRoutes({ controllers, guards }));
   router.use('/admin', createAdminDashboardRoutes({ controllers, guards }));

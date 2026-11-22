@@ -15,6 +15,8 @@ const ACTIONS = new Set([
   'admin.mfa_enroll_start', 'admin.mfa_enrolled', 'admin.mfa_verify_success',
   'admin.mfa_verify_failed', 'admin.mfa_locked', 'admin.mfa_recovery_used',
   'admin.mfa_recovery_regenerated', 'admin.mfa_reset',
+  'integration.rate_limited',
+  'rate_limited',
 ]);
 
 function createAuditLogService(database, client) {

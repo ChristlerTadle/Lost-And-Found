@@ -18,6 +18,7 @@ const { createNotificationService } = require('../src/services/notifications');
 const { createRolePermissionService } = require('../src/services/role-permissions');
 const { createRoleChangeService } = require('../src/services/role-change');
 const { createAuditLogService } = require('../src/services/audit-log');
+const { createRateLimitService } = require('../src/services/rate-limits');
 const { parseEncryptionKey } = require('../src/services/integration-settings');
 const { createApiRouter } = require('./routes/api');
 
@@ -57,6 +58,13 @@ async function start() {
     codeResendMs: config.integrationCodeResendMs,
   });
   const audit = createAuditLogService(database, getMongoClient());
+  const rateLimits = createRateLimitService({
+    database,
+    audit,
+    secret: config.sessionSecret,
+    config: config.rateLimits,
+  });
+  await rateLimits.initialize();
   const callIntegration = createIntegrationCaller({ integrationSettings, audit });
   const adminMfa = createAdminMfa(database, integrationSettings, {
     disabled: config.adminMfaDisabled,
@@ -89,6 +97,7 @@ async function start() {
     notifications: notificationService,
     rolePermissions,
     audit,
+    rateLimits,
   };
   services.roleChange = createRoleChangeService(database, {
     rolePermissions,

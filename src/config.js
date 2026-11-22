@@ -115,6 +115,20 @@ const integrationRateLimits = {
   },
 };
 
+const rateLimits = {
+  user_reads: { windowMs: 60 * 1000, max: 120, keyType: 'account', store: 'memory', sensitive: false },
+  item_images: { windowMs: 60 * 1000, max: 600, keyType: 'account', store: 'memory', sensitive: false },
+  report_create: { windowMs: 60 * 60 * 1000, max: 20, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  report_edit: { windowMs: 60 * 60 * 1000, max: 30, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  report_cancel: { windowMs: 60 * 60 * 1000, max: 30, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  image_upload: { windowMs: 60 * 60 * 1000, max: 20, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  claim_submit: { windowMs: 60 * 60 * 1000, max: 10, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  claim_item: { windowMs: 24 * 60 * 60 * 1000, max: 3, keyType: 'account+item', store: 'mongo', sensitive: false },
+  profile_edit: { windowMs: 60 * 60 * 1000, max: 10, keyType: 'account+ip', store: 'mongo', sensitive: false },
+  notification_read: { windowMs: 60 * 1000, max: 120, keyType: 'account', store: 'memory', sensitive: false },
+  notification_write: { windowMs: 60 * 1000, max: 60, keyType: 'account+ip', store: 'mongo', sensitive: false },
+};
+
 module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'replace-this-session-secret-before-deployment',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017',
@@ -126,6 +140,7 @@ module.exports = {
   integrationBootstrapSmtpErrors: bootstrapMail.smtpErrors,
   integrationRouteLimits,
   integrationRateLimits,
+  rateLimits,
   integrationCodeRequestLimit: positiveIntegerEnv('SU_CODE_REQUEST_LIMIT', 5, 100),
   integrationCodeRequestWindowMs: positiveIntegerEnv('SU_CODE_REQUEST_WINDOW_SECONDS', 3600, 86400) * 1000,
   integrationCodeResendMs: positiveIntegerEnv('SU_CODE_RESEND_SECONDS', 60, 3600) * 1000,
