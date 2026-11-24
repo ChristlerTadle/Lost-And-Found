@@ -388,6 +388,12 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
       }
     },
   };
+  const sessionState = {};
+  const locks = {
+    async withLocks(_requests, operation) {
+      return operation({ async assertHeld() {} });
+    },
+  };
   const controller = createAdminController({
     auth: {},
     items: {},
@@ -403,10 +409,11 @@ async function createHarness({ failAdminMfa = false, failWriteFor = null } = {})
     callIntegration,
     audit,
     frontendOrigin: 'https://frontend.example.test',
+    locks,
   });
   return {
     state, integrationSettings, audit, seen, sentHashes, controller,
-    callIntegration, baseSettings, email, googleOAuth, recaptcha, googleCalendar, adminMfa,
+    callIntegration, baseSettings, email, googleOAuth, recaptcha, googleCalendar, adminMfa, sessionState, locks,
   };
 }
 
@@ -425,7 +432,7 @@ function response() {
   };
 }
 
-function request(body, params = {}) {
+function request(body, params = {}, sessionState = {}) {
   return {
     body,
     params,
@@ -433,7 +440,9 @@ function request(body, params = {}) {
     ip: '127.0.0.1',
     hostname: 'api.example.test',
     sessionID: 'test-session',
-    session: {},
+    session: Object.assign(sessionState, {
+      save(callback) { callback(); },
+    }),
   };
 }
 
@@ -468,14 +477,14 @@ test('verification route limits are scoped by admin and integration', () => {
 
 async function save(harness, integrations) {
   const res = response();
-  await harness.controller.putAdminSettings(request({ integrations }), res);
+  await harness.controller.putAdminSettings(request({ integrations }, {}, harness.sessionState), res);
   return res;
 }
 
 async function verify(harness, code, integrations) {
   const res = response();
   await harness.controller.postAdminSettingsCodeVerify(
-    request({ code, integrations }), res,
+    request({ code, integrations }, {}, harness.sessionState), res,
   );
   return res;
 }
@@ -531,6 +540,7 @@ test('saving every integration sends its code through the independent bootstrap 
     callIntegration: harness.callIntegration,
     audit: harness.audit,
     frontendOrigin: 'https://frontend.example.test',
+    locks: harness.locks,
   });
   const calendarKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
     .export({ format: 'pem', type: 'pkcs8' }).toString().trim();
@@ -554,13 +564,17 @@ test('saving every integration sends its code through the independent bootstrap 
       assert.equal(verified.statusCode, 200);
     }
     const send = response();
-    await controller.putAdminSettings(request({ integrations }), send);
+    await controller.putAdminSettings(
+      request({ integrations }, {}, harness.sessionState), send,
+    );
     assert.equal(send.body.verificationRequired, true, `integration index ${index}: ${send.body.error}`);
     assert.equal(send.body.maskedRecipient, 'a***@example.test');
     assert.ok(send.body.expiresAt);
     const code = /code is: (\d{6})/.exec(bootstrapMessages[index].text)[1];
     const apply = response();
-    await controller.postAdminSettingsCodeVerify(request({ code, integrations }), apply);
+    await controller.postAdminSettingsCodeVerify(
+      request({ code, integrations }, {}, harness.sessionState), apply,
+    );
     assert.equal(apply.statusCode, 200, `integration index ${index}: ${apply.body.error}`);
     assert.equal(bootstrapMessages[index].to, 'admin@example.test');
     assert.equal(bootstrapTransports[index].host, 'bootstrap.example.test');
@@ -1167,7 +1181,7 @@ test('email-code save rejects a payload changed after validation', async () => {
   };
   const rejected = await verify(harness, '123456', changedPayload);
   assert.equal(rejected.statusCode, 400);
-  assert.match(rejected.body.error, /pending settings changed/);
+  assert.match(rejected.body.error, /settings changed/i);
   assert.equal(harness.seen.smtpVerifyRequests, 1);
   assert.equal(
     (await harness.integrationSettings.getIntegration('smtp')).settings.password === 'smtp-original-secret',

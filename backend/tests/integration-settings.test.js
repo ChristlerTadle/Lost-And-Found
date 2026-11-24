@@ -243,6 +243,89 @@ test('default snapshots only change explicitly and restore encrypted settings sa
   assert.equal(JSON.stringify([...state.documents.values()]).includes(ENV.GOOGLE_CLIENT_SECRET), false);
 });
 
+test('integration apply plans reject configuration changes made after validation', async () => {
+  const saveState = createDatabase();
+  const saveSettings = createIntegrationSettings(saveState.database, { encryptionKey: KEY, env: ENV });
+  await saveSettings.migrateEnvironmentValues();
+  const savePlan = await saveSettings.prepareIntegrationSave({
+    google_auth: {
+      enabled: true,
+      fields: { callback_url: 'https://changed.example.test/google/callback' },
+    },
+  });
+  saveState.documents.get('google_auth').enabled = !saveState.documents.get('google_auth').enabled;
+  const writesBeforeSaveConflict = saveState.writeCount;
+  await assert.rejects(saveSettings.applyIntegrationSave(savePlan, createAudit(), {}), (error) => {
+    assert.equal(error.code, 'state_conflict');
+    return true;
+  });
+  assert.equal(saveState.writeCount, writesBeforeSaveConflict);
+
+  const defaultState = createDatabase();
+  const defaultSettings = createIntegrationSettings(defaultState.database, { encryptionKey: KEY, env: ENV });
+  await defaultSettings.migrateEnvironmentValues();
+  await defaultSettings.applyIntegrationSave(await defaultSettings.prepareIntegrationSave({
+    google_auth: { enabled: true, fields: {} },
+  }), createAudit(), {});
+  const current = await defaultSettings.getIntegration('google_auth');
+  await defaultSettings.recordVerification({
+    adminId: 'admin-1',
+    integrationId: 'google_auth',
+    enabled: current.enabled,
+    values: current.settings,
+    proofType: 'test',
+    result: true,
+  });
+  const defaultPlan = await defaultSettings.prepareIntegrationDefault('google_auth');
+  defaultState.documents.get('google_auth').enabled = false;
+  const writesBeforeDefaultConflict = defaultState.writeCount;
+  await assert.rejects(
+    defaultSettings.applyIntegrationDefault(defaultPlan, createAudit(), {}, 'admin-1'),
+    (error) => {
+      assert.equal(error.code, 'state_conflict');
+      return true;
+    },
+  );
+  assert.equal(defaultState.writeCount, writesBeforeDefaultConflict);
+
+  const restoreState = createDatabase();
+  const restoreSettings = createIntegrationSettings(restoreState.database, { encryptionKey: KEY, env: ENV });
+  await restoreSettings.migrateEnvironmentValues();
+  await restoreSettings.applyIntegrationSave(await restoreSettings.prepareIntegrationSave({
+    google_auth: { enabled: true, fields: {} },
+  }), createAudit(), {});
+  const restoreCurrent = await restoreSettings.getIntegration('google_auth');
+  await restoreSettings.recordVerification({
+    adminId: 'admin-1',
+    integrationId: 'google_auth',
+    enabled: restoreCurrent.enabled,
+    values: restoreCurrent.settings,
+    proofType: 'test',
+    result: true,
+  });
+  const validDefaultPlan = await restoreSettings.prepareIntegrationDefault('google_auth');
+  await restoreSettings.applyIntegrationDefault(validDefaultPlan, createAudit(), {}, 'admin-1');
+  const updatePlan = await restoreSettings.prepareIntegrationSave({
+    google_auth: {
+      enabled: true,
+      fields: { callback_url: 'https://changed.example.test/google/callback' },
+    },
+  });
+  await restoreSettings.applyIntegrationSave(updatePlan, createAudit(), {});
+  const restorePlan = await restoreSettings.prepareIntegrationRestore('google_auth');
+  assert.ok(restorePlan.changedFields.includes('callback_url'));
+  restoreState.documents.get('google_auth').enabled = false;
+  const writesBeforeRestoreConflict = restoreState.writeCount;
+  await assert.rejects(
+    restoreSettings.applyIntegrationRestore(restorePlan, createAudit(), {}, 'admin-1'),
+    (error) => {
+      assert.equal(error.code, 'state_conflict');
+      return true;
+    },
+  );
+  assert.equal(restoreState.writeCount, writesBeforeRestoreConflict);
+});
+
 test('enabling integrations needs an email code while disabling does not', async () => {
   const enableState = createDatabase([{ _id: 'google_auth', enabled: false }]);
   const enableIntegrations = createIntegrationSettings(enableState.database, {

@@ -34,6 +34,7 @@ const permissionsByRole = new Map([
   ['admin', PERMISSIONS_BY_ROLE.admin.map(({ key }) => key)],
 ]);
 const auditEvents = [];
+const lockRequestsSeen = [];
 let recaptchaEnabled = false;
 let googleEnabled = false;
 let integrationSaveCount = 0;
@@ -41,7 +42,8 @@ const testSessions = new Map();
 const pendingRoleCodes = new Map();
 const services = {
   locks: {
-    async withLocks(_requests, operation) {
+    async withLocks(requests, operation) {
+      lockRequestsSeen.push(requests);
       return operation({
         tokens: {},
         async assertHeld() {},
@@ -99,6 +101,14 @@ const services = {
         throw error;
       }
       return { id: account.id, role_name: account.role_name, status: account.status };
+    },
+    async findPasswordResetLockTarget(token) {
+      assert.equal(token, 'valid-reset-token');
+      return { userId: user.id };
+    },
+    async resetPassword(_token, _password, _confirmation, { expectedUserId, assertLockHeld }) {
+      assert.equal(expectedUserId, user.id);
+      await assertLockHeld();
     },
     async updateProfile(id, input) {
       assert.equal(id, user.id);
@@ -288,8 +298,10 @@ const services = {
         credentialChanges: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
         changes: credentialChanged ? [{ integration: 'google_auth', fields: ['client_id'] }] : [],
         payloadHash: credentialChanged ? 'credential-payload-hash' : 'payload-hash',
+        expectedStateHashes: { google_auth: 'test-state-hash' },
       };
     },
+    async assertStoredConfigurationMatches() {},
     async requireCurrentVerification() {
       return { verified: true, proofType: 'real_sign_in' };
     },
@@ -395,6 +407,9 @@ const services = {
       return { enabled: false, requireForAllAdmins: false, enrolled: false };
     },
     async selfTest() { return true; },
+    async startEnrollment() { return { started: true }; },
+    async confirmEnrollment() { return { confirmed: true, recoveryCodes: [] }; },
+    async regenerateRecoveryCodes() { return { recoveryCodes: [] }; },
   },
   items: {
     async search() {
@@ -1388,6 +1403,7 @@ test('integration settings routes require admin role, CSRF, and a live PIN unloc
   });
   assert.equal(verifiedCredentialSave.status, 200);
   assert.equal(integrationSaveCount, savesBeforeCredentialCode + 1);
+  assert.deepEqual(lockRequestsSeen.at(-1), [{ key: 'integration:google_auth', mode: 'X' }]);
 
   const staffSmtpTestResponse = await fetch(`${baseUrl}/admin/settings/smtp/test`, {
     method: 'POST',
@@ -1528,6 +1544,7 @@ test('role permission dependencies expand parents and reject unknown keys', () =
 });
 
 test('admin MFA routes require an admin session and CSRF on writes', async () => {
+  lockRequestsSeen.length = 0;
   const nonAdmin = await fetch(`${baseUrl}/admin/mfa`, {
     headers: { 'x-test-user': user.id },
   });
@@ -1543,6 +1560,27 @@ test('admin MFA routes require an admin session and CSRF on writes', async () =>
     body: JSON.stringify({}),
   });
   assert.equal(missingCsrf.status, 403);
+
+  for (const [path, expectedResult] of [
+    ['/admin/mfa/enrollment/start', { started: true }],
+    ['/admin/mfa/enrollment/confirm', { confirmed: true, recoveryCodes: [] }],
+    ['/admin/mfa/recovery/regenerate', { recoveryCodes: [] }],
+  ]) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'x-test-user': admin.id,
+        Origin: 'http://localhost:5173',
+        'Content-Type': 'application/json',
+        'x-csrf-token': 'csrf-test-token',
+      },
+      body: JSON.stringify({ code: 'test-code' }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200, `${path}: ${body.error}`);
+    assert.deepEqual(body, expectedResult);
+    assert.deepEqual(lockRequestsSeen.at(-1), [{ key: `account:${admin.id}`, mode: 'X' }]);
+  }
 });
 
 test('admin role permission save is audited and server-normalizes dependencies', async () => {
@@ -1703,6 +1741,21 @@ test('password reset keeps responses generic for unknown, inactive, failed, and 
     services.email.sendPasswordReset = originalSendPasswordReset;
     console.error = originalConsoleError;
   }
+});
+
+test('password reset locks the account identified by the reset token', async () => {
+  lockRequestsSeen.length = 0;
+  const response = await fetch(`${baseUrl}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: 'valid-reset-token',
+      password: 'new-password-123',
+      password_confirmation: 'new-password-123',
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(lockRequestsSeen.at(-1), [{ key: `account:${user.id}`, mode: 'X' }]);
 });
 
 test('enabled reCAPTCHA is verified before password authentication', async () => {

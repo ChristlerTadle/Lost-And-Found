@@ -1,6 +1,7 @@
 const { createCipheriv, createDecipheriv, createHmac, randomBytes } = require('node:crypto');
 const config = require('../config');
 const { integrations } = require('../config/integrations');
+const { stateConflict } = require('./state-conflict');
 
 const MASK = '••••••••';
 const VERIFICATION_TTL_MS = 10 * 60 * 1000;
@@ -39,11 +40,13 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return createHmac('sha256', key).update(String(value)).digest('hex');
   }
 
-  async function getIntegration(integrationId) {
+  async function getIntegration(integrationId, options = {}) {
     const definition = integrations[integrationId];
     if (!definition) throw new Error('Unknown integration.');
 
-    const document = await settings.findOne({ _id: integrationId });
+    const document = options.useDocument
+      ? options.document
+      : await settings.findOne({ _id: integrationId });
     const values = {};
     for (const field of definition.fields) {
       const saved = document?.values?.[field.name];
@@ -276,7 +279,12 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
         continue;
       }
 
-      const current = await getIntegration(id);
+      const storedConfiguration = await readStoredConfiguration(id);
+      const current = await getIntegration(id, {
+        document: storedConfiguration,
+        useDocument: true,
+      });
+      const expectedStateHash = storedConfigurationHash(storedConfiguration, key);
       const nextValues = { ...current.settings };
       const changedFields = [];
       const credentialFields = [];
@@ -331,6 +339,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       if (changedFields.length || enabledChanged) {
         updates.push({
           id,
+          expectedStateHash,
           enabled: submitted.enabled,
           persist,
           values: nextValues,
@@ -363,13 +372,38 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     const payloadHash = createHmac('sha256', key)
       .update(JSON.stringify(canonical))
       .digest('hex');
-    return { updates, changed, credentialChanges, changes, payloadHash };
+    const expectedStateHashes = Object.fromEntries(
+      updates.map(({ id, expectedStateHash }) => [id, expectedStateHash]),
+    );
+    return {
+      updates,
+      changed,
+      credentialChanges,
+      changes,
+      payloadHash,
+      expectedStateHashes,
+    };
   }
 
-  async function applyIntegrationSave(plan, audit, auditContext, adminId) {
+  async function assertStoredConfigurationMatches(expectedStateHashes = {}) {
+    for (const [id, expectedHash] of Object.entries(expectedStateHashes)) {
+      if (!integrations[id]) throw validationError('Unknown integration.');
+      const current = await settings.findOne({ _id: id });
+      if (storedConfigurationHash(current, key) !== expectedHash) {
+        throw stateConflict('Integration settings changed while being verified. Review the current settings and verify again.');
+      }
+    }
+  }
+
+  async function applyIntegrationSave(
+    plan, audit, auditContext, adminId, { assertLocksHeld } = {},
+  ) {
     const { updates, changed } = plan;
     if (!updates.length) return { integrations: await getAdminIntegrations(adminId), changed: [] };
 
+    const expectedStateHashes = plan.expectedStateHashes
+      || Object.fromEntries(updates.map(({ id, expectedStateHash }) => [id, expectedStateHash]));
+    await assertStoredConfigurationMatches(expectedStateHashes);
     const validatedIds = new Set(plan.verifiedIntegrationIds || plan.validatedIntegrationIds || []);
     const defaultSnapshots = new Map();
     for (const { id, values } of updates) {
@@ -409,8 +443,11 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       return actions;
     });
     await audit.runAction(events, async (session) => {
+      await assertStoredConfigurationMatches(expectedStateHashes);
+      await assertLocksHeld?.();
       if (session) {
         await settings.bulkWrite(operations, { ordered: true, session });
+        await assertLocksHeld?.();
         return;
       }
 
@@ -418,6 +455,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       const attempted = [];
       try {
         for (let index = 0; index < operations.length; index += 1) {
+          await assertLocksHeld?.();
           attempted.push(index);
           const { updateOne } = operations[index];
           await settings.updateOne(
@@ -426,6 +464,7 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
             { upsert: true },
           );
         }
+        await assertLocksHeld?.();
       } catch {
         let rollbackFailed = false;
         for (const index of attempted.reverse()) {
@@ -449,21 +488,36 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return { integrations: await getAdminIntegrations(adminId), changed };
   }
 
-  async function getDefaultRestorePreview(integrationId) {
+  async function prepareIntegrationRestore(integrationId) {
     const definition = integrations[integrationId];
     if (!definition) throw validationError('Unknown integration.');
-    const document = await settings.findOne({ _id: integrationId });
+    const document = await readStoredConfiguration(integrationId);
     if (!document?.defaults || typeof document.defaults !== 'object') {
       const error = new Error('No default settings have been saved for this integration.');
       error.status = 404;
       throw error;
     }
-    const current = await getIntegration(integrationId);
+    const current = await getIntegration(integrationId, {
+      document,
+      useDocument: true,
+    });
     const defaults = await decryptSnapshot(integrationId, document.defaults);
     const changedFields = definition.fields
       .filter(({ name }) => defaults[name] !== current.settings[name])
       .map(({ name }) => name);
-    return { id: integrationId, changedFields, values: defaults };
+    return {
+      id: integrationId,
+      changedFields,
+      values: defaults,
+      expectedStateHashes: {
+        [integrationId]: storedConfigurationHash(document, key),
+      },
+    };
+  }
+
+  async function getDefaultRestorePreview(integrationId) {
+    const { id, changedFields, values } = await prepareIntegrationRestore(integrationId);
+    return { id, changedFields, values };
   }
 
   async function recordCandidateValidation(integrationId, values, passed, result) {
@@ -536,8 +590,12 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     return configHash(integrationId, values, key);
   }
 
-  async function setIntegrationDefault(integrationId, audit, auditContext, adminId) {
-    const current = await getIntegration(integrationId);
+  async function prepareIntegrationDefault(integrationId) {
+    const document = await readStoredConfiguration(integrationId);
+    const current = await getIntegration(integrationId, {
+      document,
+      useDocument: true,
+    });
     if (!current.active) {
       const error = new Error('Enable and configure the active integration before setting it as the default.');
       error.status = 400;
@@ -549,47 +607,88 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
       error.status = 400;
       throw error;
     }
-    const snapshot = await encryptSnapshot(integrationId, current.settings);
-    const changedFields = Object.keys(current.settings);
+    return {
+      id: integrationId,
+      snapshot: await encryptSnapshot(integrationId, current.settings),
+      changedFields: Object.keys(current.settings),
+      expectedStateHashes: {
+        [integrationId]: storedConfigurationHash(document, key),
+      },
+    };
+  }
+
+  async function applyIntegrationDefault(
+    plan, audit, auditContext, adminId, { assertLocksHeld } = {},
+  ) {
+    await assertStoredConfigurationMatches(plan.expectedStateHashes);
     await audit.runAction({
       ...auditContext,
       action: 'integration.set_default',
       target_type: 'integration',
-      target_id: integrationId,
-      new_value: { changed_fields: changedFields },
-    }, () => settings.updateOne(
-      { _id: integrationId },
-      { $set: { defaults: snapshot, updated_at: new Date().toISOString() } },
-      { upsert: true },
-    ));
+      target_id: plan.id,
+      new_value: { changed_fields: plan.changedFields },
+    }, async (session) => {
+      await assertStoredConfigurationMatches(plan.expectedStateHashes);
+      await assertLocksHeld?.();
+      await settings.updateOne(
+        { _id: plan.id },
+        { $set: { defaults: plan.snapshot, updated_at: new Date().toISOString() } },
+        { ...(session ? { session } : {}), upsert: true },
+      );
+      await assertLocksHeld?.();
+    });
     return { integrations: await getAdminIntegrations(adminId) };
   }
 
-  async function restoreIntegrationDefault(integrationId, audit, auditContext, adminId) {
-    const preview = await getDefaultRestorePreview(integrationId);
-    if (!preview.changedFields.length) {
+  async function setIntegrationDefault(integrationId, audit, auditContext, adminId) {
+    const plan = await prepareIntegrationDefault(integrationId);
+    return applyIntegrationDefault(plan, audit, auditContext, adminId);
+  }
+
+  async function applyIntegrationRestore(
+    plan, audit, auditContext, adminId, { assertLocksHeld } = {},
+  ) {
+    await assertStoredConfigurationMatches(plan.expectedStateHashes);
+    if (!plan.changedFields.length) {
       return { integrations: await getAdminIntegrations(adminId), changed: [], restored: false };
     }
-    const persist = await encryptSnapshot(integrationId, preview.values);
-    const definition = integrations[integrationId];
+    const persist = await encryptSnapshot(plan.id, plan.values);
+    const definition = integrations[plan.id];
     const set = { updated_at: new Date().toISOString() };
     for (const { name } of definition.fields) set[`values.${name}`] = persist[name];
     await audit.runAction({
       ...auditContext,
       action: 'integration.restore_default',
       target_type: 'integration',
-      target_id: integrationId,
-      new_value: { changed_fields: preview.changedFields },
-    }, () => settings.updateOne(
-      { _id: integrationId },
-      { $set: set },
-      { upsert: true },
-    ));
+      target_id: plan.id,
+      new_value: { changed_fields: plan.changedFields },
+    }, async (session) => {
+      await assertStoredConfigurationMatches(plan.expectedStateHashes);
+      await assertLocksHeld?.();
+      await settings.updateOne(
+        { _id: plan.id },
+        { $set: set },
+        { ...(session ? { session } : {}), upsert: true },
+      );
+      await assertLocksHeld?.();
+    });
     return {
       integrations: await getAdminIntegrations(adminId),
-      changed: preview.changedFields,
+      changed: plan.changedFields,
       restored: true,
     };
+  }
+
+  async function restoreIntegrationDefault(integrationId, audit, auditContext, adminId) {
+    const plan = await prepareIntegrationRestore(integrationId);
+    return applyIntegrationRestore(plan, audit, auditContext, adminId);
+  }
+
+  async function readStoredConfiguration(integrationId) {
+    return settings.findOne(
+      { _id: integrationId },
+      { projection: { _id: 1, enabled: 1, values: 1, defaults: 1, defaults_initialized: 1 } },
+    );
   }
 
   async function encryptSnapshot(integrationId, values) {
@@ -685,8 +784,13 @@ function createIntegrationSettings(database, { encryptionKey, env = process.env 
     saveIntegrations,
     prepareIntegrationSave,
     applyIntegrationSave,
+    assertStoredConfigurationMatches,
     getDefaultRestorePreview,
+    prepareIntegrationDefault,
+    applyIntegrationDefault,
     setIntegrationDefault,
+    prepareIntegrationRestore,
+    applyIntegrationRestore,
     restoreIntegrationDefault,
     validateIntegrationFields,
     recordCandidateValidation,
@@ -850,6 +954,29 @@ function configHash(integrationId, values, key) {
   const canonical = {};
   for (const field of definition.fields) canonical[field.name] = normalizeFieldValue(field, values?.[field.name]);
   return createHmac('sha256', key).update(JSON.stringify({ integrationId, values: canonical })).digest('hex');
+}
+
+function storedConfigurationHash(document, key) {
+  const state = {
+    exists: Boolean(document),
+    enabled: document?.enabled ?? null,
+    values: document?.values ?? null,
+    defaults: document?.defaults ?? null,
+    defaultsInitialized: document?.defaults_initialized ?? null,
+  };
+  return createHmac('sha256', key)
+    .update(JSON.stringify(canonicalizeConfiguration(state)))
+    .digest('hex');
+}
+
+function canonicalizeConfiguration(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeConfiguration);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => (
+      [key, canonicalizeConfiguration(value[key])]
+    )));
+  }
+  return value;
 }
 
 function verificationHash(integrationId, enabled, values, key) {

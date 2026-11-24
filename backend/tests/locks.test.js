@@ -57,7 +57,7 @@ test('MongoDB lock manager concurrency and lease behavior', {
     await t.test('sorts keys by the global order and id', () => {
       const sorted = locks.sortLockRequests([
         { key: `claim:${prefix}-a`, mode: 'X' },
-        { key: `item:${prefix}-b`, mode: 'X' },
+        { key: `integration:${prefix}-b`, mode: 'X' },
         { key: `account:${prefix}-a`, mode: 'X' },
         { key: 'role:admin', mode: 'X' },
         { key: 'roster', mode: 'X' },
@@ -65,10 +65,17 @@ test('MongoDB lock manager concurrency and lease behavior', {
       assert.deepEqual(sorted.map(({ key: resourceKey }) => resourceKey), [
         'roster',
         'role:admin',
+        `integration:${prefix}-b`,
         `account:${prefix}-a`,
-        `item:${prefix}-b`,
         `claim:${prefix}-a`,
       ]);
+      assert.deepEqual(
+        locks.sortLockRequests([
+          { key: `integration:${prefix}-b`, mode: 'X' },
+          { key: `integration:${prefix}-a`, mode: 'X' },
+        ]).map(({ id }) => id),
+        [`${prefix}-a`, `${prefix}-b`],
+      );
       assert.deepEqual(
         locks.sortLockRequests([
           { key: `account:${prefix}-b`, mode: 'S' },

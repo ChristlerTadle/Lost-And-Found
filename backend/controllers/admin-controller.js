@@ -622,11 +622,12 @@ function createAdminController({
         });
         if (plan.credentialChanges.length) {
           const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
+          await savePendingIntegrationApply(req, plan);
           return res.json({ verificationRequired: true, ...result });
         }
-        return res.json(await integrationSettings.applyIntegrationSave(
-          plan, audit, requestAuditContext(req, null), req.user.id,
-        ));
+        return res.json(await applyIntegrationSaveWithLocks({
+          req, plan, integrationSettings, locks, audit,
+        }));
       } catch (error) {
         return integrationSettingsError(res, error, 'Integration settings could not be saved.');
       }
@@ -651,6 +652,7 @@ function createAdminController({
         }
         await requirePlanVerifications(req, plan, integrationSettings);
         const result = await sendIntegrationVerificationCode(req, integrationSecurity, integrationSettings, plan, audit);
+        await savePendingIntegrationApply(req, plan);
         return res.json({ verificationRequired: true, ...result });
       } catch (error) {
         return integrationSettingsError(res, error, 'The verification code could not be sent.');
@@ -681,13 +683,17 @@ function createAdminController({
           delete req.session.pendingAdminMfaRestore;
           await saveSession(req);
           return res.json(await restoreIntegrationDefaultForRequest(
-            req, restore.integrationId, integrationSettings, integrationSecurity, audit,
+            req,
+            restore.integrationId,
+            integrationSettings,
+            integrationSecurity,
+            audit,
+            locks,
+            restore.restorePlan,
           ));
         }
-        const plan = await integrationSettings.prepareIntegrationSave(
-          req.body?.integrations,
-        );
-        if (!plan.credentialChanges.length) {
+        const pending = req.session.pendingIntegrationApply;
+        if (!pending || pending.adminId !== String(req.user.id)) {
           const error = new Error('There are no credential changes to verify.');
           error.status = 400;
           throw error;
@@ -696,29 +702,66 @@ function createAdminController({
           adminId: req.user.id,
           sessionId: req.sessionID,
           candidate: req.body?.code,
-          payloadHash: plan.payloadHash,
+          payloadHash: pending.payloadHash,
           auditContext: requestAuditContext(req, null),
           audit,
-          changes: plan.changes,
+          changes: pending.changes,
         });
-        await requirePlanVerifications(req, plan, integrationSettings);
-        return res.json(await integrationSettings.applyIntegrationSave(
-          plan, audit, requestAuditContext(req, null), req.user.id,
-        ));
+        try {
+          const result = await locks.withLocks(
+            pending.integrationIds.map((id) => ({ key: `integration:${id}`, mode: 'X' })),
+            async (lease) => {
+              await integrationSettings.assertStoredConfigurationMatches(pending.expectedStateHashes);
+              const plan = await integrationSettings.prepareIntegrationSave(req.body?.integrations);
+              if (!plan.credentialChanges.length || plan.payloadHash !== pending.payloadHash) {
+                const error = new Error('Settings changed. Review them and request a new verification code.');
+                error.status = 400;
+                throw error;
+              }
+              await requirePlanVerifications(req, plan, integrationSettings);
+              return integrationSettings.applyIntegrationSave(
+                plan,
+                audit,
+                requestAuditContext(req, null),
+                req.user.id,
+                { assertLocksHeld: lease.assertHeld },
+              );
+            },
+            { owner: String(req.user.id) },
+          );
+          delete req.session.pendingIntegrationApply;
+          await saveSession(req);
+          return res.json(result);
+        } catch (error) {
+          delete req.session.pendingIntegrationApply;
+          await saveSession(req);
+          throw error;
+        }
       } catch (error) {
         return integrationSettingsError(res, error, 'Integration settings could not be saved.');
       }
     },
 
     postAdminSettingsDefault: async (req, res) => {
-      return res.json(await integrationSettings.setIntegrationDefault(
-        req.params.integrationId, audit, requestAuditContext(req, null), req.user.id,
-      ));
+      const plan = await integrationSettings.prepareIntegrationDefault(req.params.integrationId);
+      const result = await locks.withLocks(
+        [{ key: `integration:${plan.id}`, mode: 'X' }],
+        (lease) => integrationSettings.applyIntegrationDefault(
+          plan,
+          audit,
+          requestAuditContext(req, null),
+          req.user.id,
+          { assertLocksHeld: lease.assertHeld },
+        ),
+        { owner: String(req.user.id) },
+      );
+      return res.json(result);
     },
 
     postAdminSettingsRestoreDefault: async (req, res) => {
       const { integrationId } = req.params;
-      const preview = await integrationSettings.getDefaultRestorePreview(integrationId);
+      const restorePlan = await integrationSettings.prepareIntegrationRestore(integrationId);
+      const preview = restorePlan;
       if (integrationId === 'admin_mfa' && preview.changedFields.length) {
         const current = await integrationSettings.getIntegration(integrationId);
         const plan = await integrationSettings.prepareIntegrationSave({
@@ -732,6 +775,7 @@ function createAdminController({
             adminId: String(req.user.id),
             integrationId,
             plan,
+            restorePlan,
           };
           await saveSession(req);
           const result = await sendIntegrationVerificationCode(
@@ -741,7 +785,13 @@ function createAdminController({
         }
       }
       return res.json(await restoreIntegrationDefaultForRequest(
-        req, integrationId, integrationSettings, integrationSecurity, audit,
+        req,
+        integrationId,
+        integrationSettings,
+        integrationSecurity,
+        audit,
+        locks,
+        restorePlan,
       ));
     },
 
@@ -849,47 +899,66 @@ function createAdminController({
 
     postAdminMfaEnrollmentStart: async (req, res) => {
       res.set('Cache-Control', 'no-store');
-      const result = await adminMfa.startEnrollment({
-        adminId: req.user.id,
-        ipAddress: req.ip,
-        code: req.body?.code,
-        audit,
-      });
+      const result = await locks.withLocks(
+        [{ key: `account:${req.user.id}`, mode: 'X' }],
+        (lease) => adminMfa.startEnrollment({
+          adminId: req.user.id,
+          ipAddress: req.ip,
+          code: req.body?.code,
+          audit,
+          assertLockHeld: lease.assertHeld,
+        }),
+        { owner: String(req.user.id) },
+      );
       return res.json(result);
     },
 
     postAdminMfaEnrollmentConfirm: async (req, res) => {
       res.set('Cache-Control', 'no-store');
-      const result = await adminMfa.confirmEnrollment({
-        adminId: req.user.id,
-        ipAddress: req.ip,
-        code: req.body?.code,
-        audit,
-      });
-      req.session.adminMfaVerified = String(req.user.id);
-      delete req.session.adminMfaSetupRequired;
-      const completedLogin = req.session.adminMfaLoginPending === true;
-      delete req.session.adminMfaLoginPending;
-      await saveSession(req);
-      if (completedLogin) {
-        await audit.logAction(requestAuditContext(req, 'auth.login', {
-          actor_id: req.user.id,
-          actor_role: 'admin',
-          target_type: 'user',
-          target_id: req.user.id,
-        }));
-      }
+      const result = await locks.withLocks(
+        [{ key: `account:${req.user.id}`, mode: 'X' }],
+        async (lease) => {
+          const enrollment = await adminMfa.confirmEnrollment({
+            adminId: req.user.id,
+            ipAddress: req.ip,
+            code: req.body?.code,
+            audit,
+            assertLockHeld: lease.assertHeld,
+          });
+          req.session.adminMfaVerified = String(req.user.id);
+          delete req.session.adminMfaSetupRequired;
+          const completedLogin = req.session.adminMfaLoginPending === true;
+          delete req.session.adminMfaLoginPending;
+          await saveSession(req);
+          if (completedLogin) {
+            await audit.logAction(requestAuditContext(req, 'auth.login', {
+              actor_id: req.user.id,
+              actor_role: 'admin',
+              target_type: 'user',
+              target_id: req.user.id,
+            }));
+          }
+          return enrollment;
+        },
+        { owner: String(req.user.id) },
+      );
       return res.json(result);
     },
 
     postAdminMfaRecoveryRegenerate: async (req, res) => {
       res.set('Cache-Control', 'no-store');
-      return res.json(await adminMfa.regenerateRecoveryCodes({
-        adminId: req.user.id,
-        ipAddress: req.ip,
-        code: req.body?.code,
-        audit,
-      }));
+      const result = await locks.withLocks(
+        [{ key: `account:${req.user.id}`, mode: 'X' }],
+        (lease) => adminMfa.regenerateRecoveryCodes({
+          adminId: req.user.id,
+          ipAddress: req.ip,
+          code: req.body?.code,
+          audit,
+          assertLockHeld: lease.assertHeld,
+        }),
+        { owner: String(req.user.id) },
+      );
+      return res.json(result);
     },
   };
 }
@@ -915,16 +984,54 @@ async function sendIntegrationVerificationCode(
   });
 }
 
-async function restoreIntegrationDefaultForRequest(req, integrationId, integrationSettings, integrationSecurity, audit) {
-  const preview = await integrationSettings.getDefaultRestorePreview(integrationId);
+async function savePendingIntegrationApply(req, plan) {
+  req.session.pendingIntegrationApply = {
+    adminId: String(req.user.id),
+    payloadHash: plan.payloadHash,
+    integrationIds: plan.updates.map(({ id }) => id).sort(),
+    expectedStateHashes: plan.expectedStateHashes,
+    changes: plan.changes,
+  };
+  await saveSession(req);
+}
+
+async function applyIntegrationSaveWithLocks({
+  req, plan, integrationSettings, locks, audit,
+}) {
+  if (!plan.updates.length) {
+    return integrationSettings.applyIntegrationSave(
+      plan, audit, requestAuditContext(req, null), req.user.id,
+    );
+  }
+  const requests = plan.updates.map(({ id }) => ({ key: `integration:${id}`, mode: 'X' }));
+  return locks.withLocks(
+    requests,
+    async (lease) => {
+      await integrationSettings.assertStoredConfigurationMatches(plan.expectedStateHashes);
+      return integrationSettings.applyIntegrationSave(
+        plan,
+        audit,
+        requestAuditContext(req, null),
+        req.user.id,
+        { assertLocksHeld: lease.assertHeld },
+      );
+    },
+    { owner: String(req.user.id) },
+  );
+}
+
+async function restoreIntegrationDefaultForRequest(
+  req, integrationId, integrationSettings, integrationSecurity, audit, locks, restorePlan,
+) {
+  const plan = restorePlan || await integrationSettings.prepareIntegrationRestore(integrationId);
   let noticeSent = false;
   let warning = '';
-  if (preview.changedFields.length) {
+  if (plan.changedFields.length) {
     const state = integrationSecurity.configuration();
     if (state.verificationEmailConfigured) {
       const names = integrationSettings.getIntegrationLabel(integrationId);
       const requester = req.user.full_name || req.user.email || 'Administrator';
-      const fields = preview.changedFields.join(', ');
+      const fields = plan.changedFields.join(', ');
       try {
         await integrationSecurity.sendBootstrapEmail({
           subject: 'Integration defaults restored',
@@ -946,8 +1053,16 @@ async function restoreIntegrationDefaultForRequest(req, integrationId, integrati
       warning = state.verificationEmailError;
     }
   }
-  const result = await integrationSettings.restoreIntegrationDefault(
-    integrationId, audit, requestAuditContext(req, null), req.user.id,
+  const result = await locks.withLocks(
+    [{ key: `integration:${integrationId}`, mode: 'X' }],
+    (lease) => integrationSettings.applyIntegrationRestore(
+      plan,
+      audit,
+      requestAuditContext(req, null),
+      req.user.id,
+      { assertLocksHeld: lease.assertHeld },
+    ),
+    { owner: String(req.user.id) },
   );
   return { ...result, noticeSent, warning };
 }
@@ -1171,6 +1286,7 @@ function expectedRecaptchaHostname(req, frontendOrigin) {
 }
 
 function integrationSettingsError(res, error, fallbackMessage) {
+  if (error?.status === 409) throw error;
   if (error.fieldErrors) {
     return res.status(error.status || 400).json({ error: error.message, fieldErrors: error.fieldErrors });
   }

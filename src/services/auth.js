@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const { createHash, randomBytes, randomUUID } = require('node:crypto');
+const { stateConflict } = require('./state-conflict');
 
 function toUser(document) {
   if (!document) return null;
@@ -279,25 +280,65 @@ function createAuthService(database) {
       return Boolean(reset);
     },
 
-    async resetPassword(token, password, confirmation) {
+    async findPasswordResetLockTarget(token) {
+      if (!token) throw invalidPasswordResetError();
+      const reset = await passwordResets.findOne(
+        {
+          token_hash: hashToken(token),
+          expires_at: { $gt: new Date() },
+          consumed_at: { $exists: false },
+        },
+        { projection: { user_id: 1 } },
+      );
+      if (!reset) throw invalidPasswordResetError();
+      return { userId: String(reset.user_id) };
+    },
+
+    async resetPassword(token, password, confirmation, {
+      expectedUserId,
+      assertLockHeld,
+    } = {}) {
       if (String(password || '').length < 8) throw new Error('Password must be at least 8 characters long.');
       if (password !== confirmation) throw new Error('The passwords do not match.');
-      if (!token) throw new Error('This password reset link is invalid or has expired. Request a new one.');
+      if (!token) throw invalidPasswordResetError();
 
+      const tokenFilter = {
+        token_hash: hashToken(token),
+        expires_at: { $gt: new Date() },
+        consumed_at: { $exists: false },
+      };
+      const resetCandidate = await passwordResets.findOne(tokenFilter);
+      if (!resetCandidate) throw invalidPasswordResetError();
+      if (expectedUserId && String(resetCandidate.user_id) !== String(expectedUserId)) {
+        throw stateConflict('This password reset link changed. Request a new link.');
+      }
+      const activeUser = await users.findOne(
+        { _id: resetCandidate.user_id, status: 'active' },
+        { projection: { _id: 1 } },
+      );
+      if (!activeUser) throw invalidPasswordResetError();
+      const passwordHash = await bcrypt.hash(password, 12);
       const now = new Date();
+      const finalResetFilter = {
+        ...tokenFilter,
+        expires_at: { $gt: now },
+        user_id: resetCandidate.user_id,
+      };
+      await assertLockHeld?.();
       const reset = await passwordResets.findOneAndUpdate(
-        { token_hash: hashToken(token), expires_at: { $gt: now }, consumed_at: { $exists: false } },
+        finalResetFilter,
         { $set: { consumed_at: now } },
         { returnDocument: 'after' },
       );
-      if (!reset) throw new Error('This password reset link is invalid or has expired. Request a new one.');
+      if (!reset) throw invalidPasswordResetError();
 
+      await assertLockHeld?.();
       const result = await users.updateOne(
         { _id: reset.user_id, status: 'active' },
-        { $set: { password_hash: await bcrypt.hash(password, 12), updated_at: now.toISOString() } },
+        { $set: { password_hash: passwordHash, updated_at: now.toISOString() } },
       );
       await passwordResets.deleteMany({ user_id: reset.user_id });
-      if (!result.matchedCount) throw new Error('This password reset link is invalid or has expired. Request a new one.');
+      if (!result.matchedCount) throw invalidPasswordResetError();
     },
 
     async updateProfile(userId, input) {
@@ -324,6 +365,10 @@ function createAuthService(database) {
       }
     },
   };
+}
+
+function invalidPasswordResetError() {
+  return new Error('This password reset link is invalid or has expired. Request a new one.');
 }
 
 function hashToken(token) {

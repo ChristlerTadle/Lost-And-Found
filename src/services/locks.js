@@ -2,7 +2,7 @@ const { randomUUID } = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const defaultConfig = require('../config').locking;
 
-const LOCK_ORDER = ['roster', 'role', 'account', 'item', 'claim', 'slot'];
+const LOCK_ORDER = ['roster', 'role', 'integration', 'account', 'item', 'claim', 'slot'];
 const LOCK_CONFLICT_MESSAGE = 'This record is being processed by someone else. Try again in a moment.';
 const LOCK_UNAVAILABLE_MESSAGE = 'Locking is temporarily unavailable. Please try again shortly.';
 

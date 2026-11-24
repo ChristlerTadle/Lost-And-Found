@@ -159,6 +159,22 @@ Additional MongoDB controls include five failed Settings PIN attempts before a 1
 
 `TRUST_PROXY` defaults to `false`. Set it only to the actual trusted proxy hop count or comma-separated trusted proxy CIDRs; plain `true` is not accepted. The explicit route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global flood guard also skips `OPTIONS` and `GET /health`.
 
+## Concurrency control: Locking
+
+The API uses MongoDB-backed pessimistic locks across instances. Lock acquisition order is `roster → role → integration → account → item → claim → slot`, with IDs sorted within each type. Shared (S) locks are compatible only with S; exclusive (X) locks are incompatible with all live locks. Each lease expires after `LOCK_LEASE_MS` (default 30 seconds), and acquisition waits no longer than `LOCK_WAIT_MS` (default 3 seconds). `LOCK_RETRY_MIN_MS` and `LOCK_RETRY_MAX_MS` bound retry backoff; `LOCK_MAX_PER_REQUEST` defaults to five. `LOCK_DEMO_HOLD_MS` can add a local-only delay inside a critical section; it is ignored with a warning in production. TTL indexes are cleanup only—expired leases are judged against the database clock.
+
+Integration X locks are held only while applying saved configuration, setting a default, restoring a default, or applying a code-verified save. Provider validation and emailed-code entry happen without an integration lock; the stored configuration is rechecked under lock before writes. Password reset and administrator MFA enrollment/recovery changes take X on the affected account. Calendar work is a separate short action under X on the claim after approval/pickup locks are released.
+
+The following operations intentionally do not acquire record locks:
+
+| Route or operation | Reason |
+|---|---|
+| Google OAuth callback | Part of the authentication lifecycle; callback state and code verification govern completion. |
+| Item and user creation | Operates on new IDs; database uniqueness constraints protect duplicate unique values. |
+| Notification read markers | Per-user read state, not shared business-record state. |
+| Session routes, login, and logout | Authentication lifecycle operations. |
+| Forgot-password request | Creates/replaces a one-time reset token; the subsequent password reset is account-locked. |
+
 ## API examples
 
 - `GET /api/items` lists and searches browseable items for signed-in Users with the corresponding role permissions. Admins can access it; signed-out visitors are directed to sign in.

@@ -95,6 +95,7 @@ function createApiRouter({ services, frontendOrigin }) {
       frontendOrigin,
       audit: services.audit,
       callIntegration: services.callIntegration,
+      locks: services.locks,
     }),
     items: createItemsController({
       items: services.items,

@@ -127,7 +127,8 @@ function createAdminMfa(database, integrationSettings, {
     return { verified: true, proofType: 'authenticator_code_accepted' };
   }
 
-  async function startEnrollment({ adminId, ipAddress, code, audit }) {
+  async function startEnrollment({ adminId, ipAddress, code, audit, assertLockHeld }) {
+    await assertLockHeld?.();
     const account = await findAdmin(adminId);
     if (!account) throw genericError();
     await assertNotLocked(adminId, ipAddress);
@@ -152,6 +153,7 @@ function createAdminMfa(database, integrationSettings, {
       ...TOTP_SETTINGS,
     });
     const qrCode = await QRCode.toDataURL(uri);
+    await assertLockHeld?.();
     await users.updateOne(
       { _id: String(adminId), role_name: 'admin', status: 'active' },
       { $set: {
@@ -164,7 +166,8 @@ function createAdminMfa(database, integrationSettings, {
     return { secret, qrCode };
   }
 
-  async function confirmEnrollment({ adminId, ipAddress, code, audit }) {
+  async function confirmEnrollment({ adminId, ipAddress, code, audit, assertLockHeld }) {
+    await assertLockHeld?.();
     const account = await findAdmin(adminId);
     const pending = account?.admin_mfa;
     if (!pending?.pending_secret || !pending.pending_id || pending.pending_expires_at <= now()) {
@@ -180,6 +183,7 @@ function createAdminMfa(database, integrationSettings, {
 
     const recoveryCodes = generateRecoveryCodes();
     const wasEnrolled = isEnrolled(account);
+    await assertLockHeld?.();
     const updated = await users.updateOne(
       {
         _id: String(adminId),
@@ -234,7 +238,8 @@ function createAdminMfa(database, integrationSettings, {
     return true;
   }
 
-  async function regenerateRecoveryCodes({ adminId, ipAddress, code, audit }) {
+  async function regenerateRecoveryCodes({ adminId, ipAddress, code, audit, assertLockHeld }) {
+    await assertLockHeld?.();
     await assertNotLocked(adminId, ipAddress);
     const account = await findAdmin(adminId);
     if (!isEnrolled(account)) throw genericError();
@@ -244,11 +249,13 @@ function createAdminMfa(database, integrationSettings, {
       code,
       policy.window,
     );
+    await assertLockHeld?.();
     if (!result.valid || !(await claimTimeStep(adminId, result.timeStep))) {
       await recordFailure(adminId, ipAddress, audit);
       throw genericError();
     }
     const recoveryCodes = generateRecoveryCodes();
+    await assertLockHeld?.();
     const updated = await users.updateOne(
       {
         _id: String(adminId),

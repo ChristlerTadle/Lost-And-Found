@@ -17,6 +17,7 @@ function createAuthController({
   frontendOrigin,
   audit,
   callIntegration,
+  locks,
 }) {
   const startGoogleAuth = async (req, res) => {
     if (!await verifyRecaptcha(req, res, recaptcha, integrationSettings)) return;
@@ -194,7 +195,17 @@ function createAuthController({
     },
 
     postAuthResetpassword: async (req, res) => {
-        await auth.resetPassword(req.body.token, req.body.password, req.body.password_confirmation);
+      const target = await auth.findPasswordResetLockTarget(req.body.token);
+      await locks.withLocks(
+        [{ key: `account:${target.userId}`, mode: 'X' }],
+        (lease) => auth.resetPassword(
+          req.body.token,
+          req.body.password,
+          req.body.password_confirmation,
+          { expectedUserId: target.userId, assertLockHeld: lease.assertHeld },
+        ),
+        { owner: target.userId },
+      );
       return res.json({ message: 'Password reset. You can now sign in.' });
     },
 

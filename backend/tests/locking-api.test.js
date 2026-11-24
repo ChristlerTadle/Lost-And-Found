@@ -1,15 +1,19 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const express = require('express');
+const session = require('express-session');
 const { test } = require('node:test');
+const bcrypt = require('bcryptjs');
 const { MongoClient } = require('mongodb');
 const { asyncRoute } = require('../middlewares/async-route');
+const { createApiRouter } = require('../routes/api');
 const { createAdminController } = require('../controllers/admin-controller');
 const { createClaimsController } = require('../controllers/claims-controller');
 const { createStaffController } = require('../controllers/staff-controller');
 const { createItemService } = require('../../src/services/items');
 const { createAuthService } = require('../../src/services/auth');
 const { createRateLimitService } = require('../../src/services/rate-limits');
+const { createRoleChangeService } = require('../../src/services/role-change');
 const { LockConflictError, createLockManager } = require('../../src/services/locks');
 const appConfig = require('../../src/config');
 const { assertDedicatedLockTestDatabase } = require('./helpers/lock-test-database');
@@ -201,20 +205,59 @@ test('business API routes serialize concurrent record changes', {
       else assert.equal(item.status, 'claimed');
     });
 
-    await t.test('admin item edit and staff status change serialize on the same item', async () => {
+    await t.test('admin item edit cannot write until the staff status write finishes', async () => {
       const itemId = await createItem('edit-versus-status');
-      const responses = await Promise.all([
-        request(`/admin/items/${itemId}`, userIds[5], 'PATCH', {
+      const sequence = [];
+      let markStatusStarted;
+      let releaseStatusWrite;
+      const statusStarted = new Promise((resolve) => { markStatusStarted = resolve; });
+      const statusGate = new Promise((resolve) => { releaseStatusWrite = resolve; });
+      const updateStatus = items.updateItemStatus.bind(items);
+      const updateAdminItem = items.updateAdminItem.bind(items);
+      items.updateItemStatus = async (...args) => {
+        sequence.push('status:start');
+        markStatusStarted();
+        await statusGate;
+        const result = await updateStatus(...args);
+        sequence.push('status:finish');
+        return result;
+      };
+      items.updateAdminItem = async (...args) => {
+        sequence.push('edit:start');
+        const result = await updateAdminItem(...args);
+        sequence.push('edit:finish');
+        return result;
+      };
+      try {
+        const statusRequest = request(
+          `/staff/items/${itemId}/status`, userIds[3], 'PATCH', { status: 'found' },
+        );
+        await statusStarted;
+        const editRequest = request(`/admin/items/${itemId}`, userIds[5], 'PATCH', {
           item_name: 'Updated wallet',
           description: 'Dark wallet',
           identifying_details: 'Distinctive stitching',
           category: 'Accessories',
           location: 'Library',
           date_lost: '2020-01-01',
-        }),
-        request(`/staff/items/${itemId}/status`, userIds[3], 'PATCH', { status: 'found' }),
-      ]);
-      assert.deepEqual(responses.map(({ status }) => status), [200, 200]);
+        });
+        const conflictDeadline = Date.now() + 1_000;
+        while (!lockEvents.some(({ action, target_id }) => (
+          action === 'lock.conflict' && target_id === itemId
+        ))) {
+          if (Date.now() >= conflictDeadline) throw new Error('The competing item lock was not observed.');
+          await delay(5);
+        }
+        assert.deepEqual(sequence, ['status:start']);
+        releaseStatusWrite();
+        const responses = await Promise.all([statusRequest, editRequest]);
+        assert.deepEqual(responses.map(({ status }) => status), [200, 200]);
+        assert.deepEqual(sequence, ['status:start', 'status:finish', 'edit:start', 'edit:finish']);
+      } finally {
+        releaseStatusWrite();
+        items.updateItemStatus = updateStatus;
+        items.updateAdminItem = updateAdminItem;
+      }
       const item = await database.collection('lost_items').findOne({ _id: itemId });
       assert.equal(item.item_name, 'Updated wallet');
       assert.equal(item.status, 'found');
@@ -246,6 +289,284 @@ test('business API routes serialize concurrent record changes', {
         role_name: 'admin',
         status: 'active',
       }), 1);
+    });
+
+    async function makeQualifiedAdminPair(suffix) {
+      const ids = [`${prefix}-${suffix}-a`, `${prefix}-${suffix}-b`];
+      userIds.push(...ids);
+      await database.collection('users').insertMany(ids.map((id) => ({
+        _id: id,
+        full_name: `Test ${id}`,
+        email: `${id}@example.test`,
+        student_id: id,
+        role_name: 'admin',
+        status: 'active',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })));
+      for (const id of ids) {
+        actors.set(id, {
+          id,
+          role_name: 'admin',
+          full_name: `Test ${id}`,
+          email: `${id}@example.test`,
+          permissions: ['manage_permissions', 'edit_user', 'assign_admin_role'],
+        });
+      }
+      const capable = new Set(ids);
+      const permissions = ['manage_permissions', 'view_users', 'manage_integrations'];
+      const adminPermissions = {
+        async findRolePermissions(role) {
+          return role === 'admin'
+            ? [...permissions, 'edit_user', 'assign_admin_role']
+            : [];
+        },
+        async findEffectivePermissions(id, role) {
+          return role === 'admin' && capable.has(String(id)) ? permissions : [];
+        },
+      };
+      const roleChange = createRoleChangeService(database, {
+        rolePermissions: adminPermissions,
+        notifications: notificationService,
+        audit,
+      });
+      const roleAdmin = createAdminController({
+        auth,
+        items,
+        rolePermissions: adminPermissions,
+        roleChange,
+        notifications: notificationService,
+        integrationSettings: {},
+        integrationSecurity: {
+          async verifyCode() {},
+          async cancelCode() {},
+        },
+        adminMfa: {},
+        googleOAuth: {},
+        recaptcha: {},
+        googleCalendar,
+        email: {},
+        callIntegration: {},
+        audit,
+        frontendOrigin: 'http://localhost:5173',
+        rateLimitConfig: {},
+        locks,
+      });
+      return {
+        ids,
+        rolePermissions: adminPermissions,
+        app: createApiHarness({ actors, locks, staff, admin: roleAdmin, claims }),
+      };
+    }
+
+    async function assertQualifiedAdminRemains(ids, rolePermissionsForPair) {
+      const activeAdmins = await database.collection('users').find({
+        _id: { $in: ids },
+        role_name: 'admin',
+        status: 'active',
+      }).toArray();
+      const qualified = [];
+      for (const account of activeAdmins) {
+        const effective = await rolePermissionsForPair.findEffectivePermissions(account._id, 'admin');
+        if (['manage_permissions', 'view_users', 'manage_integrations']
+          .every((permission) => effective.includes(permission))) qualified.push(account);
+      }
+      assert.ok(qualified.length >= 1);
+    }
+
+    await t.test('simultaneous admin demotions leave one capable admin', async () => {
+      const { ids, rolePermissions: pairPermissions, app: pairApp } = await makeQualifiedAdminPair('demote');
+      const pairServer = await listen(pairApp);
+      const pairBaseUrl = `http://127.0.0.1:${pairServer.address().port}`;
+      const pairRequest = (target, actor) => fetch(`${pairBaseUrl}/admin/users/${target}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-test-user': actor },
+        body: JSON.stringify({
+          action: 'edit',
+          role_name: 'user',
+          role_change_code: 'test-code',
+          full_name: `Test ${target}`,
+          email: `${target}@example.test`,
+        }),
+      });
+      try {
+        const responses = await Promise.all([
+          pairRequest(ids[1], ids[0]),
+          pairRequest(ids[0], ids[1]),
+        ]);
+        assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 403]);
+        await assertQualifiedAdminRemains(ids, pairPermissions);
+      } finally {
+        await closeServer(pairServer);
+      }
+    });
+
+    await t.test('a simultaneous admin disable and demotion leave one capable admin', async () => {
+      const { ids, rolePermissions: pairPermissions, app: pairApp } = await makeQualifiedAdminPair('disable-demote');
+      const pairServer = await listen(pairApp);
+      const pairBaseUrl = `http://127.0.0.1:${pairServer.address().port}`;
+      const disableRequest = fetch(`${pairBaseUrl}/admin/users/${ids[1]}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-test-user': ids[0] },
+        body: JSON.stringify({ action: 'disable' }),
+      });
+      const demoteOther = fetch(`${pairBaseUrl}/admin/users/${ids[0]}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-test-user': ids[1] },
+        body: JSON.stringify({
+          action: 'edit',
+          role_name: 'user',
+          role_change_code: 'test-code',
+          full_name: `Test ${ids[0]}`,
+          email: `${ids[0]}@example.test`,
+        }),
+      });
+      try {
+        const responses = await Promise.all([disableRequest, demoteOther]);
+        assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 403]);
+        await assertQualifiedAdminRemains(ids, pairPermissions);
+      } finally {
+        await closeServer(pairServer);
+      }
+    });
+
+    await t.test('production API routing authenticates two staff approvals through real middleware', async () => {
+      const staffUserIds = [`${prefix}-smoke-staff-a`, `${prefix}-smoke-staff-b`];
+      userIds.push(...staffUserIds);
+      const passwordHash = await bcrypt.hash('test-password-123', 4);
+      await database.collection('users').insertMany(staffUserIds.map((id) => ({
+        _id: id,
+        full_name: `Test ${id}`,
+        email: `${id}@example.test`,
+        student_id: id,
+        password_hash: passwordHash,
+        role_name: 'staff',
+        status: 'active',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })));
+
+      const smokeRolePermissions = {
+        async findEffectivePermissions(_id, role) {
+          return role === 'staff'
+            ? ['approve_claim', 'schedule_pickup', 'update_item_status', 'verify_found_item', 'view_claims']
+            : [];
+        },
+        async findRolePermissions() { return []; },
+      };
+      const smokeRateLimits = createRateLimitService({
+        database,
+        audit,
+        secret: randomUUID(),
+        config: Object.fromEntries(Object.entries(appConfig.rateLimits).map(([name, rule]) => [
+          name,
+          { ...rule, store: 'memory' },
+        ])),
+        controls: appConfig.rateLimitControls,
+      });
+      await smokeRateLimits.initialize();
+      const smokeServices = {
+        auth,
+        items,
+        locks,
+        rolePermissions: smokeRolePermissions,
+        roleChange: {},
+        notifications: {
+          async create() {},
+          async countUnread() { return 0; },
+        },
+        audit,
+        rateLimits: smokeRateLimits,
+        adminMfa: {
+          async getLoginAction() { return { action: 'complete' }; },
+          async getAdminRouteAccess() { return { allowed: true }; },
+        },
+        integrationSettings: {
+          async getIntegration() {
+            return { enabled: false, configured: false, active: false, settings: {} };
+          },
+        },
+        integrationSecurity: {},
+        googleOAuth: {},
+        recaptcha: {},
+        googleCalendar,
+        email: {},
+        callIntegration: {},
+      };
+      const smokeApp = express();
+      smokeApp.locals.services = smokeServices;
+      smokeApp.disable('x-powered-by');
+      smokeApp.use('/api', smokeRateLimits.limit('global_api'));
+      smokeApp.use(express.json({ limit: '1mb' }));
+      smokeApp.use(session({
+        name: 'buksu.api.sid',
+        secret: 'locking-api-smoke-test-secret',
+        resave: false,
+        saveUninitialized: false,
+        store: new session.MemoryStore(),
+        cookie: { httpOnly: true, sameSite: 'lax', secure: false },
+      }));
+      smokeApp.use('/api', createApiRouter({
+        services: smokeServices,
+        frontendOrigin: 'http://localhost:5173',
+      }));
+      smokeApp.use('/api', async (error, req, res, next) => {
+        if (res.headersSent) return next(error);
+        const conflict = error instanceof LockConflictError;
+        if (conflict && req.rateLimitConflictRollback) await req.rateLimitConflictRollback();
+        if (conflict && error.retryAfter) res.set('Retry-After', String(error.retryAfter));
+        const status = Number.isInteger(error.status) ? error.status : 500;
+        return res.status(status).json({
+          error: error.message,
+          ...(error.code ? { code: error.code } : {}),
+        });
+      });
+      const smokeServer = await listen(smokeApp);
+      const smokeBaseUrl = `http://127.0.0.1:${smokeServer.address().port}/api`;
+      const itemId = await createItem('production-router-smoke');
+      const claimId = await createClaim('production-router-smoke', itemId);
+
+      async function loginAndGetCsrf(userId) {
+        const login = await fetch(`${smokeBaseUrl}/auth/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email: `${userId}@example.test`, password: 'test-password-123' }),
+        });
+        assert.equal(login.status, 200);
+        const loginCookie = login.headers.get('set-cookie')?.split(';')[0];
+        assert.ok(loginCookie);
+        const me = await fetch(`${smokeBaseUrl}/auth/me`, {
+          headers: { Cookie: loginCookie },
+        });
+        assert.equal(me.status, 200);
+        const current = await me.json();
+        return {
+          cookie: me.headers.get('set-cookie')?.split(';')[0] || loginCookie,
+          csrfToken: current.csrfToken,
+        };
+      }
+
+      try {
+        const sessions = await Promise.all(staffUserIds.map(loginAndGetCsrf));
+        const responses = await Promise.all(sessions.map(({ cookie, csrfToken }) => fetch(
+          `${smokeBaseUrl}/staff/claims/${claimId}`,
+          {
+            method: 'PATCH',
+            headers: {
+              Cookie: cookie,
+              Origin: 'http://localhost:5173',
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrfToken,
+            },
+            body: JSON.stringify({ action: 'review', decision: 'approved' }),
+          },
+        )));
+        assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 409]);
+        const conflict = await responses.find(({ status }) => status === 409).json();
+        assert.equal(conflict.code, 'state_conflict');
+      } finally {
+        await closeServer(smokeServer);
+      }
     });
 
     await t.test('claim submissions serialize on an item without imposing capacity', async () => {

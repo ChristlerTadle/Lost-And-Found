@@ -46,6 +46,22 @@ Authenticated route limits use the session user ID; reads are per account and wr
 
 The route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global API guard also bypasses `OPTIONS` and `GET /health`. The full live configuration is available in Admin → Settings → **Rate limits** after PIN unlock and permission checks. MongoDB also stores sessions, so an outage already disrupts login.
 
+## Concurrency control: Locking
+
+Shared-record mutations use pessimistic MongoDB locks. Locks are acquired in the global order `roster → role → integration → account → item → claim → slot`, with IDs sorted within each type. Shared locks coexist only with shared locks; an exclusive lock conflicts with every live lock. Leases expire even if MongoDB's TTL cleanup has not run, and a bounded wait returns a conflict rather than waiting indefinitely. The environment settings and defaults are listed in [REST-SETUP.md](./REST-SETUP.md).
+
+Integration locks cover only the apply phase; provider validation and emailed-code entry happen before acquiring them. Calendar sync retries are separately locked by claim after approval or pickup locks have been released. Password reset and administrator MFA mutations lock the affected account.
+
+These mutations intentionally remain outside the lock plan:
+
+| Route or operation | Reason |
+|---|---|
+| Google OAuth callback | Authentication lifecycle; callback state and code verification govern completion. |
+| Item and user creation | New record IDs and database uniqueness constraints prevent same-record updates from racing. |
+| Notification read markers | Per-user read state, not shared business-record state. |
+| Session routes, login, and logout | Authentication lifecycle operations. |
+| Forgot-password request | Creates/replaces a one-time reset token; the subsequent password reset is account-locked. |
+
 ## Project layout
 
 - `frontend/`: static browser application and frontend server
