@@ -397,6 +397,24 @@ function createRateLimitService({
     };
   }
 
+  function registerConflictRollback(req, counters) {
+    if (!counters.length) return;
+    if (!req.rateLimitConflictCounters) req.rateLimitConflictCounters = [];
+    req.rateLimitConflictCounters.push(...counters);
+    if (req.rateLimitConflictRollback) return;
+    req.rateLimitConflictRollback = async () => {
+      if (req.rateLimitConflictRolledBack) return;
+      req.rateLimitConflictRolledBack = true;
+      try {
+        await Promise.all(req.rateLimitConflictCounters.map(({ group, rule, id }) => (
+          decrementGroup(group, rule, id)
+        )));
+      } catch {
+        throw storeUnavailableError();
+      }
+    };
+  }
+
   function rateLimitError(req, res, group, rule, value, messageOverride, auditIdentifier) {
     const resetTime = value.resetTime instanceof Date ? value.resetTime : new Date(value.resetTime);
     const retryAfter = Math.max(1, Math.ceil((resetTime.getTime() - now()) / 1000));
@@ -465,6 +483,7 @@ function createRateLimitService({
         }
         if (group === 'login' && applied.length) attachLoginCounterFinalizer(req, applied[0]);
         if (group === 'global_api' && applied.length) attachGlobalCounterRollback(req, applied[0]);
+        if (group !== 'login') registerConflictRollback(req, applied);
         return next();
       } catch {
         await Promise.all(applied.map((entry) => (
@@ -545,6 +564,7 @@ function createRateLimitService({
           )));
           return next(rateLimitError(req, res, blockedAfterRace.group, blockedAfterRace.rule, blockedAfterRace.value));
         }
+        registerConflictRollback(req, identities);
         return next();
       } catch {
         const closed = identities.find(({ rule }) => rule.store === 'mongo' && rule.sensitive);

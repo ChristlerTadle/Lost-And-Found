@@ -19,6 +19,7 @@ const { createRolePermissionService } = require('../src/services/role-permission
 const { createRoleChangeService } = require('../src/services/role-change');
 const { createAuditLogService } = require('../src/services/audit-log');
 const { createRateLimitService } = require('../src/services/rate-limits');
+const { LockConflictError, createLockManager } = require('../src/services/locks');
 const { parseEncryptionKey } = require('../src/services/integration-settings');
 const { createApiRouter } = require('./routes/api');
 
@@ -26,6 +27,9 @@ const port = Number(process.env.API_PORT || 3001);
 const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 
 async function start() {
+  if (config.locking.isProduction && config.locking.demoHoldMs > 0) {
+    console.warn('WARNING: LOCK_DEMO_HOLD_MS is ignored in production.');
+  }
   const integrationEncryptionKey = parseEncryptionKey(config.integrationEncryptionKey);
   for (const warning of [
     config.integrationSettingsEmailError,
@@ -59,6 +63,8 @@ async function start() {
     ...config.rateLimitControls.integrationSettings,
   });
   const audit = createAuditLogService(database, getMongoClient());
+  const locks = createLockManager(database, { audit, config: config.locking });
+  await locks.initialize();
   const rateLimits = createRateLimitService({
     database,
     audit,
@@ -101,6 +107,7 @@ async function start() {
     rolePermissions,
     audit,
     rateLimits,
+    locks,
   };
   services.roleChange = createRoleChangeService(database, {
     rolePermissions,
@@ -151,6 +158,7 @@ async function start() {
   app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   app.use(async (error, req, res, next) => {
     if (res.headersSent) return next(error);
+    const lockConflict = error instanceof LockConflictError;
     const uploadError = error instanceof multer.MulterError;
     let status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
       : error instanceof Error && error.constructor === Error ? 400 : 500;
@@ -164,7 +172,20 @@ async function start() {
         status = 503;
       }
     }
-    if ((status === 429 || status === 503) && req.rateLimitGlobalRollback) {
+    let lockCounterRollbackAttempted = false;
+    if (lockConflict && req.rateLimitConflictRollback) {
+      lockCounterRollbackAttempted = true;
+      try {
+        await req.rateLimitConflictRollback();
+      } catch {
+        error = new Error('Please try again shortly');
+        error.status = 503;
+        error.retryAfter = 1;
+        status = 503;
+      }
+    }
+    if ((status === 429 || status === 503)
+      && req.rateLimitGlobalRollback && !lockCounterRollbackAttempted) {
       await req.rateLimitGlobalRollback();
     }
     if ((status === 429 || status === 503) && Number.isInteger(error.retryAfter)) {

@@ -46,6 +46,40 @@ test('TRUST_PROXY accepts false, hop counts, and CIDRs but not plain true', () =
   assert.throws(() => appConfig.parseTrustProxy('true'), /TRUST_PROXY/);
 });
 
+test('lock conflicts roll back every applied rate-limit counter', async () => {
+  const conflictConfig = {
+    global_api: { windowMs: 60_000, max: 1, keyType: 'ip', store: 'memory', sensitive: false },
+    user_reads: { windowMs: 60_000, max: 1, keyType: 'account', store: 'memory', sensitive: false },
+    item_images: { windowMs: 60_000, max: 1, keyType: 'account', store: 'memory', sensitive: false },
+    admin_user_write: { windowMs: 60_000, max: 1, keyType: 'account+ip', store: 'memory', sensitive: false },
+    role_permission_write: { windowMs: 60_000, max: 1, keyType: 'account+ip', store: 'memory', sensitive: false },
+  };
+  const service = createRateLimitService({ config: conflictConfig });
+  const request = requestFor('account-a');
+  const run = (middleware, req) => new Promise((resolve) => (
+    middleware(req, responseFor(), (error) => resolve(error || null))
+  ));
+  const groups = [
+    service.limit('global_api'),
+    service.limit('user_reads'),
+    service.limit('item_images'),
+  ];
+  for (const middleware of groups) assert.equal(await run(middleware, request), null);
+  assert.equal(typeof request.rateLimitConflictRollback, 'function');
+  await request.rateLimitConflictRollback();
+
+  const retryRequest = requestFor('account-a');
+  for (const middleware of groups) assert.equal(await run(middleware, retryRequest), null);
+  await retryRequest.rateLimitConflictRollback();
+
+  const together = service.limitTogether(['admin_user_write', 'role_permission_write']);
+  const combinedRequest = requestFor('admin-a');
+  assert.equal(await run(together, combinedRequest), null);
+  await combinedRequest.rateLimitConflictRollback();
+  const combinedRetry = requestFor('admin-a');
+  assert.equal(await run(together, combinedRetry), null);
+});
+
 function assertRateLimitCoverage(registered, rateLimits, tableRows, exemptions, configuredControls = []) {
   const exemptionSet = new Set(exemptions.map(({ method, path }) => `${method} ${path}`));
   const ungroupedRoutes = [];

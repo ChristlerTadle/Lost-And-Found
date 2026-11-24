@@ -432,6 +432,31 @@ const rateLimitRouteExemptions = [
   { method: 'POST', path: '/auth/logout' },
 ];
 
+function positiveIntegerEnv(name, fallback, { allowZero = false } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  if (!/^\d+$/.test(value)) throw new Error(`Invalid ${name}; expected an integer.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || (allowZero ? parsed < 0 : parsed < 1)) {
+    throw new Error(`Invalid ${name}; expected a ${allowZero ? 'non-negative' : 'positive'} safe integer.`);
+  }
+  return parsed;
+}
+
+const locking = {
+  leaseMs: positiveIntegerEnv('LOCK_LEASE_MS', 30_000),
+  waitMs: positiveIntegerEnv('LOCK_WAIT_MS', 3_000),
+  retryMinMs: positiveIntegerEnv('LOCK_RETRY_MIN_MS', 20),
+  retryMaxMs: positiveIntegerEnv('LOCK_RETRY_MAX_MS', 120),
+  maxPerRequest: positiveIntegerEnv('LOCK_MAX_PER_REQUEST', 5),
+  demoHoldMs: positiveIntegerEnv('LOCK_DEMO_HOLD_MS', 0, { allowZero: true }),
+  isProduction: process.env.NODE_ENV === 'production',
+};
+if (locking.retryMinMs > locking.retryMaxMs) {
+  throw new Error('LOCK_RETRY_MIN_MS must not exceed LOCK_RETRY_MAX_MS.');
+}
+
 module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'replace-this-session-secret-before-deployment',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017',
@@ -460,4 +485,5 @@ module.exports = {
     && process.env.NODE_ENV !== 'production',
   adminMfaRateLimitBypassRequested: process.env.ADMIN_MFA_RATE_LIMIT_DISABLED === 'true',
   integrationBootstrapSmtp: bootstrapMail.smtp,
+  locking,
 };
