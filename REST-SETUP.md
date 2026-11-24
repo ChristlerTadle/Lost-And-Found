@@ -161,32 +161,122 @@ Additional MongoDB controls include five failed Settings PIN attempts before a 1
 
 ## Concurrency control: Locking
 
-The API uses MongoDB-backed pessimistic locks across instances. Lock acquisition order is `roster → role → integration → account → item → claim → slot`, with IDs sorted within each type. Shared (S) locks are compatible only with S; exclusive (X) locks are incompatible with all live locks. Each lease expires after `LOCK_LEASE_MS` (default 30 seconds), and acquisition waits no longer than `LOCK_WAIT_MS` (default 3 seconds). `LOCK_RETRY_MIN_MS` and `LOCK_RETRY_MAX_MS` bound retry backoff; `LOCK_MAX_PER_REQUEST` defaults to five. `LOCK_DEMO_HOLD_MS` can add a local-only delay inside a critical section; it is ignored with a warning in production. TTL indexes are cleanup only—expired leases are judged against the database clock.
+The API uses MongoDB-backed pessimistic locks across API instances. One sorter enforces the global acquisition order `roster -> role -> integration -> account -> item -> claim -> slot`; IDs are sorted within each type. In the table, all paths are under `/api`.
 
-Integration X locks are held only while applying saved configuration, setting a default, restoring a default, or applying a code-verified save. Provider validation and emailed-code entry happen without an integration lock; the stored configuration is rechecked under lock before writes. Password reset and administrator MFA enrollment/recovery changes take X on the affected account. Calendar work is a separate short action under X on the claim after approval/pickup locks are released.
+| Resource key | Mode | Routes that take the lock | Order |
+|---|---|---|---|
+| `roster` | X | Admin account changes involving an admin (including role/enable/disable and permission changes); `PUT /admin/role-permissions/admin` | 1 |
+| `role:<name>` | X | `PUT /admin/role-permissions/:role` | 2 |
+| `integration:<id>` | X | Apply phase of `PUT /admin/settings` and `POST /admin/settings/code/verify`; `POST /admin/settings/:integrationId/default` and `/restore-default` | 3 |
+| `account:<id>` | S | `POST /claims` for the submitter; `PATCH /staff/claims/:id` and `/pickup` for the claimant | 4 |
+| `account:<id>` | X | `PATCH /admin/users/:id`, `PUT/DELETE /admin/users/:id/permissions`, `PATCH /profile`, `POST /auth/reset-password`, and `POST /admin/mfa/enrollment/start`, `/enrollment/confirm`, `/recovery/regenerate` | 4 |
+| `item:<id>` | X | `POST /claims`; staff claim review/pickup; `PATCH /staff/items/:id/status`, `POST /staff/items/:id/verify`; `PATCH/DELETE /admin/items/:id`; `PUT/DELETE /items/:id`, `POST /items/:id/resolve`; admin Edit item and staff Review item edit sessions | 5 |
+| `claim:<id>` | X | `PATCH /staff/claims/:id` (approve/reject/returned), `/pickup`, and separate `POST /staff/claims/:id/calendar-sync`; staff claim-details edit session | 6 |
+| `slot:<date>-<time bucket>` | X | Staff approval when scheduling a pickup; `PATCH /staff/claims/:id/pickup` | 7 |
 
-The following operations intentionally do not acquire record locks:
+Claim submit and staff approve/reject/returned/pickup also take S on the claimant's account. Staff approve/reject/returned take X on the related item and claim; pickup adds X on the slot. Slot locks serialize scheduling only; they add no capacity or other business rule. The staff claim edit session itself holds X on item and claim; its action route also takes claimant-account S as needed.
 
-| Route or operation | Reason |
-|---|---|
-| Google OAuth callback | Part of the authentication lifecycle; callback state and code verification govern completion. |
-| Item and user creation | Operates on new IDs; database uniqueness constraints protect duplicate unique values. |
-| Notification read markers | Per-user read state, not shared business-record state. |
-| Session routes, login, and logout | Authentication lifecycle operations. |
-| Forgot-password request | Creates/replaces a one-time reset token; the subsequent password reset is account-locked. |
+| Compatibility | S | X |
+|---|---:|---:|
+| S | Compatible | Conflicts |
+| X | Conflicts | Conflicts |
+
+Reads that a decision depends on use S; mutations use X. Strict two-phase locking means the handler/service acquires its complete resource set before the critical section, re-reads records and validates derived IDs, `deleted_at`, and current status inside the locks, performs audit and final writes there, then releases all action locks in `finally` on success or error. Before a final write, a lost lock aborts the write. A valid edit-session token borrows the already-held X lock rather than acquiring it again; a direct action without that token still uses the normal short action lock.
+
+### Ordering, waiting, and leases
+
+For example, one handler may request `claim:7` followed by `item:42`, while another asks for `item:42` followed by `claim:7`. The shared sorter acquires both sets as `item:42` then `claim:7`, so these requests cannot wait on each other in opposite order. The same rule applies across all multi-resource requests; IDs within a resource type are sorted too.
+
+| Setting | Default | Behavior |
+|---|---:|---|
+| `LOCK_LEASE_MS` | 30000 ms | Action-lock lease; expiry is checked using database/server time, not TTL cleanup. |
+| `LOCK_WAIT_MS` | 3000 ms | Maximum bounded lock wait before a conflict response. |
+| `LOCK_RETRY_MIN_MS` / `LOCK_RETRY_MAX_MS` | 20 / 120 ms | Bounds for retry backoff with jitter. |
+| `LOCK_MAX_PER_REQUEST` | 5 | Maximum locks in one request. |
+| `LOCK_DEMO_HOLD_MS` | 0 ms | Optional artificial delay inside the critical section; ignored with a warning in production. |
+| Edit-session lease / heartbeat | 60 s / 20 s | Heartbeat runs while the page is visible; competing pages may poll/retry every 15 s. |
+
+MongoDB outages fail lock acquisition closed with a safe service-unavailable response; critical handlers do not proceed unlocked. TTL indexes clean up old documents but do not decide whether a lease is expired. Calendar sync runs after approval/pickup locks are released, as a separate short action under X on the claim; its provider timeout is capped at 10 seconds and below `LOCK_LEASE_MS`, and provider failure does not roll back an approval.
+
+Integration provider validation and the emailed-code wait happen before acquiring integration locks. The apply phase of settings save/code verification and default/restore actions locks the affected integration IDs, re-reads the stored configuration, and compares it with the state that was validated; a mismatch returns `409 state_conflict` so the administrator must verify again. PIN, emailed-code, validation, and rate-limit behavior are unchanged.
 
 ### Edit-session locks
 
-The admin Edit item, admin Edit user, staff Review item, and staff claim-details pages hold exclusive locks while open. `POST /api/locks/acquire`, `/renew`, and `/release` derive keys from the submitted form type and record ID. Each session lease is 60 seconds; visible pages renew every 20 seconds, and a competing editor may be polled every 15 seconds. The lock manager checks expiry against MongoDB server time, not TTL cleanup. Save actions send the opaque token in `X-Lock-Token`; the server verifies its owner and resource before borrowing it. If an action request has no edit-session token, the server treats it as a direct API action and takes its normal short action lock, so the data remains protected.
+The admin Edit item, admin Edit user, staff Review item, and staff claim-details pages hold exclusive locks while open. `POST /api/locks/acquire`, `/renew`, and `/release` derive keys from form type and record ID; client-supplied lock keys are not accepted. Admin Edit user also locks `roster` when the target is an admin. These routes require CSRF and the existing permission for the associated form. Save sends the account-bound token in `X-Lock-Token`; missing, expired, or foreign tokens return `lock_lost`, preserving the user's input.
 
-| Form | Lock keys and modes | Protected writes |
+| Form | Edit-session keys (exclusive) | Save/action routes |
 |---|---|---|
-| Admin Edit item | `item:<id>` X | `PATCH /admin/items/:id` |
-| Admin Edit user | `account:<id>` X; add `roster` X for an admin target | `PATCH /admin/users/:id`, `PUT/DELETE /admin/users/:id/permissions` |
-| Staff Review item | `item:<id>` X | `PATCH /staff/items/:id/status`, `POST /staff/items/:id/verify` |
-| Staff claim details | `item:<id>` X, then `claim:<id>` X | Claim review, pickup, returned, and calendar-sync actions |
+| Admin Edit item | `item:<id>` | `PATCH /admin/items/:id` |
+| Admin Edit user | `account:<id>`; add `roster` for an admin target | `PATCH /admin/users/:id`, `PUT/DELETE /admin/users/:id/permissions` |
+| Staff Review item | `item:<id>` | `PATCH /staff/items/:id/status`, `POST /staff/items/:id/verify` |
+| Staff claim details | `item:<id>`, then `claim:<id>` | `PATCH /staff/claims/:id`, `/pickup`; calendar sync is a separate short claim action |
 
-All three lock routes require CSRF and the same existing form permission. Their dedicated `lock_heartbeat` limit is 30 requests per minute per account; renewals are excluded from the global API flood counter. Lock conflicts roll back counters, and heartbeat requests are not written to the audit log. Only lock acquisition and release are audited, using resource names and IDs without tokens. Users never receive another holder's name.
+The dedicated `lock_heartbeat` group allows 30 requests per account per minute. Renewals are excluded from the global flood counter; lock conflicts do not consume route/global counters. Heartbeats are not audited. Lock acquire/release and conflict/timeout/expired-takeover events are audited with resource names and IDs only, never tokens. Holder names are not disclosed to User-role callers.
+
+### Mermaid sequences
+
+```mermaid
+sequenceDiagram
+    participant A as Staff A
+    participant B as Staff B
+    participant API
+    participant DB as MongoDB locks and records
+    A->>API: Approve claim 7
+    API->>DB: Acquire account S, item 42 X, claim 7 X
+    DB-->>API: Locks acquired
+    API->>DB: Re-read item and claim; validate status and deleted_at
+    B->>API: Approve claim 7
+    API->>DB: Request locks in global order
+    DB-->>API: Wait while A holds item/claim X
+    API->>DB: Write approval; release all locks in finally
+    DB-->>B: Locks become available
+    API->>DB: Re-read state under locks
+    DB-->>API: Claim already approved
+    API-->>B: 409 state_conflict
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Editor A
+    participant B as Editor B
+    participant API as API and lock manager
+    A->>API: Acquire form lock
+    API-->>A: X lock, token, 60s expiry
+    loop Every 20s while visible
+        A->>API: Renew with token
+        API-->>A: Extended expiry
+    end
+    B->>API: Acquire same form lock
+    API-->>B: 409; read-only with holder banner
+    Note over A,API: If A closes, crashes, or sleeps, renewals stop
+    API-->>API: Lease expires by database time
+    B->>API: Retry after expiry
+    API-->>B: New X lock and token
+```
+
+### Manual two-browser demo
+
+Use a non-production API and separate test accounts. Set `LOCK_DEMO_HOLD_MS` to a short value below the 30-second action lease, restart the API, and sign in with each role in a separate browser. Do not enable the demo delay in production.
+
+1. **Same-claim approval:** two staff users approve the same pending claim nearly together. Expect one success; the other waits and receives `409 state_conflict` after re-reading the approved state.
+2. **Admin removal versus approval:** race admin item removal against staff approval of a claim on that item. Expect serialization; a deleted item must never be approved.
+3. **Two-admin demotion:** two active admins demote each other simultaneously. Expect at least one active admin retaining `manage_permissions`, `view_users`, and `manage_integrations`; the other action gets a conflict/last-admin error.
+4. **Edit-session contention and expiry:** open the same form in both browsers. The second is read-only while the first renews. Close or sleep the first page, wait more than 60 seconds, then retry in the second; it should acquire the expired lock.
+5. **Stale integration plan:** begin provider validation/code verification, then change the saved integration config from the other browser during the emailed-code wait. Submitting the stale plan should return `409 state_conflict`; re-validate and verify the updated configuration.
+
+Afterward unset `LOCK_DEMO_HOLD_MS` (or set it to `0`) and restart the API.
+
+### Known limits and intentionally unlocked routes
+
+The supported MongoDB deployment is standalone: lock operations are atomic single-document operations, but multi-document transactions are unavailable. Leases are fixed-duration and a stalled action can lose its lock; edit sessions renew while visible, and a lost action lock prevents the final write. Locks serialize existing behavior but do not add capacity or change business rules. Ordinary read-only routes do not acquire locks.
+
+| Route or operation | Reason no record lock is taken |
+|---|---|
+| `GET /auth/google/callback` | Authentication lifecycle; callback state and code verification govern completion. |
+| `POST /items`, `POST /admin/users` | Creates new record IDs; unique indexes/constraints protect duplicate unique values. |
+| Notification read markers | Per-user read state, not shared business-record state. |
+| Session routes, login, logout | Authentication lifecycle operations. |
+| `POST /auth/forgot-password` | Creates/replaces a one-time reset token; the subsequent password reset is account-locked. |
 
 ## API examples
 
