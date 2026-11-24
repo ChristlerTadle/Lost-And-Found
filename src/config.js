@@ -453,6 +453,7 @@ const locking = {
   demoHoldMs: positiveIntegerEnv('LOCK_DEMO_HOLD_MS', 0, { allowZero: true }),
   isProduction: process.env.NODE_ENV === 'production',
 };
+if (locking.leaseMs < 2) throw new Error('LOCK_LEASE_MS must be at least 2 milliseconds.');
 if (locking.retryMinMs > locking.retryMaxMs) {
   throw new Error('LOCK_RETRY_MIN_MS must not exceed LOCK_RETRY_MAX_MS.');
 }

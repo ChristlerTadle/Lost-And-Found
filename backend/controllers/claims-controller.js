@@ -1,5 +1,7 @@
 
-function createClaimsController({ items, googleCalendar }) {
+const { stateConflict } = require('../../src/services/state-conflict');
+
+function createClaimsController({ items, googleCalendar, locks }) {
   return {
     getClaimsMine: async (req, res) => {
       const user = req.user;
@@ -33,7 +35,17 @@ function createClaimsController({ items, googleCalendar }) {
 
     postClaims: async (req, res) => {
       const user = req.user;
-      const claim = await items.createClaim(user.id, req.body);
+      const itemId = String(req.body.item_id || '').trim();
+      const claim = await locks.withLocks([
+        { key: `account:${user.id}`, mode: 'S' },
+        { key: `item:${itemId}`, mode: 'X' },
+      ], async () => {
+        const current = await items.findItemLockState(itemId);
+        if (current.deleted || current.itemType !== 'found' || current.status !== 'stored') {
+          throw stateConflict('That item is no longer available for claims.');
+        }
+        return items.createClaim(user.id, req.body);
+      }, { owner: String(user.id) });
       return res.status(201).json({ claim });
     },
   };

@@ -132,7 +132,8 @@ function safeServerMessage(value) {
 
 function normalizeRequestError(response, data, path, authenticated) {
   const errorBody = data && typeof data === 'object' ? data : {};
-  const retryAfter = response.status === 429 || response.status === 503
+  const lockConflict = response.status === 409 && errorBody.code === 'lock_conflict';
+  const retryAfter = response.status === 429 || response.status === 503 || lockConflict
     ? retryDelay(response.headers.get('Retry-After') || errorBody.retryAfter)
     : 0;
   let message;
@@ -158,6 +159,7 @@ function normalizeRequestError(response, data, path, authenticated) {
   }
   const error = new Error(message);
   error.status = response.status;
+  error.code = ['lock_conflict', 'state_conflict'].includes(errorBody.code) ? errorBody.code : '';
   error.retryAfter = retryAfter;
   error.fieldErrors = fieldErrorsFrom(errorBody);
   error.showSignIn = showSignIn;
@@ -203,7 +205,19 @@ async function request(path, options = {}) {
       sessionInfo.adminMfaReauthRequired = false;
     }
     const error = normalizeRequestError(response, data, path, authenticated);
-    showFormError(error, { anchor });
+    if (error.code === 'state_conflict') {
+      const pathMatch = /\/(?:staff\/claims|staff\/items|admin\/items|admin\/users|items|claims)\/([^/?]+)/.exec(path);
+      let recordId = pathMatch?.[1] || '';
+      try { recordId = decodeURIComponent(recordId); } catch { recordId = ''; }
+      if (!recordId && anchor instanceof Element) {
+        recordId = anchor.closest('[data-id]')?.dataset.id || '';
+      }
+      document.dispatchEvent(new CustomEvent('shared-state-conflict', {
+        detail: { error, recordId },
+      }));
+    } else {
+      showFormError(error, { anchor });
+    }
     throw error;
   }
   const flash = successMessageForRequest(path, method, options.body, data);
@@ -304,7 +318,8 @@ function messageText(error) {
   if (typeof error === 'string') return safeServerMessage(error);
   if (error?.userMessage) return safeServerMessage(error.userMessage);
   if (error?.networkError) return 'Could not reach the server. Check your connection and try again.';
-  if (error?.status === 429 || (error?.status === 503 && error?.retryAfter > 0)) return error.message;
+  if (error?.status === 429 || (error?.status === 503 && error?.retryAfter > 0)
+    || (error?.status === 409 && error?.code === 'lock_conflict')) return error.message;
   if (error?.status >= 500) return 'Something went wrong. Please try again.';
   if (error?.showSignIn) return 'Your access changed. Please sign in again.';
   return safeServerMessage(error?.message);
@@ -495,7 +510,8 @@ function showFormError(error, options = {}) {
   const message = messageText(error);
   const anchor = options.anchor || currentInteraction();
   const context = messageContext(anchor);
-  if (error?.status === 429 || (error?.status === 503 && error.retryAfter > 0)) {
+  if (error?.status === 429 || (error?.status === 503 && error.retryAfter > 0)
+    || (error?.status === 409 && error.code === 'lock_conflict')) {
     startRateLimit(anchor, error.retryAfter);
   }
   if (context && error?.showSignIn) {

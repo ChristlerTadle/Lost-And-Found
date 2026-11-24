@@ -62,16 +62,24 @@ test('admin mutations audit safe values and soft-delete items', async () => {
   };
   const controller = createAdminController({
     audit,
+    locks: { async withLocks(_requests, operation) { return operation(); } },
     auth: {
       async createAdminUser() {
         return { id: 'user-new', full_name: 'New User', email: 'new@example.test', role_name: 'user', status: 'active' };
       },
       async findAccountsForStaffAssignment() { return [account]; },
+      async findAccountLockTarget(id) {
+        return { id, role_name: account.role_name, status: account.status };
+      },
       async updateUserByAdmin() {},
       async setUserAccountStatus() {},
     },
     items: {
       async findAdminItem() { return item; },
+      async findItemLockState() {
+        return { id: item.id, itemType: 'found', status: item.status, deleted: false };
+      },
+      async findCalendarClaimLockTargetsByItem() { return null; },
       async updateAdminItem() {},
       async softDeleteAdminItem() {},
       async findInventoryReport() { return []; },
@@ -125,23 +133,48 @@ test('admin mutations audit safe values and soft-delete items', async () => {
 test('staff claim decisions, status changes, and returns are audited without claim details', async () => {
   const audit = createAuditRecorder();
   const events = [];
+  const claimStatuses = new Map([
+    ['claim-review', 'pending'],
+    ['claim-reject', 'pending'],
+    ['claim-returned', 'approved'],
+  ]);
+  const claimTargets = (id) => ({ claimId: id, itemId: 'item-1', claimantId: 'claimant-1' });
   const controller = createStaffController({
     audit,
+    locks: { async withLocks(_requests, operation) { return operation({ async assertHeld() {} }); } },
     googleCalendar: { async cleanupClaim() {} },
     items: {
+      async findItemLockState() {
+        return { id: 'item-1', itemType: 'found', status: 'found', deleted: false };
+      },
       async findStaffItem() {
         return { id: 'item-1', status: 'found', physical_verification_status: 'pending' };
       },
       async updateItemStatus(_id, _staffId, status) {
         events.push(`status:${status}`);
       },
-      async reviewClaim(_id, _staffId, decision) {
-        events.push(`claim:${decision}`);
-        return { id: 'claim-1' };
-      },
-      async findStaffClaim() {
+      async findClaimLockTargets(id) { return claimTargets(id); },
+      async findClaimLockState(id) {
+        const status = claimStatuses.get(id);
         return {
-          id: 'claim-1',
+          claim: { id, itemId: 'item-1', claimantId: 'claimant-1', status },
+          item: {
+            id: 'item-1',
+            itemType: 'found',
+            status: status === 'approved' ? 'claimed' : 'stored',
+            deleted: false,
+            claimedClaimId: id,
+          },
+        };
+      },
+      async reviewClaim(id, _staffId, decision) {
+        events.push(`claim:${decision}`);
+        claimStatuses.set(id, decision);
+        return { id };
+      },
+      async findStaffClaim(id) {
+        return {
+          id,
           status: 'approved',
           item: { id: 'item-1', status: 'claimed' },
           claim_details: 'NEVER AUDIT THIS CLAIM VERIFICATION DETAIL',
@@ -149,7 +182,10 @@ test('staff claim decisions, status changes, and returns are audited without cla
       },
       async markItemReturned() {
         events.push('returned');
-        return { id: 'claim-1' };
+        return { id: 'claim-returned' };
+      },
+      async findCalendarClaim(id) {
+        return { id, status: 'approved', item_status: 'returned', item_deleted: false };
       },
     },
   });
@@ -162,9 +198,9 @@ test('staff claim decisions, status changes, and returns are audited without cla
   });
 
   await controller.patchStaffItemsByIdStatus(staffRequest({ status: 'stored' }, 'item-1'), response());
-  await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'approved' }, 'claim-1'), response());
-  await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'rejected' }, 'claim-1'), response());
-  await controller.patchStaffClaimsById(staffRequest({ action: 'returned' }, 'claim-1'), response());
+  await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'approved' }, 'claim-review'), response());
+  await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'rejected' }, 'claim-reject'), response());
+  await controller.patchStaffClaimsById(staffRequest({ action: 'returned' }, 'claim-returned'), response());
 
   assert.deepEqual(events, ['status:stored', 'claim:approved', 'claim:rejected', 'returned']);
   assert.deepEqual(audit.events.map(({ action }) => action), [
@@ -177,6 +213,7 @@ test('staff claim decisions, status changes, and returns are audited without cla
 test('rate-limited Calendar sync does not block claim approval', async () => {
   const audit = createAuditRecorder();
   const calls = [];
+  let currentStatus = 'pending';
   const claim = {
     id: 'claim-1',
     status: 'approved',
@@ -185,6 +222,7 @@ test('rate-limited Calendar sync does not block claim approval', async () => {
   };
   const controller = createStaffController({
     audit,
+    locks: { async withLocks(_requests, operation) { return operation({ async assertHeld() {} }); } },
     googleCalendar: {
       async validatePickup() {
         return {
@@ -201,7 +239,33 @@ test('rate-limited Calendar sync does not block claim approval', async () => {
       async getPickupFormDefaults() { return {}; },
     },
     items: {
-      async reviewClaim() { return claim; },
+      async findClaimLockTargets(id) { return { claimId: id, itemId: 'item-1', claimantId: 'user-1' }; },
+      async findClaimLockState(id) {
+        return {
+          claim: { id, itemId: 'item-1', claimantId: 'user-1', status: currentStatus },
+          item: {
+            id: 'item-1',
+            itemType: 'found',
+            status: currentStatus === 'approved' ? 'claimed' : 'stored',
+            deleted: false,
+            claimedClaimId: id,
+          },
+        };
+      },
+      async reviewClaim() {
+        currentStatus = 'approved';
+        return { ...claim, status: 'approved' };
+      },
+      async findCalendarClaim(id) {
+        return {
+          ...claim,
+          id,
+          status: 'approved',
+          item_status: 'claimed',
+          item_deleted: false,
+          item_claim_id: id,
+        };
+      },
       async findStaffClaim() { return claim; },
     },
   });

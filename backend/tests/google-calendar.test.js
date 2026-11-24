@@ -62,6 +62,7 @@ function createHarness({
     calendar_event_id: null,
     calendar_sync_status: 'pending',
     item_status: 'claimed',
+    item_claim_id: 'claim-123',
     user_id: 'user-123',
     claimant: { email: 'claimant@example.test' },
     claim_details: 'PRIVATE VERIFICATION DETAILS',

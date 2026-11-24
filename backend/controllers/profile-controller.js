@@ -1,7 +1,7 @@
 
 const { saveSession } = require('../middlewares/session-auth');
 
-function createProfileController({ auth, items }) {
+function createProfileController({ auth, items, locks }) {
   return {
     getProfile: async (req, res) => {
       const user = req.user;
@@ -15,9 +15,16 @@ function createProfileController({ auth, items }) {
 
     patchProfile: async (req, res) => {
       const user = req.user;
-      const updatedUser = await auth.updateProfile(user.id, req.body);
-      req.session.user = updatedUser;
-      await saveSession(req);
+      const updatedUser = await locks.withLocks(
+        [{ key: `account:${user.id}`, mode: 'X' }],
+        async () => {
+          const result = await auth.updateProfile(user.id, req.body);
+          req.session.user = result;
+          await saveSession(req);
+          return result;
+        },
+        { owner: String(user.id) },
+      );
       return res.json({ user: updatedUser });
     },
   };

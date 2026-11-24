@@ -4,6 +4,8 @@ const { createHash, randomBytes } = require('node:crypto');
 const { saveSession } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
 const { buildRateLimitRows } = require('../../src/services/rate-limit-catalog');
+const { stateConflict } = require('../../src/services/state-conflict');
+const { cleanupCalendarForItem } = require('../lib/calendar-locks');
 
 function createAdminController({
   auth,
@@ -22,6 +24,7 @@ function createAdminController({
   audit,
   frontendOrigin,
   rateLimitConfig,
+  locks,
 }) {
   return {
     getAdminDashboard: async (req, res) => {
@@ -86,8 +89,21 @@ function createAdminController({
     },
 
     patchAdminUsersById: async (req, res) => {
+      const preLockTarget = await auth.findAccountLockTarget(req.params.id);
       const action = req.body.action;
+      const requestedRole = action === 'edit'
+        ? String(req.body.role_name || preLockTarget.role_name).trim()
+        : preLockTarget.role_name;
+      const lockRequests = [{ key: `account:${preLockTarget.id}`, mode: 'X' }];
+      if (preLockTarget.role_name === 'admin' || requestedRole === 'admin') {
+        lockRequests.push({ key: 'roster', mode: 'X' });
+      }
+      return locks.withLocks(lockRequests, async () => {
       const oldAccount = await findAccount(auth, req.params.id);
+      if (oldAccount.role_name !== preLockTarget.role_name
+        || oldAccount.status !== preLockTarget.status) {
+        throw stateConflict('This account changed before the action could be completed. Reload and try again.');
+      }
       if (action === 'edit') {
         const targetRole = String(req.body.role_name || oldAccount.role_name).trim();
         if (String(req.user.id) === String(req.params.id)) {
@@ -241,20 +257,11 @@ function createAdminController({
         }
         const status = action === 'disable' ? 'disabled' : 'active';
         if (action === 'disable' && oldAccount.role_name === 'admin') {
-          const core = ['manage_permissions', 'view_users', 'manage_integrations'];
-          const accounts = await auth.findAccountsForStaffAssignment();
-          const remaining = accounts.filter((account) => account.id !== String(req.params.id)
-            && account.role_name === 'admin' && account.status === 'active');
-          const qualified = [];
-          for (const account of remaining) {
-            const effective = await rolePermissions.findEffectivePermissions(account.id, 'admin');
-            if (core.every((permission) => effective.includes(permission))) qualified.push(account);
-          }
-          if (!qualified.length) {
-            const error = new Error('This change would leave no active admin with the core permissions.');
-            error.status = 403;
-            throw error;
-          }
+          await assertQualifiedAdminRemains(auth, rolePermissions, {
+            targetId: req.params.id,
+            targetRole: oldAccount.role_name,
+            targetStatus: status,
+          });
         }
         await audit.runAction(requestAuditContext(req, action === 'disable' ? 'user.disable' : 'user.update', {
           target_type: 'user', target_id: req.params.id,
@@ -267,6 +274,7 @@ function createAdminController({
         throw error;
       }
       return res.json({ message: 'User updated.' });
+      }, { owner: String(req.user.id) });
     },
 
     getAdminRolePermissions: async (_req, res) => {
@@ -288,28 +296,42 @@ function createAdminController({
         error.status = 403;
         throw error;
       }
-      const account = await findAccount(auth, req.params.id);
-      const normalized = await rolePermissions.prepareAccountPermissions(account.role_name, req.body);
-      if (account.role_name === 'admin') {
-        const core = ['manage_permissions', 'view_users', 'manage_integrations'];
-        if (core.some((permission) => !normalized.includes(permission))) {
-          const error = new Error('Core Admin permissions cannot be removed.');
-          error.status = 403;
-          throw error;
+      const preLockTarget = await auth.findAccountLockTarget(req.params.id);
+      const lockRequests = [{ key: `account:${preLockTarget.id}`, mode: 'X' }];
+      if (preLockTarget.role_name === 'admin') lockRequests.push({ key: 'roster', mode: 'X' });
+      return locks.withLocks(lockRequests, async () => {
+        const account = await findAccount(auth, req.params.id);
+        if (account.role_name !== preLockTarget.role_name || account.status !== preLockTarget.status) {
+          throw stateConflict('This account changed before the action could be completed. Reload and try again.');
         }
-      }
-      const result = await audit.runAction(requestAuditContext(req, 'account_permissions.update', {
-        target_type: 'user',
-        target_id: req.params.id,
-        old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
-        new_value: { permissions: normalized },
-      }), (session) => rolePermissions.replaceAccountPermissions(
-        req.params.id,
-        account.role_name,
-        normalized,
-        session,
-      ));
-      return res.json(result);
+        const normalized = await rolePermissions.prepareAccountPermissions(account.role_name, req.body);
+        if (account.role_name === 'admin') {
+          const core = ['manage_permissions', 'view_users', 'manage_integrations'];
+          if (core.some((permission) => !normalized.includes(permission))) {
+            const error = new Error('Core Admin permissions cannot be removed.');
+            error.status = 403;
+            throw error;
+          }
+          await assertQualifiedAdminRemains(auth, rolePermissions, {
+            targetId: req.params.id,
+            targetRole: account.role_name,
+            targetStatus: account.status,
+            targetPermissions: normalized,
+          });
+        }
+        const result = await audit.runAction(requestAuditContext(req, 'account_permissions.update', {
+          target_type: 'user',
+          target_id: req.params.id,
+          old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
+          new_value: { permissions: normalized },
+        }), (session) => rolePermissions.replaceAccountPermissions(
+          req.params.id,
+          account.role_name,
+          normalized,
+          session,
+        ));
+        return res.json(result);
+      }, { owner: String(req.user.id) });
     },
 
     resetAdminUserPermissions: async (req, res) => {
@@ -318,35 +340,60 @@ function createAdminController({
         error.status = 403;
         throw error;
       }
-      const account = await findAccount(auth, req.params.id);
-      const result = await audit.runAction(requestAuditContext(req, 'account_permissions.reset', {
-        target_type: 'user',
-        target_id: req.params.id,
-        old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
-        new_value: { permissions: await rolePermissions.findRolePermissions(account.role_name) },
-      }), (session) => rolePermissions.resetAccountPermissions(
-        req.params.id,
-        account.role_name,
-        session,
-      ));
-      return res.json(result);
+      const preLockTarget = await auth.findAccountLockTarget(req.params.id);
+      const lockRequests = [{ key: `account:${preLockTarget.id}`, mode: 'X' }];
+      if (preLockTarget.role_name === 'admin') lockRequests.push({ key: 'roster', mode: 'X' });
+      return locks.withLocks(lockRequests, async () => {
+        const account = await findAccount(auth, req.params.id);
+        if (account.role_name !== preLockTarget.role_name || account.status !== preLockTarget.status) {
+          throw stateConflict('This account changed before the action could be completed. Reload and try again.');
+        }
+        if (account.role_name === 'admin') {
+          await assertQualifiedAdminRemains(auth, rolePermissions, {
+            targetId: req.params.id,
+            targetRole: account.role_name,
+            targetStatus: account.status,
+            targetPermissions: await rolePermissions.findRolePermissions(account.role_name),
+          });
+        }
+        const result = await audit.runAction(requestAuditContext(req, 'account_permissions.reset', {
+          target_type: 'user',
+          target_id: req.params.id,
+          old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
+          new_value: { permissions: await rolePermissions.findRolePermissions(account.role_name) },
+        }), (session) => rolePermissions.resetAccountPermissions(
+          req.params.id,
+          account.role_name,
+          session,
+        ));
+        return res.json(result);
+      }, { owner: String(req.user.id) });
     },
 
     putAdminRolePermissions: async (req, res) => {
       const role = req.params.role;
-      const newPermissions = rolePermissions.preparePermissions(role, req.body);
-      const oldPermissions = await rolePermissions.findRolePermissions(role);
-      if (oldPermissions.length === newPermissions.length
-        && oldPermissions.every((permission, index) => permission === newPermissions[index])) {
-        return res.json({ role, permissions: newPermissions, changed: false });
-      }
-      const result = await audit.runAction(requestAuditContext(req, 'role_permissions.update', {
-        target_type: 'role',
-        target_id: role,
-        old_value: { role, permissions: oldPermissions },
-        new_value: { role, permissions: newPermissions },
-      }), (session) => rolePermissions.replaceRolePermissions(role, newPermissions, session));
-      return res.json(result);
+      const lockRequests = [{ key: `role:${role}`, mode: 'X' }];
+      if (role === 'admin') lockRequests.push({ key: 'roster', mode: 'X' });
+      return locks.withLocks(lockRequests, async () => {
+        const newPermissions = rolePermissions.preparePermissions(role, req.body);
+        const oldPermissions = await rolePermissions.findRolePermissions(role);
+        if (role === 'admin') {
+          await assertQualifiedAdminRemains(auth, rolePermissions, {
+            roleDefaultPermissions: newPermissions,
+          });
+        }
+        if (oldPermissions.length === newPermissions.length
+          && oldPermissions.every((permission, index) => permission === newPermissions[index])) {
+          return res.json({ role, permissions: newPermissions, changed: false });
+        }
+        const result = await audit.runAction(requestAuditContext(req, 'role_permissions.update', {
+          target_type: 'role',
+          target_id: role,
+          old_value: { role, permissions: oldPermissions },
+          new_value: { role, permissions: newPermissions },
+        }), (session) => rolePermissions.replaceRolePermissions(role, newPermissions, session));
+        return res.json(result);
+      }, { owner: String(req.user.id) });
     },
 
     getAdminItems: async (req, res) => {
@@ -367,35 +414,58 @@ function createAdminController({
     },
 
     patchAdminItemsById: async (req, res) => {
-      const oldItem = await items.findAdminItem(req.params.id);
-      const nextItem = {
-        item_name: String(req.body.item_name || '').trim(),
-        category: String(req.body.category || '').trim(),
-        location: String(req.body.location || '').trim(),
-        date_lost: String(req.body.date_lost || '').trim(),
-      };
-      const changed = changedValues(safeItemEditValues(oldItem), safeItemEditValues(nextItem));
-      await audit.runAction(requestAuditContext(req, 'item.update', {
-        target_type: 'item', target_id: req.params.id,
-        old_value: changed.old_value, new_value: changed.new_value,
-      }), (session) => items.updateAdminItem(req.params.id, req.body, session));
+      await locks.withLocks(
+        [{ key: `item:${req.params.id}`, mode: 'X' }],
+        async () => {
+          const state = await items.findItemLockState(req.params.id);
+          if (state.deleted) throw stateConflict('This item was removed. Reload the record.');
+          const oldItem = await items.findAdminItem(req.params.id);
+          const nextItem = {
+            item_name: String(req.body.item_name || '').trim(),
+            category: String(req.body.category || '').trim(),
+            location: String(req.body.location || '').trim(),
+            date_lost: String(req.body.date_lost || '').trim(),
+          };
+          const changed = changedValues(safeItemEditValues(oldItem), safeItemEditValues(nextItem));
+          await audit.runAction(requestAuditContext(req, 'item.update', {
+            target_type: 'item', target_id: req.params.id,
+            old_value: changed.old_value, new_value: changed.new_value,
+          }), (session) => items.updateAdminItem(req.params.id, req.body, session));
+        },
+        { owner: String(req.user.id) },
+      );
       return res.json({ message: 'Item updated.' });
     },
 
     deleteAdminItemsById: async (req, res) => {
-      const snapshot = await items.findAdminItem(req.params.id);
-      const keyFields = safeItemValues(snapshot);
-      const deletedAt = new Date();
-      await audit.runAction(requestAuditContext(req, 'item.remove', {
-        target_type: 'item', target_id: req.params.id,
-        old_value: keyFields,
-        new_value: { deleted_at: deletedAt.toISOString(), deleted_by: req.user.id },
-      }), (session) => items.softDeleteAdminItem(req.params.id, req.user.id, session, deletedAt));
-      await googleCalendar.cleanupForItem(
-        req.params.id,
-        requestAuditContext(req, null),
-        { notify: true },
+      await locks.withLocks(
+        [{ key: `item:${req.params.id}`, mode: 'X' }],
+        async () => {
+          const state = await items.findItemLockState(req.params.id);
+          if (state.deleted) throw stateConflict('This item was already removed.');
+          if (state.status === 'claimed') {
+            throw stateConflict('An item with an approved claim cannot be removed.');
+          }
+          const snapshot = await items.findAdminItem(req.params.id);
+          const keyFields = safeItemValues(snapshot);
+          const deletedAt = new Date();
+          await audit.runAction(requestAuditContext(req, 'item.remove', {
+            target_type: 'item', target_id: req.params.id,
+            old_value: keyFields,
+            new_value: { deleted_at: deletedAt.toISOString(), deleted_by: req.user.id },
+          }), (session) => items.softDeleteAdminItem(req.params.id, req.user.id, session, deletedAt));
+        },
+        { owner: String(req.user.id) },
       );
+      await cleanupCalendarForItem({
+        items,
+        locks,
+        googleCalendar,
+        itemId: req.params.id,
+        owner: req.user.id,
+        auditContext: requestAuditContext(req, null),
+        notify: true,
+      });
       return res.json({ message: 'Item removed.' });
     },
 
@@ -1127,6 +1197,33 @@ async function findAccount(auth, id) {
     throw error;
   }
   return account;
+}
+
+async function assertQualifiedAdminRemains(auth, rolePermissions, {
+  targetId,
+  targetRole,
+  targetStatus,
+  targetPermissions,
+  roleDefaultPermissions,
+} = {}) {
+  const core = ['manage_permissions', 'view_users', 'manage_integrations'];
+  const accounts = await auth.findAccountsForStaffAssignment();
+  for (const account of accounts) {
+    const isTarget = targetId !== undefined && String(account.id) === String(targetId);
+    const role = isTarget && targetRole !== undefined ? targetRole : account.role_name;
+    const status = isTarget && targetStatus !== undefined ? targetStatus : account.status;
+    if (role !== 'admin' || status !== 'active') continue;
+    let effective = isTarget && targetPermissions
+      ? targetPermissions
+      : await rolePermissions.findEffectivePermissions(account.id, 'admin');
+    if (roleDefaultPermissions) {
+      effective = effective.filter((permission) => roleDefaultPermissions.includes(permission));
+    }
+    if (core.every((permission) => effective.includes(permission))) return;
+  }
+  const error = new Error('This change would leave no active admin with the core permissions.');
+  error.status = 403;
+  throw error;
 }
 
 async function rollbackCreatedAccount(auth, rolePermissions, accountId) {

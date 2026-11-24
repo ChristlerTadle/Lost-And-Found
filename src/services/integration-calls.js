@@ -189,7 +189,9 @@ function createIntegrationCaller({
           timedOut = true;
           controller.abort();
           reject(providerFailure('timeout'));
-        }, timeoutMs);
+        }, Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0
+          ? Math.min(options.timeoutMs, timeoutMs)
+          : timeoutMs);
       });
       const result = await Promise.race([operationPromise, timeoutPromise]);
       if (!options.candidateValidation && !options.skipHealth) {

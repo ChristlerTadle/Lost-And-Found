@@ -131,6 +131,23 @@ function createAuthService(database) {
       return users.countDocuments({ role_name: role, status: 'active' });
     },
 
+    async findAccountLockTarget(userId) {
+      const user = await users.findOne(
+        { _id: String(userId) },
+        { projection: { _id: 1, role_name: 1, status: 1 } },
+      );
+      if (!user) {
+        const error = new Error('User account was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return {
+        id: String(user._id),
+        role_name: user.role_name,
+        status: user.status,
+      };
+    },
+
     async findAdminEditableUser(userId) {
       const user = await users.findOne({
         _id: String(userId),

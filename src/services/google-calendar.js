@@ -18,6 +18,8 @@ const CALENDAR_SCOPES = [
 ];
 const FAILURE_AUDIT_WINDOW_MS = 10 * 60 * 1000;
 
+const config = require('../config');
+
 function createGoogleCalendar({
   integrationSettings,
   items,
@@ -130,18 +132,22 @@ function createGoogleCalendar({
     }, auditContext, { candidateValidation: true, purpose: 'admin_check' });
   }
 
-  async function syncApprovedClaim(claim, auditContext = {}) {
+  async function syncApprovedClaim(claim, auditContext = {}, { assertLockHeld = async () => {} } = {}) {
+    const callOptions = calendarLockCallOptions();
     if (!claim.pickup_at || !claim.pickup_location) {
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'skipped', null);
       return { status: 'skipped' };
     }
     const integration = await integrationSettings.getIntegration('google_calendar');
     if (!integration.active) {
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'skipped', claim.calendar_event_id || null);
       return { status: 'skipped' };
     }
 
     const eventId = claim.calendar_event_id || deterministicEventId(claim.id);
+    await assertLockHeld();
     await items.updateClaimCalendarStatus(claim.id, 'pending', eventId);
     let action;
     try {
@@ -194,7 +200,8 @@ function createGoogleCalendar({
           }, { signal });
           return 'calendar.event_update';
         }
-      }, auditContext);
+      }, auditContext, callOptions);
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'synced', eventId);
       await logCalendarEvent(auditContext, action, claim.id, eventId);
       return { status: 'synced', eventId };
@@ -202,6 +209,7 @@ function createGoogleCalendar({
       if (error instanceof IntegrationError || error instanceof UserProviderError) {
         const reason = error instanceof IntegrationError && error.code === 'rate_limited'
           ? 'rate limited' : null;
+        await assertLockHeld();
         await items.updateClaimCalendarStatus(claim.id, 'failed', eventId, reason);
         await logSyncFailure(auditContext, claim.id, eventId, reason);
         return { status: 'failed', ...(reason ? { reason } : {}) };
@@ -210,21 +218,28 @@ function createGoogleCalendar({
     }
   }
 
-  async function cleanupClaim(claim, auditContext = {}, { notify = false } = {}) {
+  async function cleanupClaim(claim, auditContext = {}, {
+    notify = false,
+    assertLockHeld = async () => {},
+  } = {}) {
+    const callOptions = calendarLockCallOptions();
     const eventId = claim.calendar_event_id
       || (claim.pickup_at ? deterministicEventId(claim.id) : null);
     if (!eventId || !claim.pickup_at) {
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'skipped', eventId);
       return { status: 'skipped' };
     }
 
     const integration = await integrationSettings.getIntegration('google_calendar');
     if (!integration.configured || (!integration.enabled && claim.calendar_sync_status === 'skipped')) {
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'skipped', eventId);
       if (notify) await notifyCancellation(claim, auditContext);
       return { status: 'skipped' };
     }
 
+    await assertLockHeld();
     await items.updateClaimCalendarStatus(claim.id, 'pending', eventId);
     try {
       await callIntegration('google_calendar', async ({ signal }) => {
@@ -244,7 +259,8 @@ function createGoogleCalendar({
         } catch (error) {
           if (!isMissingEvent(error)) throw providerError(error);
         }
-      }, auditContext);
+      }, auditContext, callOptions);
+      await assertLockHeld();
       await items.updateClaimCalendarStatus(claim.id, 'skipped', eventId);
       await logCalendarEvent(auditContext, 'calendar.event_delete', claim.id, eventId);
       if (notify) await notifyCancellation(claim, auditContext);
@@ -253,6 +269,7 @@ function createGoogleCalendar({
       if (error instanceof IntegrationError || error instanceof UserProviderError) {
         const reason = error instanceof IntegrationError && error.code === 'rate_limited'
           ? 'rate limited' : null;
+        await assertLockHeld();
         await items.updateClaimCalendarStatus(claim.id, 'failed', eventId, reason);
         await logSyncFailure(auditContext, claim.id, eventId, reason);
         if (notify) await notifyCancellation(claim, auditContext);
@@ -268,12 +285,19 @@ function createGoogleCalendar({
     return cleanupClaim(claim, auditContext, options);
   }
 
-  async function retryClaim(claimId, auditContext = {}) {
+  async function retryClaim(claimId, auditContext = {}, options = {}) {
     const claim = await items.findCalendarClaim(claimId);
-    if (claim.status === 'approved' && claim.item_status === 'claimed' && !claim.item_deleted) {
-      return syncApprovedClaim(claim, auditContext);
+    if (claim.status === 'approved' && claim.item_status === 'claimed'
+      && claim.item_claim_id === claim.id && !claim.item_deleted) {
+      return syncApprovedClaim(claim, auditContext, options);
     }
-    return cleanupClaim(claim, auditContext);
+    return cleanupClaim(claim, auditContext, options);
+  }
+
+  function calendarLockCallOptions() {
+    return {
+      timeoutMs: Math.max(1, Math.min(10_000, config.locking.leaseMs - 1)),
+    };
   }
 
   async function sendApprovalEmail(claim, auditContext = {}) {

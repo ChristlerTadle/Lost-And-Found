@@ -188,7 +188,8 @@ async function start() {
       && req.rateLimitGlobalRollback && !lockCounterRollbackAttempted) {
       await req.rateLimitGlobalRollback();
     }
-    if ((status === 429 || status === 503) && Number.isInteger(error.retryAfter)) {
+    if ((status === 429 || status === 503 || (lockConflict && status === 409))
+      && Number.isInteger(error.retryAfter)) {
       res.set('Retry-After', String(error.retryAfter));
     }
     if (status === 500) console.error(error);
@@ -212,9 +213,15 @@ async function start() {
     const message = uploadError
       ? error.code === 'LIMIT_FILE_SIZE' ? 'The image must be 5 MB or smaller.' : 'The image upload could not be processed.'
       : error.message;
-    return res.status(status).json({
+    const body = {
       error: status === 500 ? 'The API encountered an unexpected error.' : message,
-    });
+    };
+    if (lockConflict) body.code = 'lock_conflict';
+    else if (error.code === 'state_conflict' && status === 409) body.code = 'state_conflict';
+    if ((lockConflict || error.code === 'state_conflict') && Number.isInteger(error.retryAfter)) {
+      body.retryAfter = error.retryAfter;
+    }
+    return res.status(status).json(body);
   });
 
   const server = app.listen(port, () => {

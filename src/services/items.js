@@ -1,5 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { formatPickupDateTime, googleCalendarUrl } = require('./calendar-links');
+const { stateConflict } = require('./state-conflict');
 
 const activeStatuses = ['lost', 'found'];
 const activeFoundItemStatuses = ['found', 'stored'];
@@ -22,6 +23,7 @@ function createItemService(database, notificationService) {
       user_id: String(document.user_id),
       item_status: item?.status || null,
       item_deleted: Boolean(item?.deleted_at),
+      item_claim_id: item?.claimed_claim_id ? String(item.claimed_claim_id) : null,
       claimant: claimant ? { email: claimant.email } : null,
     };
   }
@@ -533,12 +535,15 @@ function createItemService(database, notificationService) {
         error.status = 404;
         throw error;
       }
+      if (item.status === 'claimed') {
+        throw stateConflict('An item with an approved claim cannot be removed.');
+      }
       const result = await items.updateOne(
-        { _id: String(itemId), deleted_at: { $exists: false } },
+        { _id: String(itemId), status: item.status, deleted_at: { $exists: false } },
         { $set: { deleted_at: deletedAt, deleted_by: String(adminId), updated_at: deletedAt.toISOString() } },
         options,
       );
-      if (!result.matchedCount) throw new Error('The item was already removed.');
+      if (!result.matchedCount) throw stateConflict('The item changed before it could be removed.');
       return {
         id: String(item._id),
         item_name: item.item_name,
@@ -565,7 +570,7 @@ function createItemService(database, notificationService) {
         { $set: { status, status_updated_by: staffId, updated_at: now } },
         options,
       );
-      if (!result.matchedCount) throw new Error('The item status changed before your update. Reload and try again.');
+      if (!result.matchedCount) throw stateConflict('The item status changed. Reload the record and try again.');
       await notificationService.create(String(document.user_id), {
         type: 'status',
         title: 'Item status updated',
@@ -611,12 +616,101 @@ function createItemService(database, notificationService) {
       return this.enrichStaffClaim(document, null, session);
     },
 
+    async findClaimLockTargets(claimId) {
+      const claim = await claims.findOne(
+        { _id: String(claimId) },
+        { projection: { _id: 1, item_id: 1, user_id: 1 } },
+      );
+      if (!claim) {
+        const error = new Error('Claim was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return {
+        claimId: String(claim._id),
+        itemId: String(claim.item_id),
+        claimantId: String(claim.user_id),
+      };
+    },
+
+    async findClaimLockState(claimId) {
+      const claim = await claims.findOne({ _id: String(claimId) });
+      if (!claim) {
+        const error = new Error('Claim was not found.');
+        error.status = 404;
+        throw error;
+      }
+      const item = await items.findOne({ _id: String(claim.item_id) });
+      return {
+        claim: {
+          id: String(claim._id),
+          itemId: String(claim.item_id),
+          claimantId: String(claim.user_id),
+          status: claim.status,
+          pickupAt: claim.pickup_at || null,
+        },
+        item: item ? {
+          id: String(item._id),
+          itemType: item.item_type,
+          status: item.status,
+          deleted: Object.hasOwn(item, 'deleted_at'),
+          claimedClaimId: item.claimed_claim_id ? String(item.claimed_claim_id) : null,
+          claimedBy: item.claimed_by ? String(item.claimed_by) : null,
+        } : null,
+      };
+    },
+
+    async findItemLockState(itemId) {
+      const item = await items.findOne(
+        { _id: String(itemId) },
+        { projection: { _id: 1, user_id: 1, item_type: 1, status: 1, deleted_at: 1 } },
+      );
+      if (!item) {
+        const error = new Error('Item record was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return {
+        id: String(item._id),
+        userId: String(item.user_id),
+        itemType: item.item_type,
+        status: item.status,
+        deleted: Object.hasOwn(item, 'deleted_at'),
+      };
+    },
+
+    async findReportLockState(userId, itemId) {
+      const item = await items.findOne(
+        { _id: String(itemId), user_id: String(userId) },
+        { projection: { _id: 1, item_type: 1, status: 1, deleted_at: 1 } },
+      );
+      if (!item) {
+        const error = new Error('Report was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return {
+        id: String(item._id),
+        itemType: item.item_type,
+        status: item.status,
+        deleted: Object.hasOwn(item, 'deleted_at'),
+      };
+    },
+
     async reviewClaim(claimId, staffId, decision, session = undefined, pickup = null) {
       const options = session ? { session } : undefined;
       if (!['approved', 'rejected'].includes(decision)) throw new Error('Choose approve or reject for this claim.');
       const now = new Date().toISOString();
       const pendingClaim = await claims.findOne({ _id: claimId, status: 'pending' }, options);
-      if (!pendingClaim) throw new Error('Only pending claims can be reviewed.');
+      if (!pendingClaim) {
+        const currentClaim = await claims.findOne({ _id: claimId }, {
+          projection: { status: 1 },
+          ...(session ? { session } : {}),
+        });
+        throw stateConflict(currentClaim?.status === 'approved'
+          ? 'This claim was already approved.'
+          : 'This claim is no longer pending review.');
+      }
       let otherPendingClaims = [];
       let previousItemStatus = null;
       if (decision === 'approved') {
@@ -629,10 +723,15 @@ function createItemService(database, notificationService) {
           status: { $in: claimableItemStatuses },
           deleted_at: { $exists: false },
         }, options);
-        if (!availableItem) throw new Error('This item is no longer available to approve another claim.');
+        if (!availableItem) throw stateConflict('This item is no longer available to approve another claim.');
         previousItemStatus = availableItem.status;
         const result = await items.updateOne(
-          { _id: pendingClaim.item_id, item_type: 'found', status: availableItem.status },
+          {
+            _id: pendingClaim.item_id,
+            item_type: 'found',
+            status: availableItem.status,
+            deleted_at: { $exists: false },
+          },
           { $set: {
             status: 'claimed',
             claimed_by: pendingClaim.user_id,
@@ -642,7 +741,7 @@ function createItemService(database, notificationService) {
           } },
           options,
         );
-        if (!result.matchedCount) throw new Error('This item is no longer available to approve another claim.');
+        if (!result.matchedCount) throw stateConflict('This item is no longer available to approve another claim.');
       }
       const claimChanges = {
         status: decision,
@@ -667,13 +766,18 @@ function createItemService(database, notificationService) {
       if (!result.matchedCount) {
         if (decision === 'approved') {
           await items.updateOne(
-            { _id: pendingClaim.item_id, status: 'claimed', claimed_claim_id: pendingClaim._id },
+            {
+              _id: pendingClaim.item_id,
+              status: 'claimed',
+              claimed_claim_id: pendingClaim._id,
+              deleted_at: { $exists: false },
+            },
             { $set: { status: previousItemStatus, updated_at: new Date().toISOString() },
               $unset: { claimed_by: '', claimed_claim_id: '', claimed_at: '' } },
             options,
           );
         }
-        throw new Error('Only pending claims can be reviewed.');
+        throw stateConflict('This claim is no longer pending review.');
       }
       if (decision === 'approved') {
         const otherClaims = await claims.find({
@@ -759,6 +863,23 @@ function createItemService(database, notificationService) {
       return enrichCalendarClaim(document);
     },
 
+    async findCalendarClaimLockTargetsByItem(itemId) {
+      const claim = await claims.findOne(
+        {
+          item_id: String(itemId),
+          status: 'approved',
+          pickup_at: { $exists: true },
+        },
+        { projection: { _id: 1, item_id: 1, user_id: 1 } },
+      );
+      if (!claim) return null;
+      return {
+        claimId: String(claim._id),
+        itemId: String(claim.item_id),
+        claimantId: String(claim.user_id),
+      };
+    },
+
     async findCalendarClaimForUser(userId, claimId) {
       const document = await claims.findOne({
         _id: String(claimId),
@@ -778,13 +899,13 @@ function createItemService(database, notificationService) {
 
     async updateClaimPickup(claimId, pickup) {
       const claim = await claims.findOne({ _id: String(claimId), status: 'approved' });
-      if (!claim) throw new Error('Only an approved claim can be rescheduled.');
+      if (!claim) throw stateConflict('Only an approved claim can be rescheduled.');
       const item = await items.findOne(activeItems({
         _id: claim.item_id,
         status: 'claimed',
         claimed_claim_id: claim._id,
       }));
-      if (!item) throw new Error('This approved claim is not attached to an item awaiting return.');
+      if (!item) throw stateConflict('This approved claim is not attached to an item awaiting return.');
       const result = await claims.updateOne(
         { _id: claim._id, status: 'approved' },
         { $set: {
@@ -797,14 +918,14 @@ function createItemService(database, notificationService) {
         $unset: { calendar_sync_reason: '' },
       },
       );
-      if (!result.matchedCount) throw new Error('The claim changed before its pickup could be updated.');
+      if (!result.matchedCount) throw stateConflict('The claim changed before its pickup could be updated.');
       return this.findCalendarClaim(claimId);
     },
 
     async markItemReturned(claimId, staffId, session = undefined) {
       const options = session ? { session } : undefined;
       const claim = await claims.findOne({ _id: claimId, status: 'approved' }, options);
-      if (!claim) throw new Error('Only an approved claim can be marked as returned.');
+      if (!claim) throw stateConflict('Only an approved claim can be marked as returned.');
       const now = new Date().toISOString();
       const result = await items.updateOne(
         {
@@ -823,7 +944,7 @@ function createItemService(database, notificationService) {
         } },
         options,
       );
-      if (!result.matchedCount) throw new Error('This approved claim is not attached to an item awaiting return.');
+      if (!result.matchedCount) throw stateConflict('This approved claim is not attached to an item awaiting return.');
       const item = await items.findOne(activeItems({ _id: claim.item_id }), options);
       await Promise.all([
         notificationService.create(String(claim.user_id), {
@@ -900,7 +1021,7 @@ function createItemService(database, notificationService) {
         activeItems({ _id: itemId, user_id: userId, status: { $in: activeStatuses } }),
         update,
       );
-      if (!result.matchedCount) throw new Error('Editable report was not found.');
+      if (!result.matchedCount) throw stateConflict('This report is no longer editable. Reload the record.');
       await notificationService.create(userId, {
         type: 'report',
         title: 'Report updated',
@@ -915,7 +1036,7 @@ function createItemService(database, notificationService) {
         activeItems({ _id: itemId, user_id: userId, status: { $in: activeStatuses } }),
         { $set: { status: 'cancelled', updated_at: new Date().toISOString() } },
       );
-      if (!result.matchedCount) throw new Error('Only an active report can be cancelled.');
+      if (!result.matchedCount) throw stateConflict('This report is no longer active. Reload the record.');
       const item = await this.findOne(userId, itemId);
       await notificationService.create(userId, {
         type: 'status',
@@ -938,9 +1059,7 @@ function createItemService(database, notificationService) {
         { $set: { status: 'resolved', updated_at: new Date().toISOString() } },
       );
       if (!result.matchedCount) {
-        const error = new Error('Only your active lost report can be marked resolved.');
-        error.status = 400;
-        throw error;
+        throw stateConflict('Only your active lost report can be marked resolved.');
       }
       const item = await this.findOne(ownerId, reportId);
       await notificationService.create(ownerId, {

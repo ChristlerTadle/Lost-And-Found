@@ -99,14 +99,24 @@ function createApiRouter({ services, frontendOrigin }) {
     items: createItemsController({
       items: services.items,
       googleCalendar: services.googleCalendar,
+      locks: services.locks,
     }),
-    claims: createClaimsController({ items: services.items, googleCalendar: services.googleCalendar }),
-    profile: createProfileController({ auth: services.auth, items: services.items }),
+    claims: createClaimsController({
+      items: services.items,
+      googleCalendar: services.googleCalendar,
+      locks: services.locks,
+    }),
+    profile: createProfileController({
+      auth: services.auth,
+      items: services.items,
+      locks: services.locks,
+    }),
     notifications: createNotificationsController({ notifications: services.notifications }),
     staff: createStaffController({
       items: services.items,
       audit: services.audit,
       googleCalendar: services.googleCalendar,
+      locks: services.locks,
     }),
     admin: createAdminController({
       auth: services.auth,
@@ -125,6 +135,7 @@ function createApiRouter({ services, frontendOrigin }) {
       audit: services.audit,
       frontendOrigin,
       rateLimitConfig: config,
+      locks: services.locks,
     }),
   };
 

@@ -40,6 +40,14 @@ let integrationSaveCount = 0;
 const testSessions = new Map();
 const pendingRoleCodes = new Map();
 const services = {
+  locks: {
+    async withLocks(_requests, operation) {
+      return operation({
+        tokens: {},
+        async assertHeld() {},
+      });
+    },
+  },
   auth: {
     async login(email) {
       if (email === 'admin@example.test') return admin;
@@ -82,6 +90,15 @@ const services = {
     },
     async countActiveAccountsByRole(role) {
       return [...accounts.values()].filter((account) => account.role_name === role && account.status === 'active').length;
+    },
+    async findAccountLockTarget(id) {
+      const account = accounts.get(String(id));
+      if (!account) {
+        const error = new Error('User account was not found.');
+        error.status = 404;
+        throw error;
+      }
+      return { id: account.id, role_name: account.role_name, status: account.status };
     },
     async updateProfile(id, input) {
       assert.equal(id, user.id);

@@ -1,8 +1,12 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
 const { MongoClient } = require('mongodb');
+const appConfig = require('../../src/config');
+const { assertDedicatedLockTestDatabase } = require('./helpers/lock-test-database');
 const {
   LockConflictError,
   LockServiceUnavailableError,
@@ -12,10 +16,7 @@ const {
 const mongoUri = process.env.MONGODB_TEST_URI;
 const databaseName = process.env.MONGODB_TEST_DATABASE;
 const testDatabaseConfigured = Boolean(mongoUri && databaseName);
-if (testDatabaseConfigured
-  && (databaseName === 'lost_and_found' || !/(^|[-_])test($|[-_])/i.test(databaseName))) {
-  throw new Error('MONGODB_TEST_DATABASE must be a dedicated database name containing "test".');
-}
+if (testDatabaseConfigured) assertDedicatedLockTestDatabase(databaseName, appConfig.mongodbDatabase);
 if (Boolean(mongoUri) !== Boolean(databaseName)) {
   throw new Error('Set both MONGODB_TEST_URI and MONGODB_TEST_DATABASE to run lock tests.');
 }
@@ -384,6 +385,17 @@ test('lock environment settings reject invalid values at startup', () => {
     stdio: 'ignore',
   });
   assert.notEqual(invalidBackoff.status, 0);
+});
+
+test('lock tests require a separate database and the example keeps test connection values blank', () => {
+  const example = fs.readFileSync(path.resolve(__dirname, '..', '..', '.env.example'), 'utf8');
+  assert.match(example, /^MONGODB_TEST_URI=\s*$/m);
+  assert.match(example, /^MONGODB_TEST_DATABASE=\s*$/m);
+
+  assert.throws(
+    () => assertDedicatedLockTestDatabase(appConfig.mongodbDatabase, appConfig.mongodbDatabase),
+    /dedicated database name/,
+  );
 });
 
 function delay(milliseconds) {

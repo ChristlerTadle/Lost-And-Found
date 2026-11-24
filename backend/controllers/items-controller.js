@@ -2,8 +2,10 @@ const path = require('node:path');
 const { saveItemImage } = require('../lib/save-item-image');
 const { optionalUser } = require('../middlewares/session-auth');
 const { requestAuditContext } = require('../../src/services/audit-log');
+const { stateConflict } = require('../../src/services/state-conflict');
+const { cleanupCalendarForItem } = require('../lib/calendar-locks');
 
-function createItemsController({ items, googleCalendar }) {
+function createItemsController({ items, googleCalendar, locks }) {
   return {
     getItems: async (req, res) => {
         const user = await optionalUser(req);
@@ -47,26 +49,64 @@ function createItemsController({ items, googleCalendar }) {
 
     putItemsById: async (req, res) => {
       const user = req.user;
-      const existing = await items.findOne(user.id, req.params.id);
-      if (req.file && existing.item_type !== 'lost') {
-        const error = new Error('Images can only be added to lost reports.');
-        error.status = 400;
-        throw error;
-      }
-      const imagePath = req.file ? await saveItemImage(req.file, 'lost') : null;
-      const item = await items.update(user.id, req.params.id, req.body, imagePath);
+      const item = await locks.withLocks(
+        [{ key: `item:${req.params.id}`, mode: 'X' }],
+        async () => {
+          const current = await items.findReportLockState(user.id, req.params.id);
+          if (current.deleted || !['lost', 'found'].includes(current.status)) {
+            throw stateConflict('This report is no longer editable. Reload the record.');
+          }
+          const existing = await items.findOne(user.id, req.params.id);
+          if (req.file && existing.item_type !== 'lost') {
+            const error = new Error('Images can only be added to lost reports.');
+            error.status = 400;
+            throw error;
+          }
+          const imagePath = req.file ? await saveItemImage(req.file, 'lost') : null;
+          return items.update(user.id, req.params.id, req.body, imagePath);
+        },
+        { owner: String(user.id) },
+      );
       return res.json({ item });
     },
 
     deleteItemsById: async (req, res) => {
       const user = req.user;
-      await items.cancel(user.id, req.params.id);
-      await googleCalendar.cleanupForItem(req.params.id, requestAuditContext(req, null), { notify: true });
+      await locks.withLocks(
+        [{ key: `item:${req.params.id}`, mode: 'X' }],
+        async () => {
+          const current = await items.findReportLockState(user.id, req.params.id);
+          if (current.deleted || !['lost', 'found'].includes(current.status)) {
+            throw stateConflict('This report is no longer active. Reload the record.');
+          }
+          await items.cancel(user.id, req.params.id);
+        },
+        { owner: String(user.id) },
+      );
+      await cleanupCalendarForItem({
+        items,
+        locks,
+        googleCalendar,
+        itemId: req.params.id,
+        owner: user.id,
+        auditContext: requestAuditContext(req, null),
+        notify: true,
+      });
       return res.json({ message: 'Report cancelled.' });
     },
 
     resolveItemsById: async (req, res) => {
-      await items.resolve(req.user.id, req.params.id);
+      await locks.withLocks(
+        [{ key: `item:${req.params.id}`, mode: 'X' }],
+        async () => {
+          const current = await items.findReportLockState(req.user.id, req.params.id);
+          if (current.deleted || current.itemType !== 'lost' || current.status !== 'lost') {
+            throw stateConflict('Only your active lost report can be marked resolved.');
+          }
+          await items.resolve(req.user.id, req.params.id);
+        },
+        { owner: String(req.user.id) },
+      );
       return res.json({ message: 'Lost report marked resolved.' });
     },
   };

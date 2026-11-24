@@ -592,6 +592,7 @@ function validateLockSettings(config) {
       throw new TypeError(`Lock setting ${name} must be a positive safe integer.`);
     }
   }
+  if (settings.leaseMs < 2) throw new TypeError('Lock lease must be at least 2 milliseconds.');
   if (!Number.isSafeInteger(settings.demoHoldMs) || settings.demoHoldMs < 0) {
     throw new TypeError('Lock setting demoHoldMs must be a non-negative safe integer.');
   }

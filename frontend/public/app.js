@@ -197,6 +197,17 @@ async function render() {
   }
 }
 
+document.addEventListener('shared-state-conflict', async (event) => {
+  window.setTimeout(async () => {
+    await render();
+    const recordId = String(event.detail?.recordId || '');
+    const anchor = recordId
+      ? [...app.querySelectorAll('[data-id]')].find((element) => element.dataset.id === recordId)
+      : null;
+    showFormError(event.detail.error, { anchor });
+  }, 0);
+});
+
 async function renderPage(page) {
   const user = sessionInfo.user;
   const privatePages = new Set([
