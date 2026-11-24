@@ -149,6 +149,14 @@ function createAuthService(database) {
       };
     },
 
+    async findLockHolder(userId) {
+      const user = await users.findOne(
+        { _id: String(userId) },
+        { projection: { full_name: 1, role_name: 1 } },
+      );
+      return user ? { full_name: user.full_name, role_name: user.role_name } : null;
+    },
+
     async findAdminEditableUser(userId) {
       const user = await users.findOne({
         _id: String(userId),

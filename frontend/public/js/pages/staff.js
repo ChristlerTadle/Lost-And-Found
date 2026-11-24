@@ -98,7 +98,7 @@ async function staffItemPage(id) {
   return `<main class="container staff-workspace staff-review-page"><header class="page-header"><div><h1>Review ${reportType}</h1>
       <p>Compare the submitted information with the report${item.item_type === 'found' ? ' and physical item' : ''}.</p></div>
       ${staffPageLink('view_records', 'staff-records', 'Back to records')}</header>
-    <section class="card staff-review-card"><div class="staff-review-heading"><div><span class="type-banner ${h(item.item_type)}">${reportType} report</span><h2>${h(item.item_name)}</h2></div>
+    <section class="card staff-review-card" data-edit-session="staff_item" data-edit-session-id="${h(item.id)}"><div class="staff-review-heading"><div><span class="type-banner ${h(item.item_type)}">${reportType} report</span><h2>${h(item.item_name)}</h2></div>
       ${badge(item.status, itemStatusLabel(item.status, item.item_type))}</div>
       ${imageUrl ? `<figure class="staff-review-media"><img class="staff-review-image" alt="${h(item.item_name)}" src="${h(imageUrl)}"><figcaption>Photo provided with the report</figcaption></figure>` : ''}
       <dl class="staff-item-facts">
@@ -151,7 +151,7 @@ async function staffClaimPage(id) {
   const earliestPickupDate = localDateInTimeZone(pickupTimeZone);
   return `<main class="container staff-workspace"><header class="page-header"><div><h1>Verify Item Ownership</h1>
     <p>Compare the claimant’s information with the private details on the item report.</p></div>${buttonLink('staff-claims', 'Back to claims', 'button-secondary')}</header>
-    <section class="card staff-review-card"><div class="staff-review-heading"><div><span class="type-banner found">Recovered item claim</span><h2>${h(claim.item_name)}</h2></div>${badge(claim.status)}</div>
+    <section class="card staff-review-card" data-edit-session="staff_claim" data-edit-session-id="${h(claim.id)}"><div class="staff-review-heading"><div><span class="type-banner found">Recovered item claim</span><h2>${h(claim.item_name)}</h2></div>${badge(claim.status)}</div>
       <div class="staff-claim-comparison"><section class="staff-private-details"><h3>Claimant account information</h3>
         ${claimant ? `<dl class="staff-item-facts"><div><dt>Name</dt><dd>${h(claimant.full_name)}</dd></div><div><dt>Email</dt><dd>${h(claimant.email)}</dd></div>
           <div><dt>Student ID</dt><dd>${h(claimant.student_id || 'Not provided')}</dd></div><div><dt>Phone</dt><dd>${h(claimant.phone || 'Not provided')}</dd></div></dl>` : '<p>The claimant account is unavailable.</p>'}

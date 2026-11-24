@@ -7,11 +7,12 @@ const LOCK_CONFLICT_MESSAGE = 'This record is being processed by someone else. T
 const LOCK_UNAVAILABLE_MESSAGE = 'Locking is temporarily unavailable. Please try again shortly.';
 
 class LockConflictError extends Error {
-  constructor(waitMs, message = LOCK_CONFLICT_MESSAGE, code = 'lock_conflict') {
+  constructor(waitMs, message = LOCK_CONFLICT_MESSAGE, code = 'lock_conflict', key = null) {
     super(message);
     this.name = 'LockConflictError';
     this.status = 409;
     this.code = code;
+    this.key = key;
     this.retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
   }
 }
@@ -145,8 +146,8 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     throw new LockServiceUnavailableError();
   }
 
-  async function acquireAtomic(key, mode, owner, requestId, token) {
-    const outcome = acquisitionOutcome(mode, owner, requestId, token, settings.leaseMs);
+  async function acquireAtomic(key, mode, owner, requestId, token, leaseMs) {
+    const outcome = acquisitionOutcome(mode, owner, requestId, token, leaseMs);
     const pipeline = [
       { $set: { key: { $literal: key }, _lockOutcome: outcome } },
       {
@@ -162,7 +163,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     return findOneAndUpdateWithDuplicateRetry(key, pipeline, { upsert: true });
   }
 
-  async function acquireInContext(key, mode, owner, context, waitMs) {
+  async function acquireInContext(key, mode, owner, context, waitMs, leaseMs = settings.leaseMs) {
     parseLockKey(key);
     const normalizedMode = normalizeMode(mode);
     const ownerId = normalizeOwner(owner);
@@ -174,7 +175,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     let conflictAudited = false;
 
     while (true) {
-      const document = await acquireAtomic(key, normalizedMode, ownerId, context.requestId, token);
+      const document = await acquireAtomic(key, normalizedMode, ownerId, context.requestId, token, leaseMs);
       const acquired = Boolean(document?._lockAcquired
         && document.holders?.some((holder) => holder.token === token
           && holder.requestId === context.requestId));
@@ -183,7 +184,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
           try {
             await auditOnce(context, 'lock.expired_takeover', key, ownerId, 'success');
           } catch (error) {
-            await release(key, token);
+            await release(key, token, ownerId);
             throw error;
           }
         }
@@ -198,7 +199,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         await auditOnce(context, 'lock.timeout', key, ownerId, 'failed');
-        throw new LockConflictError(waitMs);
+        throw new LockConflictError(waitMs, undefined, 'lock_conflict', key);
       }
       const cap = Math.min(settings.retryMaxMs, settings.retryMinMs * (2 ** Math.min(attempts, 20)));
       const delayMs = Math.floor(settings.retryMinMs + random() * Math.max(0, cap - settings.retryMinMs));
@@ -207,7 +208,8 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     }
   }
 
-  async function acquire(key, mode, owner) {
+  async function acquire(key, mode, owner, options = {}) {
+    const leaseMs = normalizeLeaseMs(options.leaseMs, settings.leaseMs);
     const context = {
       requestId: randomUUID(),
       owner: normalizeOwner(owner),
@@ -220,10 +222,41 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
       context.owner,
       context,
       settings.waitMs,
+      leaseMs,
     ));
   }
 
-  async function updateHeld(key, token, operation, expectedMode) {
+  async function inspect(key) {
+    parseLockKey(key);
+    await initialize();
+    try {
+      const [document] = await collection.aggregate([
+        { $match: { _id: key } },
+        {
+          $project: {
+            holders: {
+              $map: {
+                input: liveHoldersExpression(),
+                as: 'holder',
+                in: {
+                  token: '$$holder.token',
+                  owner: '$$holder.owner',
+                  mode: '$$holder.mode',
+                  acquiredAt: '$$holder.acquiredAt',
+                  expiresAt: '$$holder.expiresAt',
+                },
+              },
+            },
+          },
+        },
+      ]).toArray();
+      return document?.holders || [];
+    } catch (error) {
+      throw unavailable(error);
+    }
+  }
+
+  async function updateHeld(key, token, operation, expectedMode, expectedOwner) {
     parseLockKey(key);
     if (typeof token !== 'string' || !token) return false;
     const normalizedExpectedMode = expectedMode === undefined ? undefined : normalizeMode(expectedMode);
@@ -232,6 +265,9 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
       $and: [
         { $eq: ['$$holder.token', { $literal: token }] },
         ...(normalizedExpectedMode ? [{ $eq: ['$$holder.mode', { $literal: normalizedExpectedMode }] }] : []),
+        ...(expectedOwner === undefined
+          ? []
+          : [{ $eq: ['$$holder.owner', { $literal: normalizeOwner(expectedOwner) }] }]),
       ],
     };
     const matching = {
@@ -242,7 +278,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
           $filter: {
             input: holders,
             as: 'holder',
-            cond: { $ne: ['$$holder.token', { $literal: token }] },
+            cond: { $not: [tokenFilter] },
           },
         }
       : {
@@ -252,7 +288,16 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
             in: {
               $cond: [
                 tokenFilter,
-                { $mergeObjects: ['$$holder', { expiresAt: { $add: ['$$NOW', settings.leaseMs] } }] },
+                {
+                  $mergeObjects: [
+                    '$$holder',
+                    {
+                      expiresAt: {
+                        $add: ['$$NOW', { $ifNull: ['$$holder.leaseMs', settings.leaseMs] }],
+                      },
+                    },
+                  ],
+                },
                 '$$holder',
               ],
             },
@@ -277,12 +322,12 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     return Boolean(document?._lockOperationSucceeded);
   }
 
-  async function release(key, token) {
-    return updateHeld(key, token, 'release');
+  async function release(key, token, owner) {
+    return updateHeld(key, token, 'release', undefined, owner);
   }
 
-  async function renew(key, token, expectedMode) {
-    return updateHeld(key, token, 'renew', expectedMode);
+  async function renew(key, token, expectedMode, owner) {
+    return updateHeld(key, token, 'renew', expectedMode, owner);
   }
 
   async function withLocks(requests, fn, options = {}) {
@@ -306,6 +351,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     };
     const ordered = sortLockRequests(requests, settings.maxPerRequest);
     const waitMs = normalizeWaitMs(options.waitMs, settings.waitMs);
+    const leaseMs = normalizeLeaseMs(options.leaseMs, settings.leaseMs);
     const deadline = Date.now() + waitMs;
     const requestedKeys = new Set(ordered.map(({ key }) => key));
     const heldTokens = options.heldTokens || {};
@@ -328,14 +374,15 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
           if (borrowedToken) {
             const existing = context.held.get(request.key);
             if (existing && existing.token !== borrowedToken) {
-              throw new LockConflictError(waitMs);
+              throw new LockConflictError(waitMs, undefined, 'lock_conflict', request.key);
             }
-            if (!await renew(request.key, borrowedToken, request.mode)) {
+            if (!await renew(request.key, borrowedToken, request.mode, context.owner)) {
               await auditOnce(context, 'lock.conflict', request.key, context.owner, 'denied');
               throw new LockConflictError(
                 waitMs,
-                'This record lock is no longer held. Reload and try again.',
+                'This edit lock was lost or expired. Keep your changes and try again.',
                 'lock_lost',
+                request.key,
               );
             }
             context.held.set(request.key, {
@@ -352,13 +399,14 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
           const existing = context.held.get(request.key);
           if (existing) {
             if (existing.owner !== context.owner) throw new TypeError('Nested lock owner does not match the request owner.');
-            const valid = await renew(request.key, existing.token);
+            const valid = await renew(request.key, existing.token, undefined, context.owner);
             if (!valid) {
               await auditOnce(context, 'lock.conflict', request.key, context.owner, 'denied');
               throw new LockConflictError(
                 waitMs,
-                'This record lock is no longer held. Reload and try again.',
+                'This edit lock was lost or expired. Keep your changes and try again.',
                 'lock_lost',
+                request.key,
               );
             }
             if (request.mode === 'X' && existing.mode === 'S') {
@@ -378,6 +426,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
             context.owner,
             context,
             remaining,
+            leaseMs,
           );
           context.held.set(request.key, {
             token,
@@ -395,12 +444,13 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
             const keys = key ? [key] : [...new Set(references)];
             for (const heldKey of keys) {
               const held = context.held.get(heldKey);
-              if (!held || !await renew(heldKey, held.token, held.mode)) {
+              if (!held || !await renew(heldKey, held.token, held.mode, context.owner)) {
                 await auditOnce(context, 'lock.conflict', heldKey, context.owner, 'denied');
                 throw new LockConflictError(
                   waitMs,
-                  'This record lock is no longer held. Reload and try again.',
+                  'This edit lock was lost or expired. Keep your changes and try again.',
                   'lock_lost',
+                  heldKey,
                 );
               }
             }
@@ -442,7 +492,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
           context.held.delete(key);
           if (held.borrowed) continue;
           try {
-            await release(key, held.token);
+            await release(key, held.token, context.owner);
           } catch (error) {
             releaseError = releaseError || error;
           }
@@ -459,6 +509,7 @@ function createLockManager(database, { audit, config = defaultConfig, random = M
     acquire,
     release,
     renew,
+    inspect,
     withLocks,
     initialize,
     sortLockRequests: (requests) => sortLockRequests(requests, settings.maxPerRequest),
@@ -513,6 +564,14 @@ function acquisitionOutcome(mode, owner, requestId, token, leaseMs) {
       ],
     },
     expiresAt: { $add: ['$$NOW', leaseMs] },
+    acquiredAt: {
+      $cond: [
+        { $gt: [{ $size: '$$mine' }, 0] },
+        { $arrayElemAt: ['$$mine.acquiredAt', 0] },
+        '$$NOW',
+      ],
+    },
+    leaseMs: { $literal: leaseMs },
     requestId: { $literal: requestId },
   };
   return {
@@ -616,6 +675,14 @@ function normalizeWaitMs(value, fallback) {
     throw new TypeError('waitMs must be a non-negative safe integer.');
   }
   return waitMs;
+}
+
+function normalizeLeaseMs(value, fallback) {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1000 || value > 10 * 60 * 1000) {
+    throw new TypeError('Lock lease duration must be between 1000 and 600000 milliseconds.');
+  }
+  return value;
 }
 
 function verifyNestedLockOrder(requests, held) {

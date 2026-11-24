@@ -6,6 +6,7 @@ const { requestAuditContext } = require('../../src/services/audit-log');
 const { buildRateLimitRows } = require('../../src/services/rate-limit-catalog');
 const { stateConflict } = require('../../src/services/state-conflict');
 const { cleanupCalendarForItem } = require('../lib/calendar-locks');
+const { heldEditTokens } = require('../lib/held-edit-session');
 
 function createAdminController({
   auth,
@@ -98,7 +99,8 @@ function createAdminController({
       if (preLockTarget.role_name === 'admin' || requestedRole === 'admin') {
         lockRequests.push({ key: 'roster', mode: 'X' });
       }
-      return locks.withLocks(lockRequests, async () => {
+      const heldTokens = heldEditTokens(req, lockRequests, [`account:${preLockTarget.id}`]);
+      return locks.withLocks(lockRequests, async (lease) => {
       const oldAccount = await findAccount(auth, req.params.id);
       if (oldAccount.role_name !== preLockTarget.role_name
         || oldAccount.status !== preLockTarget.status) {
@@ -177,6 +179,7 @@ function createAdminController({
               sessionId: `${req.sessionID}:role-change`,
             });
           }
+          await lease.assertHeld();
           await roleChange.changeRole({
             actorId: req.user.id,
             targetId: req.params.id,
@@ -197,19 +200,25 @@ function createAdminController({
             target_id: req.params.id,
             old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, oldAccount.role_name) },
             new_value: { permissions: normalized },
-          }), (session) => rolePermissions.replaceAccountPermissions(
-            req.params.id,
-            oldAccount.role_name,
-            normalized,
-            session,
-          ));
+          }), async (session) => {
+            await lease.assertHeld();
+            return rolePermissions.replaceAccountPermissions(
+              req.params.id,
+              oldAccount.role_name,
+              normalized,
+              session,
+            );
+          });
         }
         await audit.runAction(requestAuditContext(req, 'user.update', {
           target_type: 'user',
           target_id: req.params.id,
           old_value: changed.old_value,
           new_value: changed.new_value,
-        }), (session) => auth.updateUserByAdmin(req.params.id, req.body, { session }));
+        }), async (session) => {
+          await lease.assertHeld();
+          return auth.updateUserByAdmin(req.params.id, req.body, { session });
+        });
       }
       else if (action === 'assign_staff') {
         if (!req.rolePermissions?.includes('manage_permissions')
@@ -223,6 +232,7 @@ function createAdminController({
           error.status = 403;
           throw error;
         }
+        await lease.assertHeld();
         await roleChange.changeRole({
           actorId: req.user.id,
           targetId: req.params.id,
@@ -242,6 +252,7 @@ function createAdminController({
           error.status = 403;
           throw error;
         }
+        await lease.assertHeld();
         await roleChange.changeRole({
           actorId: req.user.id,
           targetId: req.params.id,
@@ -266,7 +277,10 @@ function createAdminController({
         await audit.runAction(requestAuditContext(req, action === 'disable' ? 'user.disable' : 'user.update', {
           target_type: 'user', target_id: req.params.id,
           old_value: { status: oldAccount.status }, new_value: { status },
-        }), (session) => auth.setUserAccountStatus(req.params.id, status, { session }));
+        }), async (session) => {
+          await lease.assertHeld();
+          return auth.setUserAccountStatus(req.params.id, status, { session });
+        });
       }
       else {
         const error = new Error('Choose a valid user action.');
@@ -274,7 +288,7 @@ function createAdminController({
         throw error;
       }
       return res.json({ message: 'User updated.' });
-      }, { owner: String(req.user.id) });
+      }, { owner: String(req.user.id), heldTokens });
     },
 
     getAdminRolePermissions: async (_req, res) => {
@@ -299,7 +313,8 @@ function createAdminController({
       const preLockTarget = await auth.findAccountLockTarget(req.params.id);
       const lockRequests = [{ key: `account:${preLockTarget.id}`, mode: 'X' }];
       if (preLockTarget.role_name === 'admin') lockRequests.push({ key: 'roster', mode: 'X' });
-      return locks.withLocks(lockRequests, async () => {
+      const heldTokens = heldEditTokens(req, lockRequests, [`account:${preLockTarget.id}`]);
+      return locks.withLocks(lockRequests, async (lease) => {
         const account = await findAccount(auth, req.params.id);
         if (account.role_name !== preLockTarget.role_name || account.status !== preLockTarget.status) {
           throw stateConflict('This account changed before the action could be completed. Reload and try again.');
@@ -324,14 +339,17 @@ function createAdminController({
           target_id: req.params.id,
           old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
           new_value: { permissions: normalized },
-        }), (session) => rolePermissions.replaceAccountPermissions(
-          req.params.id,
-          account.role_name,
-          normalized,
-          session,
-        ));
+        }), async (session) => {
+          await lease.assertHeld();
+          return rolePermissions.replaceAccountPermissions(
+            req.params.id,
+            account.role_name,
+            normalized,
+            session,
+          );
+        });
         return res.json(result);
-      }, { owner: String(req.user.id) });
+      }, { owner: String(req.user.id), heldTokens });
     },
 
     resetAdminUserPermissions: async (req, res) => {
@@ -343,7 +361,8 @@ function createAdminController({
       const preLockTarget = await auth.findAccountLockTarget(req.params.id);
       const lockRequests = [{ key: `account:${preLockTarget.id}`, mode: 'X' }];
       if (preLockTarget.role_name === 'admin') lockRequests.push({ key: 'roster', mode: 'X' });
-      return locks.withLocks(lockRequests, async () => {
+      const heldTokens = heldEditTokens(req, lockRequests, [`account:${preLockTarget.id}`]);
+      return locks.withLocks(lockRequests, async (lease) => {
         const account = await findAccount(auth, req.params.id);
         if (account.role_name !== preLockTarget.role_name || account.status !== preLockTarget.status) {
           throw stateConflict('This account changed before the action could be completed. Reload and try again.');
@@ -361,13 +380,16 @@ function createAdminController({
           target_id: req.params.id,
           old_value: { permissions: await rolePermissions.findEffectivePermissions(req.params.id, account.role_name) },
           new_value: { permissions: await rolePermissions.findRolePermissions(account.role_name) },
-        }), (session) => rolePermissions.resetAccountPermissions(
-          req.params.id,
-          account.role_name,
-          session,
-        ));
+        }), async (session) => {
+          await lease.assertHeld();
+          return rolePermissions.resetAccountPermissions(
+            req.params.id,
+            account.role_name,
+            session,
+          );
+        });
         return res.json(result);
-      }, { owner: String(req.user.id) });
+      }, { owner: String(req.user.id), heldTokens });
     },
 
     putAdminRolePermissions: async (req, res) => {
@@ -414,9 +436,11 @@ function createAdminController({
     },
 
     patchAdminItemsById: async (req, res) => {
+      const requests = [{ key: `item:${req.params.id}`, mode: 'X' }];
+      const heldTokens = heldEditTokens(req, requests, [`item:${req.params.id}`]);
       await locks.withLocks(
-        [{ key: `item:${req.params.id}`, mode: 'X' }],
-        async () => {
+        requests,
+        async (lease) => {
           const state = await items.findItemLockState(req.params.id);
           if (state.deleted) throw stateConflict('This item was removed. Reload the record.');
           const oldItem = await items.findAdminItem(req.params.id);
@@ -430,9 +454,12 @@ function createAdminController({
           await audit.runAction(requestAuditContext(req, 'item.update', {
             target_type: 'item', target_id: req.params.id,
             old_value: changed.old_value, new_value: changed.new_value,
-          }), (session) => items.updateAdminItem(req.params.id, req.body, session));
+          }), async (session) => {
+            await lease.assertHeld(`item:${req.params.id}`);
+            return items.updateAdminItem(req.params.id, req.body, session);
+          });
         },
-        { owner: String(req.user.id) },
+        { owner: String(req.user.id), heldTokens },
       );
       return res.json({ message: 'Item updated.' });
     },

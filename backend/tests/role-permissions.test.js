@@ -11,6 +11,7 @@ const {
 } = require('../config/role-permissions');
 const { createRolePermissionService } = require('../../src/services/role-permissions');
 const { createRoleChangeService } = require('../../src/services/role-change');
+const { createRolePermissionGuard } = require('../middlewares/role-permissions');
 const { createNotificationService } = require('../../src/services/notifications');
 
 function createMemoryCollection(initial = []) {
@@ -168,6 +169,49 @@ test('route permission map has unique method/path entries and records both dynam
   assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, permission }) =>
     method === 'POST' && path === '/admin/settings/verification-email/test'
     && permission === 'manage_integrations'));
+  for (const route of ['/locks/acquire', '/locks/renew', '/locks/release']) {
+    assert.ok(ROLE_PERMISSION_ROUTE_MAP.some(({ method, path, roles }) => (
+      method === 'POST' && path === route && roles.includes('admin') && roles.includes('staff')
+    )));
+  }
+});
+
+test('edit-session permissions match the existing form action permissions', async () => {
+  async function checkPermission(formType, permissions, role = 'staff') {
+    const guard = createRolePermissionGuard({
+      auth: { requireRole() { throw new Error('Unexpected role rejection.'); } },
+      rolePermissions: { async findEffectivePermissions() { return permissions; } },
+      items: {},
+    });
+    const request = {
+      user: { id: 'staff-1', role_name: role },
+      body: { formType },
+      method: 'POST',
+    };
+    let failure;
+    await guard.requirePermission('POST', '/locks/acquire')(request, {}, (error) => {
+      failure = error;
+    });
+    return { failure, request };
+  }
+
+  const viewOnly = await checkPermission('staff_claim', ['view_claims']);
+  assert.equal(viewOnly.failure.status, 403);
+  const claimAction = await checkPermission('staff_claim', ['approve_claim']);
+  assert.equal(claimAction.failure, undefined);
+  assert.deepEqual(claimAction.request.auditRequiredPermission, [
+    'approve_claim', 'reject_claim', 'schedule_pickup', 'mark_item_returned',
+  ]);
+  const itemAction = await checkPermission('staff_item', ['review_lost_report']);
+  assert.equal(itemAction.failure, undefined);
+  assert.deepEqual(itemAction.request.auditRequiredPermission, [
+    'verify_found_item', 'update_item_status', 'mark_item_returned', 'review_lost_report',
+  ]);
+  const adminItem = await checkPermission('admin_item', ['edit_item_records'], 'admin');
+  assert.equal(adminItem.failure, undefined);
+  const adminUser = await checkPermission('admin_user', ['manage_permissions'], 'admin');
+  assert.equal(adminUser.failure, undefined);
+  assert.deepEqual(adminUser.request.auditRequiredPermission, ['edit_user', 'manage_permissions']);
 });
 
 test('admin account status actions require disable_user while edits require edit_user', () => {

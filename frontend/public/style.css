@@ -62,12 +62,26 @@
   border-top: 1px solid #d8e2da;
 }
 .sticky-action-bar-buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.edit-session-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #9bb9a0;
+  border-radius: 0.5rem;
+  background: #f3f8f3;
+  color: #234b2d;
+}
+.edit-session-readonly .edit-session-status { border-color: #d3a13a; background: #fff8e6; color: #664a0a; }
 
 @media screen and (max-width: 480px) {
   .sticky-action-bar { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
   .sticky-action-bar-buttons { align-items: stretch; flex-direction: column; }
   .sticky-action-bar-buttons > * { width: 100%; }
   .sticky-action-bar-buttons .button,
+  .edit-session-status > .button { width: 100%; }
   .sticky-action-bar-buttons .btn,
   .sticky-action-bar-buttons button { min-height: 44px; width: 100%; }
 }

@@ -108,6 +108,18 @@ function resolvePermissionKeys(mapping, req, items) {
 }
 
 const ROLE_PERMISSION_ROUTE_MAP = [
+  {
+    method: 'POST', path: '/locks/acquire', roles: ['admin', 'staff'],
+    permission: (req) => lockFormPermission(req.body?.formType),
+  },
+  {
+    method: 'POST', path: '/locks/renew', roles: ['admin', 'staff'],
+    permission: (req) => lockFormPermission(req.body?.formType),
+  },
+  {
+    method: 'POST', path: '/locks/release', roles: ['admin', 'staff'],
+    permission: (req) => lockFormPermission(req.body?.formType),
+  },
   { method: 'GET', path: '/admin/dashboard', roles: ['admin'], permission: 'view_admin_dashboard' },
   { method: 'GET', path: '/admin/users', roles: ['admin'], permission: 'view_users' },
   {
@@ -242,6 +254,18 @@ const ROLE_PERMISSION_ROUTE_MAP = [
   { method: 'PATCH', path: '/staff/claims/:id/pickup', roles: ['staff'], permission: 'schedule_pickup' },
   { method: 'POST', path: '/staff/claims/:id/calendar-sync', roles: ['staff'], permission: 'schedule_pickup' },
 ];
+
+function lockFormPermission(formType) {
+  if (formType === 'admin_item') return 'edit_item_records';
+  if (formType === 'admin_user') return { anyOf: ['edit_user', 'manage_permissions'] };
+  if (formType === 'staff_item') {
+    return { anyOf: ['verify_found_item', 'update_item_status', 'mark_item_returned', 'review_lost_report'] };
+  }
+  if (formType === 'staff_claim') {
+    return { anyOf: ['approve_claim', 'reject_claim', 'schedule_pickup', 'mark_item_returned'] };
+  }
+  return null;
+}
 
 module.exports = {
   ROLE_PERMISSIONS,

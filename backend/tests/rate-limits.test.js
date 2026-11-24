@@ -385,14 +385,16 @@ test('settings store failures fail closed for writes and open for reads', async 
   assert.equal(await run(service.limitTogether(['settings_overall', 'settings_read'])), null);
 });
 
-test('global API limiter exempts OPTIONS and GET health only', async () => {
+test('global API limiter exempts health, preflight, and lock renewals', async () => {
   const service = createRateLimitService({
     config: {
       global_api: { windowMs: 1000, max: 1, keyType: 'ip', store: 'memory', sensitive: false },
     },
     now: Date.now,
   });
-  const limit = service.limit('global_api');
+  const limit = service.limit('global_api', {
+    skip: (req) => req.method === 'POST' && req.path === '/locks/renew',
+  });
   const run = (method, path) => new Promise((resolve) => {
     const req = { ...requestFor(null), method, path };
     limit(req, responseFor(), (error) => resolve(error || null));
@@ -401,6 +403,8 @@ test('global API limiter exempts OPTIONS and GET health only', async () => {
   assert.equal(await run('OPTIONS', '/items'), null);
   assert.equal(await run('GET', '/health'), null);
   assert.equal(await run('GET', '/api/health'), null);
+  assert.equal(await run('POST', '/locks/renew'), null);
+  assert.equal(await run('POST', '/locks/renew'), null);
   assert.equal(await run('GET', '/items'), null);
   assert.equal((await run('GET', '/items'))?.status, 429);
 });

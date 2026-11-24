@@ -16,10 +16,13 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
       && !mapping.roles.includes(user.role_name)) auth.requireRole(user, mapping.roles);
 
     const configuredPermission = await resolvePermissionKeys(mapping.permission, req, items);
+    const anyOfPermissions = configuredPermission && Array.isArray(configuredPermission.anyOf)
+      ? configuredPermission.anyOf
+      : null;
     const requiredPermissions = Array.isArray(configuredPermission)
       ? configuredPermission
       : typeof configuredPermission === 'string' ? [configuredPermission] : [];
-    if (!requiredPermissions.length) return deny(req, null);
+    if (!requiredPermissions.length && !anyOfPermissions?.length) return deny(req, null);
 
     const enabled = typeof rolePermissions.findEffectivePermissions === 'function'
       ? await rolePermissions.findEffectivePermissions(user.id, user.role_name)
@@ -28,14 +31,18 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
         : await rolePermissions.findRolePermissions(user.role_name);
     req.rolePermissions = enabled;
     const missing = requiredPermissions.find((permission) => !enabled.includes(permission));
-    if (missing) {
-      req.auditRequiredPermission = missing;
+    const missingAnyOf = anyOfPermissions?.length
+      && !anyOfPermissions.some((permission) => enabled.includes(permission));
+    if (missing || missingAnyOf) {
+      req.auditRequiredPermission = missing || anyOfPermissions;
       const error = new Error('This feature is currently disabled by the administrator.');
       error.status = 403;
       throw error;
     }
 
-    req.auditRequiredPermission = requiredPermissions.length === 1 ? requiredPermissions[0] : requiredPermissions;
+    req.auditRequiredPermission = anyOfPermissions
+      ? anyOfPermissions
+      : requiredPermissions.length === 1 ? requiredPermissions[0] : requiredPermissions;
     next();
   });
 

@@ -25,11 +25,14 @@ const { createAdminSettingsRoutes } = require('./admin/settings.routes');
 const { createAdminMfaRoutes } = require('./admin/mfa.routes');
 const { createAdminSystemRecordsRoutes } = require('./admin/system-records.routes');
 const { createAdminRolePermissionsRoutes } = require('./admin/role-permissions.routes');
+const { createLockSessionsController } = require('../controllers/lock-sessions-controller');
+const { createLockRoutes } = require('./locks.routes');
 
 function createApiRouteModules({ services, controllers, guards, frontendOrigin, limit, rateLimits }) {
   return [
     { prefix: '/auth', router: createAuthRoutes({ controllers, frontendOrigin, limit }) },
     { prefix: '', router: createHealthRoutes() },
+    { prefix: '/locks', router: createLockRoutes({ controllers, guards, frontendOrigin, limit }) },
     { prefix: '/admin/mfa', router: createAdminMfaRoutes({ controllers, guards, frontendOrigin, limit }) },
     { prefix: '/items', router: createItemsRoutes({ controllers, guards, frontendOrigin, limit }) },
     { prefix: '/claims', router: createClaimsRoutes({ controllers, guards, limit }) },
@@ -83,6 +86,13 @@ function createApiRouter({ services, frontendOrigin }) {
     denyUnmapped: roleGuard.denyUnmapped,
   };
   const controllers = {
+    locks: createLockSessionsController({
+      locks: services.locks,
+      auth: services.auth,
+      items: services.items,
+      audit: services.audit,
+      leaseMs: services.lockSessionLeaseMs,
+    }),
     auth: createAuthController({
       auth: services.auth,
       rolePermissions: services.rolePermissions,

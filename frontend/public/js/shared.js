@@ -7,6 +7,8 @@ let lastFieldError = null;
 let lastDisplayedMessage = null;
 let memoryFlash = null;
 let messageSequence = 0;
+const editSessionStates = new WeakMap();
+const EDIT_LOCK_LOST_MESSAGE = 'Your editing lock expired. Reload to get the latest version';
 
 const h = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -157,10 +159,12 @@ function normalizeRequestError(response, data, path, authenticated) {
   } else {
     message = 'Something went wrong. Please try again.';
   }
+  if (errorBody.code === 'lock_lost') message = EDIT_LOCK_LOST_MESSAGE;
   const error = new Error(message);
   error.status = response.status;
-  error.code = ['lock_conflict', 'state_conflict'].includes(errorBody.code) ? errorBody.code : '';
+  error.code = ['lock_conflict', 'lock_lost', 'state_conflict'].includes(errorBody.code) ? errorBody.code : '';
   error.retryAfter = retryAfter;
+  error.holder = errorBody.holder || null;
   error.fieldErrors = fieldErrorsFrom(errorBody);
   error.showSignIn = showSignIn;
   return error;
@@ -186,6 +190,7 @@ async function request(path, options = {}) {
   try {
     const fetchOptions = { ...options };
     delete fetchOptions.anchor;
+    delete fetchOptions.silentError;
     response = await fetch(`${API}${path}`, {
       credentials: 'include',
       ...fetchOptions,
@@ -193,7 +198,7 @@ async function request(path, options = {}) {
     });
   } catch {
     const error = normalizeNetworkError();
-    showFormError(error, { anchor });
+    if (!options.silentError) showFormError(error, { anchor });
     throw error;
   }
   const data = response.status === 204 ? {} : await response.json().catch(() => ({}));
@@ -215,7 +220,10 @@ async function request(path, options = {}) {
       document.dispatchEvent(new CustomEvent('shared-state-conflict', {
         detail: { error, recordId },
       }));
-    } else {
+    } else if (error.code === 'lock_lost') {
+      document.dispatchEvent(new CustomEvent('shared-lock-lost', { detail: { error, anchor } }));
+      if (!options.silentError && !findEditSessionContainer(anchor)) showFormError(error, { anchor });
+    } else if (!options.silentError) {
       showFormError(error, { anchor });
     }
     throw error;
@@ -223,6 +231,266 @@ async function request(path, options = {}) {
   const flash = successMessageForRequest(path, method, options.body, data);
   if (flash && !data?.verificationRequired) storeFlash(flash);
   return data;
+}
+
+function findEditSessionContainer(element) {
+  if (!(element instanceof Element)) return null;
+  return element.matches('[data-edit-session]')
+    ? element
+    : element.closest('[data-edit-session]');
+}
+
+function editSessionHeaders(element) {
+  const container = findEditSessionContainer(element);
+  const state = container && editSessionStates.get(container);
+  if (!container) return {};
+  if (!isLiveEditSession(state)) {
+    if (state) markEditSessionLost(container);
+    throw editLockLostError();
+  }
+  return { 'X-Lock-Token': state.token };
+}
+
+function isLiveEditSession(state) {
+  const expiresAt = Date.parse(state?.expiresAt || '');
+  return Boolean(state?.token && !state.lockLost && Number.isFinite(expiresAt) && expiresAt > Date.now());
+}
+
+function editLockLostError() {
+  const error = new Error(EDIT_LOCK_LOST_MESSAGE);
+  error.status = 409;
+  error.code = 'lock_lost';
+  return error;
+}
+
+async function startEditSession(container) {
+  if (!(container instanceof Element)) return;
+  const state = {
+    container,
+    formType: container.dataset.editSession,
+    id: container.dataset.editSessionId || container.dataset.id || '',
+    token: '',
+    expiresAt: null,
+    lockLost: false,
+    readOnly: true,
+    timers: [],
+    controlState: [],
+    statusElement: null,
+    attempting: false,
+  };
+  editSessionStates.set(container, state);
+  setEditSessionReadOnly(state, '', { showStatus: false });
+  await attemptEditSession(state);
+}
+
+async function attemptEditSession(state) {
+  if (!state.container.isConnected || state.attempting) return;
+  state.attempting = true;
+  try {
+    const result = await request('/locks/acquire', {
+      method: 'POST',
+      body: JSON.stringify({ formType: state.formType, id: state.id }),
+      anchor: state.container,
+      silentError: true,
+    });
+    if (!state.container.isConnected) {
+      state.token = result.token;
+      releaseEditSession(state.container, { keepalive: true });
+      return;
+    }
+    state.token = result.token;
+    state.expiresAt = result.expiresAt;
+    state.lockLost = false;
+    setEditSessionEditable(state);
+    updateEditSessionStatus(state);
+    state.timers.forEach(clearInterval);
+    state.timers = [
+      window.setInterval(() => {
+        if (state.token && document.visibilityState === 'visible') void renewEditSession(state);
+      }, 20 * 1000),
+    ];
+    if (state.visibilityHandler) document.removeEventListener('visibilitychange', state.visibilityHandler);
+    state.visibilityHandler = () => {
+      if (state.token && document.visibilityState === 'visible') void renewEditSession(state);
+    };
+    document.addEventListener('visibilitychange', state.visibilityHandler);
+  } catch (error) {
+    state.token = '';
+    if (error.status === 403) {
+      state.timers.forEach(clearInterval);
+      state.timers = [];
+      setEditSessionDenied(state);
+      return;
+    }
+    if (error.status === 409 && error.code === 'lock_conflict') {
+      const holder = error.holder || {};
+      const name = holder.name || 'another staff member';
+      const since = holder.since ? new Date(holder.since).toLocaleString() : 'recently';
+      setEditSessionReadOnly(state, `Being edited by ${name} since ${since}`);
+      state.timers.filter(Boolean).forEach(clearInterval);
+      state.timers = [window.setInterval(() => void attemptEditSession(state), 15 * 1000)];
+    } else {
+      setEditSessionReadOnly(state, error.message);
+      showFormError(error, { anchor: state.container });
+    }
+  } finally {
+    state.attempting = false;
+  }
+}
+
+async function renewEditSession(state) {
+  try {
+    const result = await request('/locks/renew', {
+      method: 'POST',
+      body: JSON.stringify({ formType: state.formType, id: state.id }),
+      headers: { 'X-Lock-Token': state.token },
+      anchor: state.container,
+      silentError: true,
+    });
+    state.expiresAt = result.expiresAt;
+    updateEditSessionStatus(state);
+  } catch {
+    markEditSessionLost(state.container);
+  }
+}
+
+function setEditSessionReadOnly(state, message, { showRetry = true, showStatus = true } = {}) {
+  const { container } = state;
+  if (!container.isConnected) return;
+  if (!state.readOnly) {
+    state.controlState = [...container.querySelectorAll('input, select, textarea, button, form[data-action]')]
+      .map((element) => ({
+        element,
+        disabled: 'disabled' in element ? element.disabled : undefined,
+        hidden: element.hidden,
+      }));
+  } else if (!state.controlState.length) {
+    state.controlState = [...container.querySelectorAll('input, select, textarea, button, form[data-action]')]
+      .map((element) => ({
+        element,
+        disabled: 'disabled' in element ? element.disabled : undefined,
+        hidden: element.hidden,
+      }));
+  }
+  state.readOnly = true;
+  container.classList.add('edit-session-readonly');
+  for (const { element } of state.controlState) {
+    if (!element.isConnected || element.matches('[data-edit-session-retry]')) continue;
+    if ('disabled' in element) element.disabled = true;
+    if (element.matches('form[data-action]')) element.hidden = true;
+    if (element.matches('button[type="submit"]')) element.hidden = true;
+  }
+  if (!showStatus) return;
+  const banner = ensureEditSessionStatus(state);
+  banner.replaceChildren(document.createTextNode(message));
+  if (showRetry) {
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'button button-outline edit-session-retry';
+    retry.dataset.editSessionRetry = '';
+    retry.textContent = 'Try again';
+    retry.addEventListener('click', () => void attemptEditSession(state));
+    banner.append(' ', retry);
+  }
+}
+
+function setEditSessionDenied(state) {
+  state.readOnly = true;
+  state.container.classList.add('edit-session-readonly');
+  if (state.statusElement?.isConnected) state.statusElement.remove();
+  state.statusElement = null;
+}
+
+function setEditSessionEditable(state) {
+  state.readOnly = false;
+  state.container.classList.remove('edit-session-readonly');
+  for (const entry of state.controlState) {
+    if (!entry.element.isConnected) continue;
+    if (entry.disabled !== undefined) entry.element.disabled = entry.disabled;
+    entry.element.hidden = entry.hidden;
+  }
+  updateEditSessionStatus(state);
+}
+
+function ensureEditSessionStatus(state) {
+  if (state.statusElement?.isConnected) return state.statusElement;
+  const banner = document.createElement('div');
+  banner.className = 'edit-session-status';
+  banner.setAttribute('role', 'status');
+  banner.setAttribute('aria-live', 'polite');
+  state.container.prepend(banner);
+  state.statusElement = banner;
+  return banner;
+}
+
+function updateEditSessionStatus(state) {
+  if (!state.expiresAt || !state.container.isConnected) return;
+  const banner = ensureEditSessionStatus(state);
+  banner.replaceChildren(document.createTextNode(
+    `Editing locked until ${new Date(state.expiresAt).toLocaleString()}`,
+  ));
+}
+
+function markEditSessionLost(element) {
+  const container = findEditSessionContainer(element);
+  const state = container && editSessionStates.get(container);
+  if (!state) return;
+  state.lockLost = true;
+  state.token = '';
+  if (state.visibilityHandler) {
+    document.removeEventListener('visibilitychange', state.visibilityHandler);
+    state.visibilityHandler = null;
+  }
+  state.timers.forEach(clearInterval);
+  state.timers = [];
+  setEditSessionReadOnly(state, EDIT_LOCK_LOST_MESSAGE, { showRetry: false });
+}
+
+async function releaseEditSession(element, { keepalive = false } = {}) {
+  const container = findEditSessionContainer(element);
+  const state = container && editSessionStates.get(container);
+  if (!state?.token) return;
+  state.timers.forEach(clearInterval);
+  state.timers = [];
+  if (state.visibilityHandler) {
+    document.removeEventListener('visibilitychange', state.visibilityHandler);
+    state.visibilityHandler = null;
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-CSRF-Token': sessionInfo.csrfToken,
+    'X-Lock-Token': state.token,
+  };
+  const body = JSON.stringify({ formType: state.formType, id: state.id });
+  if (keepalive) {
+    void fetch(`${API}/locks/release`, {
+      method: 'POST',
+      keepalive: true,
+      credentials: 'include',
+      headers,
+      body,
+    }).catch(() => {});
+  } else {
+    try {
+      await request('/locks/release', {
+        method: 'POST',
+        body,
+        headers: { 'X-Lock-Token': state.token },
+        anchor: container,
+        silentError: true,
+      });
+    } catch (error) {
+      showFormError(error, { anchor: container });
+    }
+  }
+  state.token = '';
+  editSessionStates.delete(container);
+}
+
+function releaseEditSessionsOnPageHide() {
+  document.querySelectorAll('[data-edit-session]').forEach((container) => {
+    void releaseEditSession(container, { keepalive: true });
+  });
 }
 
 function actionPayload(body) {
@@ -881,4 +1149,4 @@ function setSessionInfo(value) {
   Object.assign(sessionInfo, value);
 }
 
-export { API, app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, locationOptions, otherLocationValue, otherLocationField, request, icon, roleLabel, hasPermission, itemStatusLabel, itemTypeLabel, frontendHref, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, stickyActionBar, setSessionInfo };
+export { API, app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, locationOptions, otherLocationValue, otherLocationField, request, icon, roleLabel, hasPermission, itemStatusLabel, itemTypeLabel, frontendHref, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, stickyActionBar, setSessionInfo, startEditSession, editSessionHeaders, releaseEditSession, releaseEditSessionsOnPageHide, markEditSessionLost };

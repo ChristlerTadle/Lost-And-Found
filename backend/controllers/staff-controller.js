@@ -3,6 +3,7 @@ const { requestAuditContext } = require('../../src/services/audit-log');
 const { deterministicEventId } = require('../../src/services/calendar-links');
 const { stateConflict } = require('../../src/services/state-conflict');
 const { syncApprovedClaimUnderLock, withCalendarClaimLock } = require('../lib/calendar-locks');
+const { heldEditTokens } = require('../lib/held-edit-session');
 
 function createStaffController({ items, audit, googleCalendar, locks }) {
   return {
@@ -44,9 +45,11 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
     patchStaffItemsByIdStatus: async (req, res) => {
       const user = req.user;
       const status = String(req.body.status || '');
+      const requests = [{ key: `item:${req.params.id}`, mode: 'X' }];
+      const heldTokens = heldEditTokens(req, requests, [`item:${req.params.id}`]);
       await locks.withLocks(
-        [{ key: `item:${req.params.id}`, mode: 'X' }],
-        async () => {
+        requests,
+        async (lease) => {
           const currentItem = await items.findItemLockState(req.params.id);
           if (currentItem.deleted) throw stateConflict('This item was removed. Reload the record.');
           await items.findStaffItem(req.params.id);
@@ -55,27 +58,33 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
             target_id: req.params.id,
             old_value: { status: currentItem.status },
             new_value: { status },
-          }), (session) => items.updateItemStatus(req.params.id, user.id, status, session));
+          }), async (session) => {
+            await lease.assertHeld(`item:${req.params.id}`);
+            return items.updateItemStatus(req.params.id, user.id, status, session);
+          });
         },
-        { owner: String(user.id) },
+        { owner: String(user.id), heldTokens },
       );
       return res.json({ message: 'Item status updated.' });
     },
 
     postStaffItemsByIdVerify: async (req, res) => {
       const user = req.user;
+      const requests = [{ key: `item:${req.params.id}`, mode: 'X' }];
+      const heldTokens = heldEditTokens(req, requests, [`item:${req.params.id}`]);
       await locks.withLocks(
-        [{ key: `item:${req.params.id}`, mode: 'X' }],
-        async () => {
+        requests,
+        async (lease) => {
           const currentItem = await items.findItemLockState(req.params.id);
           if (currentItem.deleted
             || currentItem.itemType !== 'found'
             || !['found', 'stored'].includes(currentItem.status)) {
             throw stateConflict('This item is no longer available for verification.');
           }
+          await lease.assertHeld(`item:${req.params.id}`);
           await items.verifyFoundItem(req.params.id, user.id);
         },
-        { owner: String(user.id) },
+        { owner: String(user.id), heldTokens },
       );
       return res.json({ message: 'Item marked physically verified.' });
     },
@@ -108,7 +117,11 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
         const targets = await items.findClaimLockTargets(req.params.id);
         const requests = claimActionLocks(targets);
         if (pickup) requests.push({ key: slotLockKey(pickup.pickup_at), mode: 'X' });
-        claim = await locks.withLocks(requests, async () => {
+        const heldTokens = heldEditTokens(req, requests, [
+          `item:${targets.itemId}`,
+          `claim:${targets.claimId}`,
+        ]);
+        claim = await locks.withLocks(requests, async (lease) => {
           const state = await items.findClaimLockState(req.params.id);
           verifyClaimLockTargets(state, targets);
           if (state.item.deleted) throw stateConflict('The item was removed and this claim can no longer be reviewed.');
@@ -134,12 +147,16 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
               old_value: { status: state.claim.status },
               new_value: { status: decision, pickup_scheduled: Boolean(pickup) },
             }),
-          ], (session) => items.reviewClaim(req.params.id, user.id, decision, session, pickup));
-        }, { owner: String(user.id) });
+          ], async (session) => {
+            await lease.assertHeld();
+            return items.reviewClaim(req.params.id, user.id, decision, session, pickup);
+          });
+        }, { owner: String(user.id), heldTokens });
         const context = requestAuditContext(req, null);
         if (decision === 'approved' && pickup) {
           await withCalendarClaimLock({
             items, locks, claimId: req.params.id, owner: user.id,
+            heldTokens: heldTokens && { [`claim:${targets.claimId}`]: heldTokens[`claim:${targets.claimId}`] },
             operation: (lease, state) => syncApprovedClaimUnderLock({
               items,
               googleCalendar,
@@ -154,6 +171,7 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
         } else if (decision === 'rejected' && claim.pickup_at) {
           await withCalendarClaimLock({
             items, locks, claimId: req.params.id, owner: user.id,
+            heldTokens: heldTokens && { [`claim:${targets.claimId}`]: heldTokens[`claim:${targets.claimId}`] },
             operation: async (lease) => googleCalendar.cleanupClaim(
               await items.findCalendarClaim(req.params.id),
               context,
@@ -164,7 +182,12 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
         }
       } else if (req.body.action === 'returned') {
         const targets = await items.findClaimLockTargets(req.params.id);
-        claim = await locks.withLocks(claimActionLocks(targets), async () => {
+        const requests = claimActionLocks(targets);
+        const heldTokens = heldEditTokens(req, requests, [
+          `item:${targets.itemId}`,
+          `claim:${targets.claimId}`,
+        ]);
+        claim = await locks.withLocks(requests, async (lease) => {
           const state = await items.findClaimLockState(req.params.id);
           verifyClaimLockTargets(state, targets);
           if (!state.item || state.item.deleted
@@ -178,10 +201,14 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
             target_id: state.item.id,
             old_value: { status: state.item.status },
             new_value: { status: 'returned' },
-          }), (session) => items.markItemReturned(req.params.id, user.id, session));
-        }, { owner: String(user.id) });
+          }), async (session) => {
+            await lease.assertHeld();
+            return items.markItemReturned(req.params.id, user.id, session);
+          });
+        }, { owner: String(user.id), heldTokens });
         await withCalendarClaimLock({
           items, locks, claimId: req.params.id, owner: user.id,
+          heldTokens: heldTokens && { [`claim:${targets.claimId}`]: heldTokens[`claim:${targets.claimId}`] },
           operation: async (lease) => googleCalendar.cleanupClaim(
             await items.findCalendarClaim(req.params.id),
             requestAuditContext(req, null),
@@ -203,7 +230,11 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
       const targets = await items.findClaimLockTargets(req.params.id);
       const requests = claimActionLocks(targets);
       requests.push({ key: slotLockKey(pickup.pickup_at), mode: 'X' });
-      let claim = await locks.withLocks(requests, async () => {
+      const heldTokens = heldEditTokens(req, requests, [
+        `item:${targets.itemId}`,
+        `claim:${targets.claimId}`,
+      ]);
+      let claim = await locks.withLocks(requests, async (lease) => {
         const state = await items.findClaimLockState(req.params.id);
         verifyClaimLockTargets(state, targets);
         if (!state.item || state.item.deleted
@@ -212,11 +243,13 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
           || state.item.claimedClaimId !== state.claim.id) {
           throw stateConflict('This approved claim is no longer attached to an item awaiting return.');
         }
+        await lease.assertHeld();
         return items.updateClaimPickup(req.params.id, pickup);
-      }, { owner: String(req.user.id) });
+      }, { owner: String(req.user.id), heldTokens });
       const context = requestAuditContext(req, null);
       await withCalendarClaimLock({
         items, locks, claimId: req.params.id, owner: req.user.id,
+        heldTokens: heldTokens && { [`claim:${targets.claimId}`]: heldTokens[`claim:${targets.claimId}`] },
         operation: (lease, state) => syncApprovedClaimUnderLock({
           items,
           googleCalendar,
@@ -233,11 +266,20 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
 
     postStaffClaimsByIdCalendarSync: async (req, res) => {
       requireSchedulePermission(req);
+      const targets = await items.findClaimLockTargets(req.params.id);
+      const claimKey = `claim:${targets.claimId}`;
+      const heldTokens = heldEditTokens(
+        req,
+        [{ key: claimKey, mode: 'X' }],
+        [claimKey],
+        [`item:${targets.itemId}`],
+      );
       const result = await withCalendarClaimLock({
         items,
         locks,
         claimId: req.params.id,
         owner: req.user.id,
+        heldTokens: heldTokens && { [claimKey]: heldTokens[claimKey] },
         operation: (lease) => googleCalendar.retryClaim(
           req.params.id,
           requestAuditContext(req, null),

@@ -44,13 +44,24 @@ Open `http://localhost:5173`. The frontend calls the API at `http://localhost:30
 
 Authenticated route limits use the session user ID; reads are per account and writes generally combine account+IP. Public routes use IP, with email added for login and the forgot-password email cap. IPv4-mapped addresses are normalized and IPv6 clients are grouped by /64. `TRUST_PROXY` defaults to `false`; configure a trusted proxy hop count or CIDR list only when the API is behind those proxies. Do not set it to `true`.
 
-The route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global API guard also bypasses `OPTIONS` and `GET /health`. The full live configuration is available in Admin → Settings → **Rate limits** after PIN unlock and permission checks. MongoDB also stores sessions, so an outage already disrupts login.
+The route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global API guard also bypasses `OPTIONS`, `GET /health`, and edit-session renewals. The full live configuration is available in Admin → Settings → **Rate limits** after PIN unlock and permission checks. MongoDB also stores sessions, so an outage already disrupts login.
 
 ## Concurrency control: Locking
 
 Shared-record mutations use pessimistic MongoDB locks. Locks are acquired in the global order `roster → role → integration → account → item → claim → slot`, with IDs sorted within each type. Shared locks coexist only with shared locks; an exclusive lock conflicts with every live lock. Leases expire even if MongoDB's TTL cleanup has not run, and a bounded wait returns a conflict rather than waiting indefinitely. The environment settings and defaults are listed in [REST-SETUP.md](./REST-SETUP.md).
 
 Integration locks cover only the apply phase; provider validation and emailed-code entry happen before acquiring them. Calendar sync retries are separately locked by claim after approval or pickup locks have been released. Password reset and administrator MFA mutations lock the affected account.
+
+Long-form admin and staff pages also use 60-second edit-session locks. The browser acquires them with `POST /api/locks/acquire`, renews while visible, and releases on save, cancel, or page exit; the `X-Lock-Token` is account-bound and never written to audit logs. Competing editors see a read-only page and can retry. Heartbeats use the separate `lock_heartbeat` limit (30 requests per minute per account); renewals bypass the global API counter.
+
+| Edit form | Edit-session locks (exclusive) | Save/action routes borrowing the token |
+|---|---|---|
+| Admin Edit item | `item:<id>` | `PATCH /api/admin/items/:id` |
+| Admin Edit user | `account:<id>`; also `roster` for an admin target | `PATCH /api/admin/users/:id`, `PUT/DELETE /api/admin/users/:id/permissions` |
+| Staff Review item | `item:<id>` | `PATCH /api/staff/items/:id/status`, `POST /api/staff/items/:id/verify` |
+| Staff claim details | `item:<id>`, then `claim:<id>` | Claim review, pickup, returned, and calendar-sync actions |
+
+`POST /api/locks/renew` and `POST /api/locks/release` derive the resources from the form type and record ID; clients cannot choose lock keys. These routes require CSRF and the existing permission for the associated form. A stale or foreign token returns `lock_lost`, leaving the user's entered values in place.
 
 These mutations intentionally remain outside the lock plan:
 

@@ -257,6 +257,8 @@ test('MongoDB lock manager concurrency and lease behavior', {
       const token = await locks.acquire(key, 'X', 'account-a');
       assert.equal(await locks.renew(key, 'not-the-token'), false);
       assert.equal(await locks.release(key, 'not-the-token'), false);
+      assert.equal(await locks.renew(key, token, 'X', 'account-b'), false);
+      assert.equal(await locks.release(key, token, 'account-b'), false);
       assert.equal(await locks.renew(key, token, 'X'), true);
       assert.equal(await locks.release(key, token), true);
     });

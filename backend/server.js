@@ -130,11 +130,13 @@ async function start() {
       res.set('Vary', 'Origin');
     }
     res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Lock-Token');
     if (req.method === 'OPTIONS') return res.sendStatus(origin === frontendOrigin ? 204 : 403);
     return next();
   });
-  app.use('/api', rateLimits.limit('global_api'));
+  app.use('/api', rateLimits.limit('global_api', {
+    skip: (req) => req.method === 'POST' && req.path === '/locks/renew',
+  }));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
   app.use(session({
@@ -159,6 +161,7 @@ async function start() {
   app.use(async (error, req, res, next) => {
     if (res.headersSent) return next(error);
     const lockConflict = error instanceof LockConflictError;
+    const lockLost = error.code === 'lock_lost';
     const uploadError = error instanceof multer.MulterError;
     let status = uploadError ? 400 : Number.isInteger(error.status) ? error.status
       : error instanceof Error && error.constructor === Error ? 400 : 500;
@@ -173,7 +176,7 @@ async function start() {
       }
     }
     let lockCounterRollbackAttempted = false;
-    if (lockConflict && req.rateLimitConflictRollback) {
+    if ((lockConflict || lockLost) && req.rateLimitConflictRollback) {
       lockCounterRollbackAttempted = true;
       try {
         await req.rateLimitConflictRollback();
@@ -188,7 +191,7 @@ async function start() {
       && req.rateLimitGlobalRollback && !lockCounterRollbackAttempted) {
       await req.rateLimitGlobalRollback();
     }
-    if ((status === 429 || status === 503 || (lockConflict && status === 409))
+    if ((status === 429 || status === 503 || ((lockConflict || lockLost) && status === 409))
       && Number.isInteger(error.retryAfter)) {
       res.set('Retry-After', String(error.retryAfter));
     }
@@ -216,9 +219,11 @@ async function start() {
     const body = {
       error: status === 500 ? 'The API encountered an unexpected error.' : message,
     };
-    if (lockConflict) body.code = 'lock_conflict';
+    if (lockConflict) body.code = error.code || 'lock_conflict';
+    else if (lockLost) body.code = 'lock_lost';
     else if (error.code === 'state_conflict' && status === 409) body.code = 'state_conflict';
-    if ((lockConflict || error.code === 'state_conflict') && Number.isInteger(error.retryAfter)) {
+    if (error.lockHolder) body.holder = error.lockHolder;
+    if ((lockConflict || lockLost || error.code === 'state_conflict') && Number.isInteger(error.retryAfter)) {
       body.retryAfter = error.retryAfter;
     }
     return res.status(status).json(body);

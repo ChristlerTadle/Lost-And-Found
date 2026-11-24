@@ -62,7 +62,7 @@ test('admin mutations audit safe values and soft-delete items', async () => {
   };
   const controller = createAdminController({
     audit,
-    locks: { async withLocks(_requests, operation) { return operation(); } },
+    locks: { async withLocks(_requests, operation) { return operation({ async assertHeld() {} }); } },
     auth: {
       async createAdminUser() {
         return { id: 'user-new', full_name: 'New User', email: 'new@example.test', role_name: 'user', status: 'active' };

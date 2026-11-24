@@ -283,7 +283,11 @@ test('business API routes serialize concurrent record changes', {
         request(`/admin/users/${userIds[6]}`, userIds[5], 'PATCH', { action: 'disable' }),
         request(`/admin/users/${userIds[5]}`, userIds[6], 'PATCH', { action: 'disable' }),
       ]);
-      assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 403]);
+      const outcomes = await Promise.all(responses.map(async (response) => ({
+        status: response.status,
+        body: await response.json(),
+      })));
+      assert.deepEqual(outcomes.map(({ status }) => status).sort(), [200, 403]);
       assert.equal(await database.collection('users').countDocuments({
         _id: { $in: [userIds[5], userIds[6]] },
         role_name: 'admin',
@@ -430,17 +434,20 @@ test('business API routes serialize concurrent record changes', {
       }
     });
 
-    await t.test('production API routing authenticates two staff approvals through real middleware', async () => {
+    await t.test('production API routing authenticates two staff approvals through real middleware', async (smokeTest) => {
       const staffUserIds = [`${prefix}-smoke-staff-a`, `${prefix}-smoke-staff-b`];
-      userIds.push(...staffUserIds);
+      const smokeViewOnlyStaffId = `${prefix}-smoke-view-only-staff`;
+      const smokeAdminId = `${prefix}-smoke-admin`;
+      const smokeUserId = `${prefix}-smoke-user`;
+      userIds.push(...staffUserIds, smokeViewOnlyStaffId, smokeAdminId, smokeUserId);
       const passwordHash = await bcrypt.hash('test-password-123', 4);
-      await database.collection('users').insertMany(staffUserIds.map((id) => ({
+      await database.collection('users').insertMany([...staffUserIds, smokeViewOnlyStaffId, smokeAdminId, smokeUserId].map((id) => ({
         _id: id,
         full_name: `Test ${id}`,
         email: `${id}@example.test`,
         student_id: id,
         password_hash: passwordHash,
-        role_name: 'staff',
+        role_name: id === smokeAdminId ? 'admin' : id === smokeUserId ? 'user' : 'staff',
         status: 'active',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -448,9 +455,11 @@ test('business API routes serialize concurrent record changes', {
 
       const smokeRolePermissions = {
         async findEffectivePermissions(_id, role) {
-          return role === 'staff'
-            ? ['approve_claim', 'schedule_pickup', 'update_item_status', 'verify_found_item', 'view_claims']
-            : [];
+          if (role === 'staff') {
+            if (_id === smokeViewOnlyStaffId) return ['view_claims'];
+            return ['approve_claim', 'schedule_pickup', 'update_item_status', 'verify_found_item', 'view_claims'];
+          }
+          return role === 'admin' ? ['view_all_items', 'edit_item_records'] : [];
         },
         async findRolePermissions() { return []; },
       };
@@ -492,11 +501,14 @@ test('business API routes serialize concurrent record changes', {
         googleCalendar,
         email: {},
         callIntegration: {},
+        lockSessionLeaseMs: 3_000,
       };
       const smokeApp = express();
       smokeApp.locals.services = smokeServices;
       smokeApp.disable('x-powered-by');
-      smokeApp.use('/api', smokeRateLimits.limit('global_api'));
+      smokeApp.use('/api', smokeRateLimits.limit('global_api', {
+        skip: (req) => req.method === 'POST' && req.path === '/locks/renew',
+      }));
       smokeApp.use(express.json({ limit: '1mb' }));
       smokeApp.use(session({
         name: 'buksu.api.sid',
@@ -519,6 +531,7 @@ test('business API routes serialize concurrent record changes', {
         return res.status(status).json({
           error: error.message,
           ...(error.code ? { code: error.code } : {}),
+          ...(error.lockHolder ? { holder: error.lockHolder } : {}),
         });
       });
       const smokeServer = await listen(smokeApp);
@@ -533,6 +546,7 @@ test('business API routes serialize concurrent record changes', {
           body: JSON.stringify({ email: `${userId}@example.test`, password: 'test-password-123' }),
         });
         assert.equal(login.status, 200);
+        await login.arrayBuffer();
         const loginCookie = login.headers.get('set-cookie')?.split(';')[0];
         assert.ok(loginCookie);
         const me = await fetch(`${smokeBaseUrl}/auth/me`, {
@@ -562,9 +576,149 @@ test('business API routes serialize concurrent record changes', {
           },
         )));
         assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 409]);
-        const conflict = await responses.find(({ status }) => status === 409).json();
+        const responseBodies = await Promise.all(responses.map((response) => response.json()));
+        const conflict = responseBodies[responses.findIndex(({ status }) => status === 409)];
         assert.equal(conflict.code, 'state_conflict');
+
+        await smokeTest.test('edit-session routes enforce permissions, CSRF, ownership, renewal, and expiry', async () => {
+        const editItemId = await createItem('edit-session-smoke');
+        const lockHeaders = ({ cookie, csrfToken }) => ({
+          Cookie: cookie,
+          Origin: 'http://localhost:5173',
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        });
+        const acquireLock = (identity, id) => fetch(`${smokeBaseUrl}/locks/acquire`, {
+          method: 'POST',
+          headers: lockHeaders(identity),
+          body: JSON.stringify({ formType: 'staff_item', id }),
+        });
+        const firstLockResponse = await acquireLock(sessions[0], editItemId);
+        assert.equal(firstLockResponse.status, 200);
+        const firstLock = await firstLockResponse.json();
+        assert.ok(firstLock.token);
+        assert.ok(firstLock.expiresAt);
+        assert.equal(firstLock.holder.name, `Test ${staffUserIds[0]}`);
+        const userSession = await loginAndGetCsrf(smokeUserId);
+        const deniedUserLock = await acquireLock(userSession, editItemId);
+        assert.equal(deniedUserLock.status, 403);
+        assert.equal('holder' in await deniedUserLock.json(), false);
+
+        const missingCsrf = await fetch(`${smokeBaseUrl}/locks/acquire`, {
+          method: 'POST',
+          headers: { Cookie: sessions[0].cookie, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ formType: 'staff_item', id: editItemId }),
+        });
+        assert.equal(missingCsrf.status, 403);
+
+        const blockedLock = await acquireLock(sessions[1], editItemId);
+        assert.equal(blockedLock.status, 409);
+        const blockedBody = await blockedLock.json();
+        assert.equal(blockedBody.code, 'lock_conflict');
+        assert.equal(blockedBody.holder.name, `Test ${staffUserIds[0]}`);
+
+        const foreignRelease = await fetch(`${smokeBaseUrl}/locks/release`, {
+          method: 'POST',
+          headers: {
+            ...lockHeaders(sessions[1]),
+            'X-Lock-Token': firstLock.token,
+          },
+          body: JSON.stringify({ formType: 'staff_item', id: editItemId }),
+        });
+        assert.equal(foreignRelease.status, 409);
+        assert.equal((await foreignRelease.json()).code, 'lock_lost');
+
+        const borrowedSave = await fetch(`${smokeBaseUrl}/staff/items/${editItemId}/status`, {
+          method: 'PATCH',
+          headers: {
+            ...lockHeaders(sessions[0]),
+            'X-Lock-Token': firstLock.token,
+          },
+          body: JSON.stringify({ status: 'found' }),
+        });
+        assert.equal(borrowedSave.status, 200);
+        const renewedLock = await fetch(`${smokeBaseUrl}/locks/renew`, {
+          method: 'POST',
+          headers: {
+            ...lockHeaders(sessions[0]),
+            'X-Lock-Token': firstLock.token,
+          },
+          body: JSON.stringify({ formType: 'staff_item', id: editItemId }),
+        });
+        assert.equal(renewedLock.status, 200);
+        assert.ok(new Date((await renewedLock.json()).expiresAt) > new Date(firstLock.expiresAt));
+
+        const releaseLock = (identity, id, token, formType = 'staff_item') => fetch(`${smokeBaseUrl}/locks/release`, {
+          method: 'POST',
+          headers: { ...lockHeaders(identity), 'X-Lock-Token': token },
+          body: JSON.stringify({ formType, id }),
+        });
+        assert.equal((await releaseLock(sessions[0], editItemId, firstLock.token)).status, 200);
+        const secondLock = await acquireLock(sessions[1], editItemId);
+        assert.equal(secondLock.status, 200);
+        const secondToken = (await secondLock.json()).token;
+        assert.equal((await releaseLock(sessions[1], editItemId, secondToken)).status, 200);
+
+        const claimItemId = await createItem('claim-edit-session-permission');
+        const claimEditId = await createClaim('claim-edit-session-permission', claimItemId);
+        const viewOnlySession = await loginAndGetCsrf(smokeViewOnlyStaffId);
+        const deniedClaimLock = await fetch(`${smokeBaseUrl}/locks/acquire`, {
+          method: 'POST',
+          headers: lockHeaders(viewOnlySession),
+          body: JSON.stringify({ formType: 'staff_claim', id: claimEditId }),
+        });
+        assert.equal(deniedClaimLock.status, 403);
+        await deniedClaimLock.arrayBuffer();
+        assert.deepEqual(await locks.inspect(`item:${claimItemId}`), []);
+        assert.deepEqual(await locks.inspect(`claim:${claimEditId}`), []);
+        const permittedClaimLock = await fetch(`${smokeBaseUrl}/locks/acquire`, {
+          method: 'POST',
+          headers: lockHeaders(sessions[0]),
+          body: JSON.stringify({ formType: 'staff_claim', id: claimEditId }),
+        });
+        assert.equal(permittedClaimLock.status, 200);
+        const permittedClaimToken = (await permittedClaimLock.json()).token;
+        assert.equal((await releaseLock(sessions[0], claimEditId, permittedClaimToken, 'staff_claim')).status, 200);
+
+        const adminSession = await loginAndGetCsrf(smokeAdminId);
+        const adminLock = await fetch(`${smokeBaseUrl}/locks/acquire`, {
+          method: 'POST',
+          headers: lockHeaders(adminSession),
+          body: JSON.stringify({ formType: 'admin_item', id: editItemId }),
+        });
+        const adminLockData = await adminLock.json();
+        assert.equal(adminLock.status, 200, JSON.stringify(adminLockData));
+        assert.equal(adminLockData.holder.name, `Test ${smokeAdminId}`);
+        assert.equal((await releaseLock(adminSession, editItemId, adminLockData.token, 'admin_item')).status, 200);
+
+        const expiringItemId = await createItem('edit-session-expiry');
+        const expiring = await acquireLock(sessions[0], expiringItemId);
+        assert.equal(expiring.status, 200);
+        await delay(3_100);
+        const takeover = await acquireLock(sessions[1], expiringItemId);
+        assert.equal(takeover.status, 200);
+        const takeoverToken = (await takeover.json()).token;
+        const lostSave = await fetch(`${smokeBaseUrl}/staff/items/${expiringItemId}/status`, {
+          method: 'PATCH',
+          headers: {
+            ...lockHeaders(sessions[0]),
+            'X-Lock-Token': (await expiring.json()).token,
+          },
+          body: JSON.stringify({ status: 'found' }),
+        });
+        assert.equal(lostSave.status, 409);
+        assert.equal((await lostSave.json()).code, 'lock_lost');
+        assert.equal(
+          (await database.collection('lost_items').findOne({ _id: expiringItemId })).status,
+          'stored',
+        );
+        assert.equal((await releaseLock(sessions[1], expiringItemId, takeoverToken)).status, 200);
+        const auditText = JSON.stringify(lockEvents);
+        assert.equal(auditText.includes(firstLock.token), false);
+        assert.equal(lockEvents.some(({ action }) => action === 'rate_limited'), false);
+        });
       } finally {
+        if (typeof smokeServer.closeAllConnections === 'function') smokeServer.closeAllConnections();
         await closeServer(smokeServer);
       }
     });

@@ -20,7 +20,7 @@ async function syncApprovedClaimUnderLock({
   });
 }
 
-async function withCalendarClaimLock({ items, locks, claimId, owner, operation }) {
+async function withCalendarClaimLock({ items, locks, claimId, owner, operation, heldTokens }) {
   const targets = await items.findClaimLockTargets(claimId);
   return locks.withLocks(
     [{ key: `claim:${targets.claimId}`, mode: 'X' }],
@@ -29,7 +29,7 @@ async function withCalendarClaimLock({ items, locks, claimId, owner, operation }
       verifyClaimLockTargets(state, targets);
       return operation(lease, state);
     },
-    { owner: String(owner) },
+    { owner: String(owner), heldTokens },
   );
 }
 

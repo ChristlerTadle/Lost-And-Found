@@ -5,7 +5,7 @@ import { staffDashboard, staffRecords, staffItems, staffReturnedItems, staffItem
 import { adminDashboard, adminUsers, adminEditUser, adminItems, adminEditItem, adminClaims, adminInventory, adminSettings, adminSystemRecords, renderRateLimitTable } from './js/pages/admin.js';
 import { adminMfaVerifyPage, adminSecurityPage } from './js/pages/admin-mfa.js';
 
-const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, otherLocationValue, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo } = shared;
+const { app, sessionInfo, h, date, param, link, buttonLink, badge, field, selectField, optionsFrom, otherLocationValue, request, icon, roleLabel, hasPermission, shell, pageHeader, alert, empty, reportRows, table, statCards, formAction, showFormError, showFormSuccess, showPendingFlash, isRateLimited, setSessionInfo, startEditSession, editSessionHeaders, releaseEditSession, releaseEditSessionsOnPageHide, markEditSessionLost } = shared;
 let pendingIntegrationCard = null;
 let pendingIntegrationRestore = null;
 let integrationCodeResendTimer;
@@ -146,6 +146,10 @@ document.addEventListener('shared-rate-limit-ended', (event) => {
   const form = event.detail?.closest?.('form[data-form="integration-settings"]');
   if (form) updateIntegrationSaveState(form);
 });
+document.addEventListener('shared-lock-lost', (event) => {
+  markEditSessionLost(event.detail?.anchor);
+});
+window.addEventListener('pagehide', releaseEditSessionsOnPageHide);
 
 async function render() {
   pendingIntegrationCard = null;
@@ -351,6 +355,14 @@ function bindForms() {
   app.querySelectorAll('form[data-form="report"], form[data-form="edit-report"], form[data-form="admin-edit-item"]')
     .forEach(bindOtherLocation);
   app.querySelectorAll('form[data-action]').forEach((form) => form.addEventListener('submit', onActionForm));
+  app.querySelectorAll('[data-edit-session]').forEach((container) => void startEditSession(container));
+  app.querySelectorAll('[data-edit-session] a.edit-session-cancel').forEach((anchor) => {
+    anchor.addEventListener('click', async (event) => {
+      event.preventDefault();
+      await releaseEditSession(anchor);
+      location.assign(anchor.href);
+    });
+  });
   app.querySelectorAll('[data-action="logout"]').forEach((button) => button.addEventListener('click', logout));
   app.querySelectorAll('[data-action="read-all"]').forEach((button) => button.addEventListener('click', readAll));
   app.querySelectorAll('[data-action="google-signin"]').forEach((link) => link.addEventListener('click', startGoogleSignIn));
@@ -457,10 +469,14 @@ async function onFormSubmit(event) {
         if (!pendingAdminRoleChange?.form?.isConnected) throw new Error('The pending role change is no longer available.');
         const roleChange = adminEditUserRequest(pendingAdminRoleChange.form);
         const code = String(values.code || '').trim();
-        await request(`/admin/users/${encodeURIComponent(pendingAdminRoleChange.targetId)}`, jsonPatch({
-          ...roleChange.body,
-          role_change_code: code,
-        }));
+        await request(`/admin/users/${encodeURIComponent(pendingAdminRoleChange.targetId)}`, {
+          ...jsonPatch({
+            ...roleChange.body,
+            role_change_code: code,
+          }),
+          headers: editSessionHeaders(pendingAdminRoleChange.form),
+        });
+        await releaseEditSession(pendingAdminRoleChange.form);
         pendingAdminRoleChange = null;
         closeAdminRoleChangeCodeDialog();
         navigate('admin-users');
@@ -535,17 +551,26 @@ async function onFormSubmit(event) {
       }
       case 'claim': await request('/claims', jsonPost(values)); navigate('claims'); return;
       case 'approve-claim':
-        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}`, jsonPatch({
-          action: 'review',
-          decision: 'approved',
-          ...values,
-        }));
+        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}`, {
+          ...jsonPatch({
+            action: 'review',
+            decision: 'approved',
+            ...values,
+          }),
+          headers: editSessionHeaders(form),
+        });
         break;
       case 'reschedule-pickup':
-        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}/pickup`, jsonPatch(values));
+        await request(`/staff/claims/${encodeURIComponent(form.dataset.id)}/pickup`, {
+          ...jsonPatch(values),
+          headers: editSessionHeaders(form),
+        });
         break;
       case 'profile': await request('/profile', jsonPatch(values)); break;
-      case 'staff-status': await request(`/staff/items/${encodeURIComponent(form.dataset.id)}/status`, jsonPatch(values)); break;
+      case 'staff-status': await request(`/staff/items/${encodeURIComponent(form.dataset.id)}/status`, {
+        ...jsonPatch(values),
+        headers: editSessionHeaders(form),
+      }); break;
       case 'admin-add-user': {
         const formData = new FormData(form);
         const permissions = formData.getAll('permissions');
@@ -590,7 +615,10 @@ async function onFormSubmit(event) {
           return;
         }
         if (changedRole || sessionInfo.rolePermissions.includes('edit_user')) {
-          const result = await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, jsonPatch(roleChange.body));
+          const result = await request(`/admin/users/${encodeURIComponent(form.dataset.id)}`, {
+            ...jsonPatch(roleChange.body),
+            headers: editSessionHeaders(form),
+          });
           if (result.verificationRequired) {
             pendingAdminRoleChange = {
               targetId: form.dataset.id,
@@ -605,9 +633,11 @@ async function onFormSubmit(event) {
           await request(`/admin/users/${encodeURIComponent(form.dataset.id)}/permissions`, {
             method: 'PUT',
             body: JSON.stringify({ permissions }),
+            headers: editSessionHeaders(form),
           });
         }
         form.dataset.savedAccountForm = accountFormSnapshot(form);
+        await releaseEditSession(form);
         navigate('admin-users');
         return;
       }
@@ -635,11 +665,27 @@ async function onFormSubmit(event) {
         showNotice('Role permissions saved.');
         return;
       }
-      case 'admin-edit-item': await request(`/admin/items/${encodeURIComponent(form.dataset.id)}`, jsonPatch(values)); navigate('admin-items'); return;
+      case 'admin-edit-item':
+        await request(`/admin/items/${encodeURIComponent(form.dataset.id)}`, {
+          ...jsonPatch(values),
+          headers: editSessionHeaders(form),
+        });
+        await releaseEditSession(form);
+        navigate('admin-items');
+        return;
       default: throw new Error('Unknown form action.');
     }
+    await releaseEditSession(form);
     await render();
   } catch (error) {
+    if (error.code === 'lock_lost') {
+      if (form.dataset.form === 'admin-role-change-code') {
+        const errorElement = form.querySelector('[data-role-change-code-error]');
+        if (errorElement) errorElement.textContent = error.message;
+        if (submit && !isRateLimited(submit)) submit.disabled = false;
+      }
+      return;
+    }
     if (form.dataset.form === 'admin-mfa-verify' && error.status === 401
       && /this sign-in attempt (?:expired|is no longer valid)/i.test(error.message)) {
       navigate('login');
@@ -774,10 +820,22 @@ async function onActionForm(event) {
         await request(`/items/${encodeURIComponent(id)}/resolve`, jsonPost({}));
         break;
       case 'read-notice': await request(`/notifications/${encodeURIComponent(id)}/read`, jsonPatch({})); break;
-      case 'verify-item': await request(`/staff/items/${encodeURIComponent(id)}/verify`, { method: 'POST' }); break;
-      case 'review-claim': await request(`/staff/claims/${encodeURIComponent(id)}`, jsonPatch({ action: 'review', ...values })); break;
-      case 'mark-returned': await request(`/staff/claims/${encodeURIComponent(id)}`, jsonPatch({ action: 'returned' })); break;
-      case 'retry-calendar-sync': await request(`/staff/claims/${encodeURIComponent(id)}/calendar-sync`, jsonPost({})); break;
+      case 'verify-item': await request(`/staff/items/${encodeURIComponent(id)}/verify`, {
+        method: 'POST',
+        headers: editSessionHeaders(form),
+      }); break;
+      case 'review-claim': await request(`/staff/claims/${encodeURIComponent(id)}`, {
+        ...jsonPatch({ action: 'review', ...values }),
+        headers: editSessionHeaders(form),
+      }); break;
+      case 'mark-returned': await request(`/staff/claims/${encodeURIComponent(id)}`, {
+        ...jsonPatch({ action: 'returned' }),
+        headers: editSessionHeaders(form),
+      }); break;
+      case 'retry-calendar-sync': await request(`/staff/claims/${encodeURIComponent(id)}/calendar-sync`, {
+        ...jsonPost({}),
+        headers: editSessionHeaders(form),
+      }); break;
       case 'admin-user': await request(`/admin/users/${encodeURIComponent(id)}`, jsonPatch(values)); break;
       case 'admin-item-remove':
         if (!confirm('Remove this item record? It will be soft-deleted and retained for audit.')) return;
@@ -785,8 +843,10 @@ async function onActionForm(event) {
         break;
       default: throw new Error('Unknown action.');
     }
+    await releaseEditSession(form);
     await render();
   } catch (error) {
+    if (error.code === 'lock_lost') return;
     showNotice(error.message, true);
   }
 }
@@ -2006,10 +2066,15 @@ async function resetAccountPermissions(event) {
   if (form && isFormDirty(form) && !confirm('Discard changes?')) return;
   if (!confirm('Reset this account to its role defaults?')) return;
   try {
-    await request(`/admin/users/${encodeURIComponent(button.dataset.id)}/permissions`, { method: 'DELETE' });
+    await request(`/admin/users/${encodeURIComponent(button.dataset.id)}/permissions`, {
+      method: 'DELETE',
+      headers: editSessionHeaders(form),
+    });
+    await releaseEditSession(form);
     await render();
     showNotice('Account permissions reset to role defaults.');
   } catch (error) {
+    if (error.code === 'lock_lost') return;
     showNotice(error.message, true);
   }
 }

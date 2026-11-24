@@ -157,7 +157,7 @@ Authenticated routes key limits to the session user ID, not a request-supplied i
 
 Additional MongoDB controls include five failed Settings PIN attempts before a 15-minute lockout; emailed-code requests (default 5/hour, configurable with `SU_CODE_REQUEST_LIMIT` and `SU_CODE_REQUEST_WINDOW_SECONDS`), a resend cooldown (default 60 seconds, configurable with `SU_CODE_RESEND_SECONDS`), five code attempts before expiry, 10 failed code-email sends/hour, and three test emails/hour. Admin MFA locks after five failed attempts in its 15-minute window for 15 minutes. The Settings table displays their effective values and whether they come from defaults or environment configuration. Sessions are also stored in MongoDB, so a MongoDB outage already disrupts login.
 
-`TRUST_PROXY` defaults to `false`. Set it only to the actual trusted proxy hop count or comma-separated trusted proxy CIDRs; plain `true` is not accepted. The explicit route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global flood guard also skips `OPTIONS` and `GET /health`.
+`TRUST_PROXY` defaults to `false`. Set it only to the actual trusted proxy hop count or comma-separated trusted proxy CIDRs; plain `true` is not accepted. The explicit route-level exemptions are `GET /health`, `GET /auth/me`, and `POST /auth/logout`. The global flood guard also skips `OPTIONS`, `GET /health`, and `POST /locks/renew`.
 
 ## Concurrency control: Locking
 
@@ -174,6 +174,19 @@ The following operations intentionally do not acquire record locks:
 | Notification read markers | Per-user read state, not shared business-record state. |
 | Session routes, login, and logout | Authentication lifecycle operations. |
 | Forgot-password request | Creates/replaces a one-time reset token; the subsequent password reset is account-locked. |
+
+### Edit-session locks
+
+The admin Edit item, admin Edit user, staff Review item, and staff claim-details pages hold exclusive locks while open. `POST /api/locks/acquire`, `/renew`, and `/release` derive keys from the submitted form type and record ID. Each session lease is 60 seconds; visible pages renew every 20 seconds, and a competing editor may be polled every 15 seconds. The lock manager checks expiry against MongoDB server time, not TTL cleanup. Save actions send the opaque token in `X-Lock-Token`; the server verifies its owner and resource before borrowing it. If an action request has no edit-session token, the server treats it as a direct API action and takes its normal short action lock, so the data remains protected.
+
+| Form | Lock keys and modes | Protected writes |
+|---|---|---|
+| Admin Edit item | `item:<id>` X | `PATCH /admin/items/:id` |
+| Admin Edit user | `account:<id>` X; add `roster` X for an admin target | `PATCH /admin/users/:id`, `PUT/DELETE /admin/users/:id/permissions` |
+| Staff Review item | `item:<id>` X | `PATCH /staff/items/:id/status`, `POST /staff/items/:id/verify` |
+| Staff claim details | `item:<id>` X, then `claim:<id>` X | Claim review, pickup, returned, and calendar-sync actions |
+
+All three lock routes require CSRF and the same existing form permission. Their dedicated `lock_heartbeat` limit is 30 requests per minute per account; renewals are excluded from the global API flood counter. Lock conflicts roll back counters, and heartbeat requests are not written to the audit log. Only lock acquisition and release are audited, using resource names and IDs without tokens. Users never receive another holder's name.
 
 ## API examples
 

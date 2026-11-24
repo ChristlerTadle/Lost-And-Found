@@ -151,7 +151,7 @@ async function adminEditUser(id) {
     return renderPermissionChecklist(entry.role, currentPermissions, accountRole);
   }).join('') : '';
   return `<main class="container admin-dashboard admin-edit-user">${pageHeader('Edit user')}
-    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}" data-current-role="${h(user.role_name)}" data-full-name="${h(user.full_name)}">
+    <form class="card form-grid admin-create-user admin-create-user-form" data-form="admin-edit-user" data-id="${h(id)}" data-edit-session="admin_user" data-edit-session-id="${h(id)}" data-current-role="${h(user.role_name)}" data-full-name="${h(user.full_name)}">
     ${field('Full name', 'full_name', 'text', user.full_name, true, canEditUsers() ? '' : 'readonly')}${field('Email address', 'email', 'email', user.email, false, 'readonly')}
     ${field('Student ID', 'student_id', 'text', user.student_id || '', false, canEditUsers() ? '' : 'readonly')}${field('Phone number', 'phone', 'tel', user.phone || '', false, `inputmode="numeric" pattern="[0-9]*" autocomplete="tel"${canEditUsers() ? '' : ' readonly'}`)}
     <div class="field"><label>Account status</label><p>${h(user.status === 'active' ? 'Active' : 'Disabled')}</p></div>
@@ -167,7 +167,7 @@ async function adminEditUser(id) {
       ${rolePanels}
       <button class="button button-secondary" type="button" data-action="reset-account-permissions" data-id="${h(id)}">Reset to role defaults</button>
     </section>` : '<p class="muted">You do not have permission to manage this account’s permissions.</p>'}
-    <div class="form-actions"><a class="button button-secondary" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save Changes</button></div></form>
+    <div class="form-actions"><a class="button button-secondary edit-session-cancel" href="/?page=admin-users">Cancel</a><button class="button button-primary" type="submit">Save Changes</button></div></form>
     <dialog class="admin-role-change-code-dialog" data-role-change-code-dialog>
       <form class="form-grid" data-form="admin-role-change-code">
         <h2 class="field full">Verify Admin role change</h2>
@@ -284,7 +284,7 @@ async function adminEditItem(id) {
       ${badge(item.item_type, itemTypeLabel(item.item_type))}</header>
     <div class="tip admin-edit-item-notice">Editing the record does not change its owner, item type, or workflow status. If verified found-item details are changed, staff verification will need to be repeated.</div>
     <div class="admin-edit-item-layout${imageUrl ? ' has-image' : ''}">
-    <form class="card form-grid admin-edit-item-form" data-form="admin-edit-item" data-id="${h(id)}">
+    <form class="card form-grid admin-edit-item-form" data-form="admin-edit-item" data-id="${h(id)}" data-edit-session="admin_item" data-edit-session-id="${h(id)}">
       ${field('Item name', 'item_name', 'text', item.item_name, true)}
       ${selectField('Category', 'category', sessionInfo.categories.map((value) => [value, value]), item.category, true)}
       ${selectField('Location', 'location', locationOptions(item.location, 'Choose location', true), item.location, true)}
@@ -293,7 +293,7 @@ async function adminEditItem(id) {
       <div class="field full"><label for="description">Description</label><textarea class="textarea" id="description" name="description" required>${h(item.description)}</textarea></div>
       <div class="field full"><label for="identifying_details">Private identifying details</label><textarea class="textarea" id="identifying_details" name="identifying_details" required>${h(item.identifying_details)}</textarea>
         <p class="admin-edit-item-hint">Only authorized staff can use these details to verify ownership claims.</p></div>
-      <div class="admin-edit-item-actions field full"><a class="button button-secondary" href="/?page=admin-items">Cancel</a>
+      <div class="admin-edit-item-actions field full"><a class="button button-secondary edit-session-cancel" href="/?page=admin-items">Cancel</a>
         <button class="button button-primary" type="submit">Save changes</button></div>
     </form>
     ${imageUrl ? `<figure class="admin-edit-item-media"><img alt="${h(item.item_name)}" src="${h(imageUrl)}"><figcaption>Photo provided with the report</figcaption></figure>` : ''}

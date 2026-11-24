@@ -155,6 +155,13 @@ const rateLimits = {
     store: 'memory',
     sensitive: false,
   },
+  lock_heartbeat: {
+    windowMs: 60 * 1000,
+    max: 30,
+    keyType: 'account',
+    store: 'mongo',
+    sensitive: false,
+  },
   register: {
     windowMs: 60 * 60 * 1000,
     max: 20,
@@ -322,6 +329,7 @@ const rateLimitControls = {
 
 const rateLimitMetadata = {
   global_api: { label: 'API flood guard', module: 'Public and auth', action: 'API requests' },
+  lock_heartbeat: { label: 'Edit-session locks', module: 'Concurrency', action: 'Acquire, renew, or release an edit lock' },
   register: { label: 'Account registration', module: 'Public and auth', action: 'Register' },
   login: { label: 'Login failures', module: 'Public and auth', action: 'Sign in' },
   forgot: { label: 'Forgot password', module: 'Public and auth', action: 'Request a reset' },
