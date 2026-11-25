@@ -60,3 +60,10 @@ Run the API tests with:
 ```powershell
 npm.cmd test
 ```
+
+
+## Project Contributors
+
+This project was developed through teamwork and collaboration.
+
+- IanPatuasic – Contributor
