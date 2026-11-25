@@ -155,3 +155,13 @@ Run the API tests with:
 ```powershell
 npm.cmd test
 ```
+
+
+## Project Contributors
+
+This project was developed through teamwork and collaboration.
+
+- IanPatuasic – Contributor
+- ChristlerTadle - Contributor
+- MichaelRoselim - Contributor
+- Kathleen4696 - Contributor
