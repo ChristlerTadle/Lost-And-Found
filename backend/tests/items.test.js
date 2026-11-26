@@ -165,3 +165,25 @@ test('resolved lost reports are excluded from browse results', async () => {
   const results = await items.search({});
   assert.deepEqual(results.map((item) => item.id), ['active-lost-report']);
 });
+
+test('staff cannot change lost-report status', async () => {
+  const report = {
+    _id: 'lost-report',
+    user_id: 'report-owner',
+    item_type: 'lost',
+    status: 'lost',
+    item_name: 'Wallet',
+  };
+  const service = createItemService({
+    collection(name) {
+      if (name === 'lost_items') return { async findOne() { return report; } };
+      return {};
+    },
+  }, {});
+
+  await assert.rejects(
+    service.updateItemStatus(report._id, 'staff-1', 'found'),
+    /Staff can only update the status of found-item reports/,
+  );
+  assert.equal(report.status, 'lost');
+});

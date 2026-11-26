@@ -557,9 +557,10 @@ function createItemService(database, notificationService) {
       const options = session ? { session } : undefined;
       const document = await items.findOne(activeItems({ _id: itemId }), options);
       if (!document) throw new Error('Item record was not found.');
-      const allowedStatuses = document.item_type === 'found'
-        ? ['found', 'stored']
-        : ['lost', 'found'];
+      if (document.item_type !== 'found') {
+        throw new Error('Staff can only update the status of found-item reports.');
+      }
+      const allowedStatuses = ['found', 'stored'];
       if (!allowedStatuses.includes(status)) throw new Error('Choose a valid status for this item.');
       if (!allowedStatuses.includes(document.status)) {
         throw new Error('Only active item records can have their status updated.');

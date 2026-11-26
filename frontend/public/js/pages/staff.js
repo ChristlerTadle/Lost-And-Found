@@ -80,9 +80,10 @@ async function staffReturnedItems() {
 }
 
 async function staffItemPage(id) {
-  const { item } = await request(`/staff/items/${encodeURIComponent(id)}`);
-  const canUpdate = hasPermission('update_item_status')
-    && (item.status === item.item_type || (item.item_type === 'found' && item.status === 'stored') || (item.item_type === 'lost' && item.status === 'found'));
+  const { item } = await request(`/staff/items/${encodeURIComponent(id)}`, { cache: 'no-store' });
+  const canUpdate = item.item_type === 'found'
+    && hasPermission('update_item_status')
+    && ['found', 'stored'].includes(item.status);
   const imageUrl = item.image_path ? `${API}/staff/items/${encodeURIComponent(item.id)}/image` : '';
   const reportType = item.item_type === 'found' ? 'recovered item' : 'lost item';
   const formatLongDate = (value) => {
@@ -92,9 +93,7 @@ async function staffItemPage(id) {
       ? 'Not available'
       : parsedDate.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
   };
-  const statusOptions = item.item_type === 'found'
-    ? [['found', 'Awaiting handoff'], ['stored', 'In staff custody']]
-    : ['lost', 'found'].map((status) => [status, status === 'lost' ? 'Reported lost' : 'Item recovered']);
+  const statusOptions = [['found', 'Awaiting handoff'], ['stored', 'In staff custody']];
   return `<main class="container staff-workspace staff-review-page"><header class="page-header"><div><h1>Review ${reportType}</h1>
       <p>Compare the submitted information with the report${item.item_type === 'found' ? ' and physical item' : ''}.</p></div>
       ${staffPageLink('view_records', 'staff-records', 'Back to records')}</header>
@@ -114,7 +113,7 @@ async function staffItemPage(id) {
         <section><h3>Private identifying details</h3><p>${h(item.identifying_details)}</p></section>
       </div>
       ${canUpdate ? `<section class="staff-status-editor"><div class="staff-status-copy"><h3>Update item status</h3>
-        <p>${item.item_type === 'found' ? 'Recovered items must be in staff custody before users can submit claims.' : 'Update the report when the item is recovered.'}</p></div>
+        <p>Select a new status, then press Save status to apply it. Recovered items must be in staff custody before users can submit claims.</p></div>
         <form class="staff-status-form" data-form="staff-status" data-id="${h(item.id)}">
           ${selectField('New status', 'status', statusOptions, item.status, true)}
           <button class="button button-primary" type="submit">Save status</button>

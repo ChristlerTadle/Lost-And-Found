@@ -197,6 +197,10 @@ test('staff claim decisions, status changes, and returns are audited without cla
     query: {},
   });
 
+  const itemResponse = response();
+  await controller.getStaffItemsById(staffRequest({}, 'item-1'), itemResponse);
+  assert.equal(itemResponse.headers['Cache-Control'], 'private, no-store');
+
   await controller.patchStaffItemsByIdStatus(staffRequest({ status: 'stored' }, 'item-1'), response());
   await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'approved' }, 'claim-review'), response());
   await controller.patchStaffClaimsById(staffRequest({ action: 'review', decision: 'rejected' }, 'claim-reject'), response());

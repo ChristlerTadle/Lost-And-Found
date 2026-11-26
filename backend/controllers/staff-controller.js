@@ -25,6 +25,7 @@ function createStaffController({ items, audit, googleCalendar, locks }) {
     },
 
     getStaffItemsById: async (req, res) => {
+      res.set('Cache-Control', 'private, no-store');
       return res.json({ item: await items.findStaffItem(req.params.id) });
     },
 
