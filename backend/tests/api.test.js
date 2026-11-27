@@ -482,7 +482,18 @@ app.use((req, _res, next) => {
   });
   next();
 });
-app.use('/api', createApiRouter({ services, frontendOrigin: 'http://localhost:5173' }));
+const testApiRouter = createApiRouter({ services, frontendOrigin: 'http://localhost:5173' });
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api' || req.originalUrl.startsWith('/api/')
+    || req.originalUrl === '/api/v1' || req.originalUrl.startsWith('/api/v1/')) {
+    res.set('X-API-Version', 'v1');
+  }
+  next();
+});
+app.use('/api/v1', testApiRouter);
+app.use('/api', testApiRouter);
+app.use('/api/v1', (_req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
+app.use('/api', (_req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
 app.use((error, req, res, _next) => {
   const status = Number.isInteger(error.status) ? error.status
     : error instanceof Error && error.constructor === Error ? 400 : 500;
@@ -522,7 +533,39 @@ after(async () => {
 test('health endpoint responds with API status', async () => {
   const response = await fetch(`${baseUrl}/health`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { status: 'ok' });
+  assert.equal(response.headers.get('x-api-version'), 'v1');
+  assert.deepEqual(await response.json(), { status: 'ok', version: 'v1' });
+});
+
+test('v1 health and auth endpoints are available with legacy behavior', async () => {
+  const legacyHealth = await fetch(`${baseUrl}/health`);
+  const v1Health = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/health`);
+  assert.equal(legacyHealth.status, 200);
+  assert.equal(v1Health.status, 200);
+  assert.deepEqual(await legacyHealth.json(), { status: 'ok', version: 'v1' });
+  assert.deepEqual(await v1Health.json(), { status: 'ok', version: 'v1' });
+  assert.equal(v1Health.headers.get('x-api-version'), 'v1');
+
+  const legacyAuth = await fetch(`${baseUrl}/auth/me`, {
+    headers: { 'x-test-user': user.id },
+  });
+  const v1Auth = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/me`, {
+    headers: { 'x-test-user': user.id },
+  });
+  assert.equal(legacyAuth.status, 200);
+  assert.equal(v1Auth.status, 200);
+  assert.equal((await legacyAuth.json()).user.id, user.id);
+  assert.equal((await v1Auth.json()).user.id, user.id);
+  assert.equal(v1Auth.headers.get('x-api-version'), 'v1');
+
+  const legacyUnknown = await fetch(`${baseUrl}/definitely-not-a-route`);
+  const v1Unknown = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/definitely-not-a-route`);
+  assert.equal(legacyUnknown.status, 404);
+  assert.equal(v1Unknown.status, 404);
+  const legacyUnknownBody = await legacyUnknown.json();
+  const v1UnknownBody = await v1Unknown.json();
+  assert.deepEqual(legacyUnknownBody, v1UnknownBody);
+  assert.deepEqual(v1UnknownBody, { error: 'API endpoint not found.' });
 });
 
 test('browse endpoint omits private identifying details', async () => {

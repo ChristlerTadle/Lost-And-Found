@@ -48,16 +48,24 @@ function createRolePermissionGuard({ auth, rolePermissions, items }) {
 
   const denyUnmapped = asyncRoute(async (req, _res, next) => {
     req.auditProtectedRoute = true;
-    req.auditRoute = req.originalUrl.split('?')[0].replace(/^\/api/, '') || req.path;
+    const normalizedUrl = req.originalUrl.split('?')[0]
+      .replace(/^\/api\/v1/, '')
+      .replace(/^\/api/, '');
+    req.auditRoute = normalizedUrl || req.path;
     req.auditMethod = req.method;
     req.auditRequiredPermission = null;
     const user = await optionalUser(req);
-    if (!user) {
-      const error = new Error('Sign in is required.');
-      error.status = 401;
-      throw error;
+    if (/^\/(staff|locks|admin|items|claims|profile|notifications|user)(\/|$)/.test(normalizedUrl)) {
+      if (!user) {
+        const error = new Error('Sign in is required.');
+        error.status = 401;
+        throw error;
+      }
+      return deny(req, null);
     }
-    return deny(req, null);
+    const error = new Error('API endpoint not found.');
+    error.status = 404;
+    throw error;
   });
 
   return { requirePermission, denyUnmapped };

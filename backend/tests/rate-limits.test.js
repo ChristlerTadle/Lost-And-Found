@@ -403,6 +403,7 @@ test('global API limiter exempts health, preflight, and lock renewals', async ()
   assert.equal(await run('OPTIONS', '/items'), null);
   assert.equal(await run('GET', '/health'), null);
   assert.equal(await run('GET', '/api/health'), null);
+  assert.equal(await run('GET', '/api/v1/health'), null);
   assert.equal(await run('POST', '/locks/renew'), null);
   assert.equal(await run('POST', '/locks/renew'), null);
   assert.equal(await run('GET', '/items'), null);

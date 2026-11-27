@@ -25,6 +25,7 @@ const { createApiRouter } = require('./routes/api');
 
 const port = Number(process.env.API_PORT || 3001);
 const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const API_VERSION = 'v1';
 
 async function start() {
   if (config.locking.isProduction && config.locking.demoHoldMs > 0) {
@@ -120,6 +121,13 @@ async function start() {
   app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
   app.use((req, res, next) => {
+    if (req.originalUrl === '/api' || req.originalUrl.startsWith('/api/')
+      || req.originalUrl === '/api/v1' || req.originalUrl.startsWith('/api/v1/')) {
+      res.set('X-API-Version', API_VERSION);
+    }
+    next();
+  });
+  app.use((req, res, next) => {
     const origin = req.get('origin');
     if (origin && origin !== frontendOrigin) {
       return res.status(403).json({ error: 'This origin is not allowed to use the API.' });
@@ -134,9 +142,11 @@ async function start() {
     if (req.method === 'OPTIONS') return res.sendStatus(origin === frontendOrigin ? 204 : 403);
     return next();
   });
-  app.use('/api', rateLimits.limit('global_api', {
+  const globalLimit = rateLimits.limit('global_api', {
     skip: (req) => req.method === 'POST' && req.path === '/locks/renew',
-  }));
+  });
+  app.use('/api/v1', globalLimit);
+  app.use('/api', globalLimit);
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
   app.use(session({
@@ -156,7 +166,10 @@ async function start() {
       maxAge: 1000 * 60 * 60 * 24 * 14,
     },
   }));
-  app.use('/api', createApiRouter({ services, frontendOrigin }));
+  const apiRouter = createApiRouter({ services, frontendOrigin });
+  app.use('/api/v1', apiRouter);
+  app.use('/api', apiRouter);
+  app.use('/api/v1', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   app.use(async (error, req, res, next) => {
     if (res.headersSent) return next(error);

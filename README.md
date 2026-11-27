@@ -31,6 +31,10 @@ npm.cmd run start:frontend
 
 Open `http://localhost:5173`. The frontend calls the API at `http://localhost:3001/api` by default. See [REST-SETUP.md](./REST-SETUP.md) for ports, environment settings, and Google OAuth setup.
 
+## API versioning
+
+`/api/v1` is the current API version. The existing `/api` prefix remains available as a legacy alias for compatibility. Existing clients and the unchanged frontend may continue using `/api`; new clients should use `/api/v1`. API responses include `X-API-Version: v1`.
+
 ## Rate limits
 
 | Module | Examples | Counter storage |

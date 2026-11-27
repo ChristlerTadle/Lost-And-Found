@@ -74,7 +74,7 @@ function createMemoryStore(now = Date.now) {
 
 function isHealthRequest(req) {
   const path = req.path || req.url || '';
-  return path === '/health' || path === '/api/health';
+  return path === '/health' || path === '/api/health' || path === '/api/v1/health';
 }
 
 function resultDocument(result) {

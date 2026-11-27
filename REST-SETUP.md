@@ -122,6 +122,10 @@ The application does not write passwords, tokens, session IDs, request bodies, o
 
 If there is no active admin account, create the minimal permission-management admin with `npm.cmd run seed:admin`. Set `ADMIN_EMAIL`, `ADMIN_FULL_NAME`, and `ADMIN_PASSWORD` in the process environment first; the password must be at least 12 characters. The script will not promote an existing non-admin account or replace an existing admin password.
 
+## API versioning
+
+`/api/v1` is the current API version. The existing `/api` prefix remains available as a legacy alias so the unchanged frontend and existing clients continue to work. API responses include `X-API-Version: v1`. The legacy alias may be removed in a future release after clients migrate.
+
 ## Ports and environment
 
 - `FRONTEND_PORT` changes the frontend port (default `5173`).
